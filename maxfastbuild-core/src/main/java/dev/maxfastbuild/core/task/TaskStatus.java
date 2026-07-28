@@ -1,0 +1,6 @@
+package dev.maxfastbuild.core.task;
+
+public enum TaskStatus {
+    VALIDATING, RESERVING, QUEUED, RUNNING, PAUSED_OFFLINE, PAUSED_SHUTDOWN,
+    CANCELLING, COMPLETED, FAILED, REFUND_PENDING, CANCELLED
+}

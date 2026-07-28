@@ -1,0 +1,31 @@
+default-language: en_us
+execution:
+  ticks-per-block: 1
+  blocks-per-step: 1
+  max-region-blocks: 100000
+  max-concurrent-tasks-per-player: 2
+  pause-when-player-offline: true
+rate-limit:
+  requests: 3
+  interval-seconds: 10
+  burst: 1
+inventory:
+  search-shulker-boxes: false
+  # If true, search-shulker-boxes also requires permission maxfastbuild.material.shulker
+  require-shulker-permission: false
+economy:
+  enabled: false
+  per-operation:
+    enabled: false
+    price: 0.0
+  per-area:
+    enabled: false
+    price: 0.0
+  per-block:
+    enabled: false
+    price: 0.0
+coreprotect:
+  required: true
+protocol:
+  session-minutes: 30
+  max-payload-bytes: 16384

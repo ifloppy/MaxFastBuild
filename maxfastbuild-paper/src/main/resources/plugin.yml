@@ -1,0 +1,38 @@
+name: MaxFastBuild
+version: '${version}'
+main: dev.maxfastbuild.paper.MaxFastBuildPlugin
+api-version: '26.2'
+description: Secure server-authoritative mass building
+authors: [MaxFastBuild]
+softdepend: [Vault, CoreProtect]
+commands:
+  mfb:
+    description: MaxFastBuild building commands
+    usage: /mfb <mode|pos1|pos2|apply|cancel|undo|redo|status|language>
+    permission: maxfastbuild.use
+  mfbadmin:
+    description: MaxFastBuild administration
+    usage: /mfbadmin <reload|tasks|task|cancel|resume|ledger|refunds|recovery|limits>
+    permission: maxfastbuild.admin
+permissions:
+  maxfastbuild.use:
+    default: true
+  maxfastbuild.break:
+    default: op
+  maxfastbuild.interact:
+    default: op
+  maxfastbuild.undo:
+    default: true
+  maxfastbuild.redo:
+    default: true
+  maxfastbuild.material.shulker:
+    default: false
+  # Explicit grants only — OP does NOT auto-bypass cost/materials/rate-limit.
+  maxfastbuild.bypass.cost:
+    default: false
+  maxfastbuild.bypass.materials:
+    default: false
+  maxfastbuild.bypass.rate-limit:
+    default: false
+  maxfastbuild.admin:
+    default: op

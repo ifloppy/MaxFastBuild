@@ -1,0 +1,12 @@
+MaxFastBuild
+Copyright (C) 2026 MaxFastBuild contributors
+
+Interaction concepts are based on Effortless Building by Requios:
+https://github.com/Requios/effortless-building-multi
+
+The project also references Effortless Structure by huskuraft and contributors:
+https://github.com/huskuraft/effortless
+
+Both reference projects and MaxFastBuild are distributed under LGPL-3.0-only.
+MaxFastBuild uses a new platform-neutral command transport, billing, persistence,
+inventory escrow, execution and auditing architecture.

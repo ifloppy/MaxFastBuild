@@ -1,0 +1,40 @@
+# Gradle
+.gradle/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE / Eclipse bin output
+.idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.settings/
+.vscode/
+out/
+**/bin/
+*.class
+*.swp
+*~
+
+# Runtime / local
+run/
+**/run/
+*.db
+*.db-*
+*.log
+logs/
+
+# Local packaged jars (keep folder)
+/release/**
+!/release/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python cache (icon scripts)
+scripts/__pycache__/
+*.pyc

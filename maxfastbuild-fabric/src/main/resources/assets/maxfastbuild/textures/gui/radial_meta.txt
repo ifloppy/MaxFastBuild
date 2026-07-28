@@ -1,0 +1,8 @@
+texture_size=512
+logical_hub=160
+scale=1.6
+inner_hole=42.0
+inner_outer=90.99999999999999
+outer_inner=96.00000000000001
+outer_outer=154.0
+hub=36.0
