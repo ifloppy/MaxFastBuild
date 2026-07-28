@@ -1,5 +1,5 @@
-# default-language is unused (client resolves protocol translation keys).
-default-language: en_us
+# Server-side CLI / admin message pack (messages_<lang>.yml). Client protocol still uses Fabric lang.
+default-language: zh_cn
 execution:
   ticks-per-block: 1
   blocks-per-step: 1

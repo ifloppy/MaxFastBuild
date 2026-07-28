@@ -11,7 +11,7 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `execution.max-region-blocks` | Hard cap on bounding volume / generated shape size | yes |
 | `execution.max-concurrent-tasks-per-player` | Active tasks per player | yes |
 | `execution.pause-when-player-offline` | Present in default config; offline pause is always applied in code | no (behavior hard-coded) |
-| `default-language` | Present in default config; unused (client resolves protocol keys) | no |
+| `default-language` | Paper CLI message pack (`messages_<lang>.yml`), default `zh_cn` | yes |
 | `rate-limit.requests` / `interval-seconds` / `burst` | Token-bucket request limits | yes |
 | `inventory.search-shulker-boxes` | Count/take place materials from carried shulker boxes | yes |
 | `inventory.require-shulker-permission` | If true, also require `maxfastbuild.material.shulker` | yes |

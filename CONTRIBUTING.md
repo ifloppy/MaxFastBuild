@@ -18,7 +18,7 @@ Thanks for helping improve MaxFastBuild.
 
 - Client strings: `maxfastbuild-fabric/src/main/resources/assets/maxfastbuild/lang/`
   - Always update **both** `en_us.json` and `zh_cn.json`
-- Paper `messages_*.yml`: reserved templates only (not loaded by the plugin yet); keep in sync if you add keys for a future loader
+- Paper `messages_*.yml`: loaded by `PluginMessages` for `/mfb` CLI (default `zh_cn` via `default-language`); keep EN/ZH in sync
 - Prefer translation keys in protocol payloads (`messageKey` + `data`) over hard-coded English
 
 ## Commits

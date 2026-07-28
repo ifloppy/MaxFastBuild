@@ -69,15 +69,19 @@ final class CoreProtectAuditService implements AuditService {
                 mutation.position().y(),
                 mutation.position().z());
         try {
-            boolean ok;
+            boolean ok = true;
             if (kind == OperationKind.BREAK) {
                 // Log the block that was removed (expectedState), not post-break air.
                 BlockData removed = Bukkit.createBlockData(mutation.expectedState());
                 ok = api.logRemoval(playerName, location, removed.getMaterial(), removed);
             } else {
-                // Log the block that was placed (targetState).
+                // Place over solid: log removal of previous block, then placement.
+                BlockData expected = Bukkit.createBlockData(mutation.expectedState());
+                if (!expected.getMaterial().isAir()) {
+                    ok = api.logRemoval(playerName, location, expected.getMaterial(), expected);
+                }
                 BlockData placed = Bukkit.createBlockData(mutation.targetState());
-                ok = api.logPlacement(playerName, location, placed.getMaterial(), placed);
+                ok = api.logPlacement(playerName, location, placed.getMaterial(), placed) && ok;
             }
             if (!ok) {
                 LOG.fine(() -> "CoreProtect log returned false for " + kind + " by " + playerName + " at " + location);

@@ -49,18 +49,20 @@
 
 ## 没有客户端时
 
-可使用服务器公开命令（需权限 `maxfastbuild.use`）：
+可使用服务器公开命令（需权限 `maxfastbuild.use`）。输入 `/mfb` 或 `/mfb help` 查看中文帮助。
 
 ```text
+/mfb help
 /mfb mode line
 /mfb pos1
 /mfb pos2
-/mfb material minecraft:stone
 /mfb hollow false
 /mfb apply
 /mfb status
 /mfb cancel
 ```
+
+`apply` 与客户端一致：主手方块=放置/替换，主手镐斧等=破坏，空手拒绝（材料取自主手方块，不必再 `/mfb material`）。
 
 ## 常见问题
 

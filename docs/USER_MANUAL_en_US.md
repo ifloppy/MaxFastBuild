@@ -49,18 +49,20 @@ Single, line, wall, floor, cube, diagonal line, diagonal wall, slope floor, circ
 
 ## Without the client mod
 
-Public server commands (permission `maxfastbuild.use`):
+Public server commands (permission `maxfastbuild.use`). Use `/mfb` or `/mfb help` for help (server default language is Chinese unless `default-language` is changed).
 
 ```text
+/mfb help
 /mfb mode line
 /mfb pos1
 /mfb pos2
-/mfb material minecraft:stone
 /mfb hollow false
 /mfb apply
 /mfb status
 /mfb cancel
 ```
+
+`apply` matches the client: main-hand block = place/replace, mining tool = break, empty hand = reject (material comes from the held block).
 
 ## Troubleshooting
 

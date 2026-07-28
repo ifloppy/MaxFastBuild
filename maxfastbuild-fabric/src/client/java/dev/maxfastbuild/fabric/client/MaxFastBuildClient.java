@@ -78,13 +78,13 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             String type = object.has("type") ? object.get("type").getAsString() : "response";
             if ("hello".equals(type)) return false;
             String key = object.has("messageKey") ? object.get("messageKey").getAsString() : "maxfastbuild.error.protocol";
-            Object[] args = arguments(object);
+            Object[] args = arguments(key, object);
             Minecraft client = Minecraft.getInstance();
             if (client.player != null) {
                 Component translated = Component.translatable(key, args);
                 String plain = translated.getString();
-                // Only fall back when the key did not resolve (getString returns the raw key).
-                if (plain.equals(key)) {
+                // Fall back if key unresolved OR format placeholders left unfilled (%s).
+                if (plain.equals(key) || plain.contains("%s") || plain.contains("%d")) {
                     client.player.sendSystemMessage(Component.literal(formatFallback(key, args)));
                 } else {
                     client.player.sendSystemMessage(translated);
@@ -112,11 +112,32 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.error.insufficient_tool".equals(key)) {
             return "MaxFastBuild: no mining tool (keep ≥ 4 durability)";
         }
+        if ("maxfastbuild.error.hold_block_or_tool".equals(key)) {
+            return "MaxFastBuild: hold a placeable block or mining tool";
+        }
+        if ("maxfastbuild.error.insufficient_tool_durability".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: not enough tool durability (need " + args[0] + " hits, have " + args[1] + ")";
+        }
+        if ("maxfastbuild.error.unbreakable_block".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: cannot break/replace unbreakable block at " + args[0] + " (" + args[1] + ")";
+        }
+        if ("maxfastbuild.error.no_permission".equals(key) && args.length >= 1) {
+            return "MaxFastBuild: missing permission " + args[0];
+        }
+        if ("maxfastbuild.error.shape_too_large".equals(key) && args.length >= 1) {
+            return "MaxFastBuild: shape exceeds limit " + args[0];
+        }
+        if ("maxfastbuild.error.protected".equals(key) && args.length >= 1) {
+            return "MaxFastBuild: protected " + args[0];
+        }
         if ("maxfastbuild.task.partial".equals(key) && args.length >= 3) {
             return "MaxFastBuild: partial " + args[0] + "/" + args[1] + ", refund " + args[2];
         }
         if ("maxfastbuild.task.completed".equals(key) && args.length >= 3) {
             return "MaxFastBuild: complete " + args[0] + "/" + args[1] + ", refund " + args[2];
+        }
+        if ("maxfastbuild.task.accepted".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: accepted " + args[0] + " blocks, cost " + args[1];
         }
         if (args.length == 0) return "MaxFastBuild: " + key;
         StringBuilder sb = new StringBuilder("MaxFastBuild: ").append(key).append(" [");
@@ -127,9 +148,45 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         return sb.append(']').toString();
     }
 
-    private static Object[] arguments(JsonObject object) {
+    /** Map protocol data fields to translation format args for each messageKey. */
+    private static Object[] arguments(String key, JsonObject object) {
         if (!object.has("data") || !object.get("data").isJsonObject()) return new Object[0];
         JsonObject data = object.getAsJsonObject("data");
+        return switch (key) {
+            case "maxfastbuild.task.accepted" ->
+                    new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
+            case "maxfastbuild.task.completed", "maxfastbuild.task.partial" ->
+                    new Object[]{jsonString(data, "applied"), jsonString(data, "planned"), jsonString(data, "refund")};
+            case "maxfastbuild.error.insufficient_materials" ->
+                    new Object[]{jsonString(data, "need"), jsonString(data, "have"), jsonString(data, "material")};
+            case "maxfastbuild.error.unbreakable_block" ->
+                    new Object[]{jsonString(data, "position"), jsonString(data, "block")};
+            case "maxfastbuild.error.wrong_tool" ->
+                    new Object[]{jsonString(data, "block")};
+            case "maxfastbuild.error.invalid_material" ->
+                    new Object[]{jsonString(data, "material")};
+            case "maxfastbuild.error.no_permission" ->
+                    new Object[]{jsonString(data, "permission")};
+            case "maxfastbuild.error.shape_too_large" ->
+                    new Object[]{jsonString(data, "limit")};
+            case "maxfastbuild.error.protected" ->
+                    data.has("position")
+                            ? new Object[]{jsonString(data, "position") + " (" + jsonString(data, "reason") + ")"}
+                            : new Object[]{jsonString(data, "reason")};
+            case "maxfastbuild.error.payment_failed",
+                 "maxfastbuild.error.protocol",
+                 "maxfastbuild.error.malformed",
+                 "maxfastbuild.error.persistence_failed" ->
+                    new Object[]{jsonString(data, "reason")};
+            case "maxfastbuild.error.insufficient_tool",
+                 "maxfastbuild.error.hold_block_or_tool" -> new Object[0];
+            case "maxfastbuild.error.insufficient_tool_durability" ->
+                    new Object[]{jsonString(data, "need"), jsonString(data, "have")};
+            default -> legacyArguments(data);
+        };
+    }
+
+    private static Object[] legacyArguments(JsonObject data) {
         if (data.has("blocks") && data.has("charge")) {
             return new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
         }
@@ -139,12 +196,17 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if (data.has("applied") && data.has("planned") && data.has("refund")) {
             return new Object[]{jsonString(data, "applied"), jsonString(data, "planned"), jsonString(data, "refund")};
         }
+        if (data.has("position") && data.has("block")) {
+            return new Object[]{jsonString(data, "position"), jsonString(data, "block")};
+        }
         if (data.has("block") && data.has("reason")) {
             return new Object[]{jsonString(data, "block")};
         }
-        if (data.has("material") && !data.has("need") && !data.has("reason")) {
+        if (data.has("material") && !data.has("need")) {
             return new Object[]{jsonString(data, "material")};
         }
+        if (data.has("permission")) return new Object[]{jsonString(data, "permission")};
+        if (data.has("limit")) return new Object[]{jsonString(data, "limit")};
         if (data.has("reason")) return new Object[]{jsonString(data, "reason")};
         return new Object[0];
     }

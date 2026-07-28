@@ -70,14 +70,16 @@
 
 Artifacts:
 
-- Fabric client: `maxfastbuild-fabric/build/libs/`
-- Paper plugin: `maxfastbuild-paper/build/libs/`
-
-Optional packaging helper (copies into local test layout if present):
+- **Release folder (preferred):** `release/MaxFastBuild-Paper-<version>.jar`, `release/MaxFastBuild-Fabric-<version>.jar`  
+  Filled automatically by `./gradlew build` (`copyReleaseJars`).
+- **Local Leaf test server:** if `../test-server-leaf/` exists, Paper jar is also copied to  
+  `../test-server-leaf/plugins/MaxFastBuild.jar` (`deployPaperToLeaf`, after `:maxfastbuild-paper:jar` / `build`).
+- Module outputs: `maxfastbuild-paper/build/libs/`, `maxfastbuild-fabric/build/libs/`
 
 ```powershell
-./gradlew :maxfastbuild-paper:jar :maxfastbuild-fabric:build
-./scripts/package-test-environment.ps1
+./gradlew build
+# or only plugin + deploy:
+./gradlew :maxfastbuild-paper:jar deployPaperToLeaf
 ```
 
 ## Install (quick)

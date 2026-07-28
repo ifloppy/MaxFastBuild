@@ -7,22 +7,22 @@ authors: [MaxFastBuild]
 softdepend: [Vault, CoreProtect]
 commands:
   mfb:
-    description: MaxFastBuild building commands
-    usage: /mfb <mode|pos1|pos2|apply|cancel|status|hollow|material>
+    description: MaxFastBuild 建造指令（/mfb help）
+    usage: /mfb <help|mode|pos1|pos2|material|hollow|apply|status|cancel>  (apply 由主手决定放置/破坏)
     permission: maxfastbuild.use
   mfbadmin:
-    description: MaxFastBuild administration
+    description: MaxFastBuild 管理指令
     usage: /mfbadmin <reload|recovery>
     permission: maxfastbuild.admin
 permissions:
   maxfastbuild.use:
-    description: Use place builds via client protocol or /mfb
+    description: 使用 /mfb 或客户端放置建造
     default: true
   maxfastbuild.break:
-    description: Use break builds via client protocol
+    description: 使用破坏建造（客户端或 /mfb apply break）
     default: true
   maxfastbuild.material.shulker:
-    description: Allow counting/taking place materials from carried shulker boxes when configured
+    description: 在配置开启时允许从潜影盒取材料
     default: false
   # Explicit grants only — OP does NOT auto-bypass cost/materials/rate-limit.
   maxfastbuild.bypass.cost:
