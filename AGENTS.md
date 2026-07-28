@@ -41,7 +41,9 @@ Do **not** leave a stale jar in `test-server-leaf/plugins/` after code changes. 
 ## Conventions
 
 - Server-authoritative builds; client only sends anchors via `/__mfb place|break`
-- Java 25 / Minecraft 26.2
+- Paper plugin: `api-version: 1.21` (loads on 1.21.11+); compile against `paper-api:1.21.11-R0.1-SNAPSHOT`
+- Do **not** shade `sqlite-jdbc` into the Paper jar (compileOnly + server-provided driver)
+- Fabric client may still target Minecraft 26.2
 - Conventional Commits
 - Place-over-solid: break rules (tool, durability, unbreakable) then place; charge replace breaks when per-block economy is on
 - PlugMan-safe disable: cancel tasks, unregister listeners, pause tasks, close SQLite quietly

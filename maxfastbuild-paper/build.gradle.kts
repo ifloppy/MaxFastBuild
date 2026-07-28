@@ -3,8 +3,10 @@ plugins { java }
 dependencies {
     implementation(project(":maxfastbuild-core"))
     implementation(project(":maxfastbuild-storage"))
-    implementation("org.xerial:sqlite-jdbc:3.50.3.0")
-    compileOnly("io.papermc.paper:paper-api:26.2.build.+")
+    // SQLite is provided by the server libraries or a separate JDBC plugin — do not shade into the jar.
+    compileOnly("org.xerial:sqlite-jdbc:3.50.3.0")
+    // Compile against 1.21.11 so the plugin loads on Leaf/Paper 1.21.11 and remains usable on newer (e.g. 26.2).
+    compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")
     }
@@ -16,7 +18,6 @@ tasks.jar {
     from(project(":maxfastbuild-api").sourceSets.main.get().output)
     from(project(":maxfastbuild-core").sourceSets.main.get().output)
     from(project(":maxfastbuild-storage").sourceSets.main.get().output)
-    from(configurations.runtimeClasspath.get().filter { it.name.contains("sqlite") }.map { zipTree(it) })
 }
 
 tasks.processResources {

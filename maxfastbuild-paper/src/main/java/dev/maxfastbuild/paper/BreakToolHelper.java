@@ -69,12 +69,24 @@ final class BreakToolHelper {
         if (player.getGameMode() != GameMode.CREATIVE && !isEffectiveFor(tool, block)) {
             return false;
         }
-        boolean changed = block.breakNaturally(tool, true, true);
+        // Prefer Paper breakNaturally(tool, triggerEffect, dropExperience) when present; fall back for older APIs.
+        boolean changed = breakNaturallyCompat(block, tool);
         if (!changed) return false;
         if (player.getGameMode() == GameMode.CREATIVE) return true;
         if (!isMiningTool(tool)) return true;
         applyDamage(player, selection.slot(), BREAK_DAMAGE);
         return true;
+    }
+
+    private static boolean breakNaturallyCompat(Block block, ItemStack tool) {
+        try {
+            // Paper: breakNaturally(ItemStack, boolean triggerEffect, boolean dropExperience)
+            var method = Block.class.getMethod("breakNaturally", ItemStack.class, boolean.class, boolean.class);
+            Object result = method.invoke(block, tool, true, true);
+            return result instanceof Boolean b && b;
+        } catch (ReflectiveOperationException ignored) {
+            return block.breakNaturally(tool, true);
+        }
     }
 
     private static void applyDamage(Player player, int slot, int amount) {
@@ -85,9 +97,24 @@ final class BreakToolHelper {
         int damage = currentDamage(stack);
         int remaining = max - damage;
         if (remaining - amount < MIN_REMAINING) return;
-        ItemStack result = stack.damage(amount, player);
-        if (slot == 40) inv.setItemInOffHand(result);
-        else inv.setItem(slot, result);
+        // Prefer ItemStack#damage(int, LivingEntity) when present (Paper); else meta damage.
+        try {
+            var method = ItemStack.class.getMethod("damage", int.class, org.bukkit.entity.LivingEntity.class);
+            Object result = method.invoke(stack, amount, player);
+            ItemStack updated = result instanceof ItemStack item ? item : stack;
+            if (slot == 40) inv.setItemInOffHand(updated);
+            else inv.setItem(slot, updated);
+            return;
+        } catch (ReflectiveOperationException ignored) {
+            // fall through
+        }
+        ItemMeta meta = stack.getItemMeta();
+        if (meta instanceof Damageable damageable) {
+            damageable.setDamage(damage + amount);
+            stack.setItemMeta(meta);
+            if (slot == 40) inv.setItemInOffHand(stack);
+            else inv.setItem(slot, stack);
+        }
     }
 
     static boolean isUsable(ItemStack stack, Block block, Player player) {

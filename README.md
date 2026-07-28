@@ -5,16 +5,16 @@
 <h1 align="center">MaxFastBuild</h1>
 
 <p align="center">
-  <strong>Server-authoritative mass building for Minecraft Java 26.2</strong><br>
+  <strong>Server-authoritative mass building for Minecraft Java</strong><br>
   Fabric client · Paper/Leaf plugin · command + chat protocol (no custom payload)
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-LGPL--3.0--only-blue.svg" alt="License"></a>
-  <img src="https://img.shields.io/badge/Minecraft-26.2-brightgreen.svg" alt="Minecraft">
-  <img src="https://img.shields.io/badge/Java-25-orange.svg" alt="Java">
+  <img src="https://img.shields.io/badge/Paper%2FLeaf-1.21.11%2B-red.svg" alt="Paper">
+  <img src="https://img.shields.io/badge/Client-26.2-brightgreen.svg" alt="Client">
+  <img src="https://img.shields.io/badge/Java-21%2B-orange.svg" alt="Java">
   <img src="https://img.shields.io/badge/Fabric-0.19.3+-black.svg" alt="Fabric">
-  <img src="https://img.shields.io/badge/Paper%2FLeaf-26.2-red.svg" alt="Paper">
 </p>
 
 <p align="center">
@@ -52,15 +52,16 @@
 | `maxfastbuild-api` | Platform-neutral contracts |
 | `maxfastbuild-core` | Shapes, billing, protocol, tasks |
 | `maxfastbuild-storage` | SQLite tasks / ledger / escrow |
-| `maxfastbuild-fabric` | Fabric 26.2 client (+ optional server entry) |
-| `maxfastbuild-paper` | Paper/Leaf 26.2 plugin (Vault, CoreProtect) |
+| `maxfastbuild-fabric` | Fabric client (26.2 target; + optional server entry) |
+| `maxfastbuild-paper` | Paper/Leaf plugin (api-version 1.21 → **1.21.11+**, including 26.2) |
 
 ## Requirements
 
-- **Java 25**
-- **Minecraft 26.2**
-- Client: Fabric Loader **≥ 0.19.3**, Fabric API **≥ 0.155.2+26.2**
-- Server: Paper/Leaf **26.2** (or compatible) + this plugin
+- **Java 21+** (25 recommended for 26.2 stacks)
+- **Server:** Paper/Leaf **1.21.11+** (plugin `api-version: 1.21`; also loads on newer lines such as 26.2)
+- **Client (optional):** Fabric Loader **≥ 0.19.3**, Fabric API matching the client game version (e.g. 26.2)
+- **SQLite:** not bundled in the plugin jar — use the server’s JDBC / `sqlite-jdbc` on the classpath (Paper often ships libraries; otherwise add the driver)
+- Soft-depend: Vault, CoreProtect
 
 ## Build
 

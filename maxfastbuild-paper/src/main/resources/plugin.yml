@@ -1,7 +1,8 @@
 name: MaxFastBuild
 version: '${version}'
 main: dev.maxfastbuild.paper.MaxFastBuildPlugin
-api-version: '26.2'
+# Minimum supported Bukkit API line — loads on Paper/Leaf 1.21.11+ (including 26.2).
+api-version: '1.21'
 description: Secure server-authoritative mass building
 authors: [MaxFastBuild]
 softdepend: [Vault, CoreProtect]

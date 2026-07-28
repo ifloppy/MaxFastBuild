@@ -74,10 +74,22 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getScheduler().runTaskTimer(this, this::tickTasks, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
+            ensureSqliteDriver();
         } catch (RuntimeException ex) {
             getLogger().severe("MaxFastBuild failed to enable: " + ex.getMessage());
             shutdownResources(false);
             throw ex;
+        }
+    }
+
+    /** SQLite is not shaded; require a driver on the classpath (Paper libraries or server). */
+    private void ensureSqliteDriver() {
+        try {
+            Class.forName("org.sqlite.JDBC");
+        } catch (ClassNotFoundException ex) {
+            getLogger().severe(
+                    "org.sqlite.JDBC not found. Place sqlite-jdbc on the server classpath "
+                            + "(e.g. paper libraries) or install a JDBC provider. MaxFastBuild no longer bundles SQLite.");
         }
     }
 
