@@ -1,9 +1,11 @@
+# default-language is unused (client resolves protocol translation keys).
 default-language: en_us
 execution:
   ticks-per-block: 1
   blocks-per-step: 1
   max-region-blocks: 100000
   max-concurrent-tasks-per-player: 2
+  # Documented for operators; offline pause is always applied in code today.
   pause-when-player-offline: true
 rate-limit:
   requests: 3

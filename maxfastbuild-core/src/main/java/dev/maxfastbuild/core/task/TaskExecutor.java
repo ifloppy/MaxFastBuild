@@ -11,8 +11,6 @@ public final class TaskExecutor {
     private final AuditService audit;
     private final Clock clock;
     private final Map<UUID, BuildTask> running = new ConcurrentHashMap<>();
-    /** Successful mutations applied per task (for partial refunds). */
-    private final Map<UUID, Integer> applied = new ConcurrentHashMap<>();
 
     public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock) {
         this.repository = repository; this.world = world; this.audit = audit; this.clock = clock;
@@ -22,19 +20,30 @@ public final class TaskExecutor {
         if (task.status() != TaskStatus.QUEUED) throw new IllegalArgumentException("Only queued tasks can be enqueued");
         repository.save(task);
         running.put(task.id(), task);
-        applied.putIfAbsent(task.id(), 0);
     }
 
-    public int appliedCount(UUID id) {
-        return applied.getOrDefault(id, 0);
+    /** Drop memory entry without changing DB status (e.g. after persisting PAUSED_*). */
+    public void detach(UUID id) {
+        running.remove(id);
+    }
+
+    /** Snapshot of in-memory task ids (for safe shutdown / PlugMan unload). */
+    public Set<UUID> activeIds() {
+        return Set.copyOf(running.keySet());
+    }
+
+    public void clear() {
+        running.clear();
+    }
+
+    public boolean isActive(UUID id) {
+        return running.containsKey(id);
     }
 
     /** Remove a running/queued task and return final applied count for settlement. */
     public TickResult abort(UUID id) {
         BuildTask task = running.remove(id);
         if (task == null) throw new IllegalArgumentException("Unknown running task");
-        int totalApplied = applied.getOrDefault(id, 0);
-        applied.remove(id);
         if (task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.RUNNING) {
             task = task.transition(TaskStatus.CANCELLING, clock.instant());
         }
@@ -42,13 +51,14 @@ public final class TaskExecutor {
             task = task.transition(TaskStatus.CANCELLED, clock.instant());
         }
         repository.save(task);
-        return new TickResult(task, 0, 0, totalApplied, true);
+        return new TickResult(task, 0, 0, task.appliedCount(), true);
     }
 
     public TickResult tick(UUID id, int blocksPerStep) {
         BuildTask task = Objects.requireNonNull(running.get(id), "Unknown running task");
         if (task.status() == TaskStatus.QUEUED) task = task.transition(TaskStatus.RUNNING, clock.instant());
         int changed = 0, skipped = 0;
+        int applied = task.appliedCount();
         while (changed + skipped < blocksPerStep && task.cursor() < task.plan().mutations().size()) {
             BlockMutation mutation = task.plan().mutations().get(task.cursor());
             String current = world.stateAt(task.plan().world(), mutation.position());
@@ -61,12 +71,12 @@ public final class TaskExecutor {
                     WorldAccess.MutationResult result = world.mutate(task.playerId(), task.plan().world(), mutation, task.plan().operation());
                     if (result.changed()) {
                         changed++;
-                        applied.merge(id, 1, Integer::sum);
+                        applied++;
                         audit.record(task.playerId(), task.playerName(), task.plan().world(), mutation, task.plan().operation());
                     } else skipped++;
                 }
             }
-            task = task.advance(task.cursor() + 1, clock.instant());
+            task = task.advance(task.cursor() + 1, applied, clock.instant());
         }
         boolean finished = task.cursor() == task.plan().mutations().size();
         if (finished) {
@@ -74,9 +84,7 @@ public final class TaskExecutor {
             running.remove(id);
         } else running.put(id, task);
         repository.save(task);
-        int totalApplied = applied.getOrDefault(id, 0);
-        if (finished) applied.remove(id);
-        return new TickResult(task, changed, skipped, totalApplied, finished);
+        return new TickResult(task, changed, skipped, task.appliedCount(), finished);
     }
 
     public record TickResult(BuildTask task, int changed, int skipped, int totalApplied, boolean finished) {}

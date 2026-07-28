@@ -49,18 +49,18 @@ Single, line, wall, floor, cube, diagonal line, diagonal wall, slope floor, circ
 
 ## Without the client mod
 
-Public server commands may be available, for example:
+Public server commands (permission `maxfastbuild.use`):
 
 ```text
 /mfb mode line
 /mfb pos1
 /mfb pos2
+/mfb material minecraft:stone
+/mfb hollow false
 /mfb apply
 /mfb status
 /mfb cancel
 ```
-
-Exact subcommands depend on the server.
 
 ## Troubleshooting
 

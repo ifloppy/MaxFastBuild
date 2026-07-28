@@ -60,6 +60,11 @@ public final class CommandChunkAssembler {
         transfers.entrySet().removeIf(entry -> entry.getValue().createdAt < cutoff);
     }
 
+    /** Drop all in-flight transfers (plugin disable / hot-reload). */
+    public void clear() {
+        transfers.clear();
+    }
+
     private record Key(UUID playerId, String transferId) {}
     private static final class Transfer {
         private final int total;

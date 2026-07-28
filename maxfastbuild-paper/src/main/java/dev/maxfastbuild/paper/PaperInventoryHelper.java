@@ -1,11 +1,16 @@
 package dev.maxfastbuild.paper;
 
+import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.World;
 import org.bukkit.block.ShulkerBox;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.inventory.meta.BlockStateMeta;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Counts and removes placeable block items from a player's inventory by material key
@@ -55,7 +60,6 @@ final class PaperInventoryHelper {
         PlayerInventory inv = player.getInventory();
         ItemStack[] contents = inv.getContents();
 
-        // 1) Loose stacks in inventory / hotbar / offhand slots
         for (int i = 0; i < contents.length && remaining > 0; i++) {
             ItemStack stack = contents[i];
             if (stack == null || stack.getType() != material) continue;
@@ -70,7 +74,6 @@ final class PaperInventoryHelper {
             remaining -= use;
         }
 
-        // 2) Inside carried shulker boxes
         if (searchShulkers && remaining > 0) {
             contents = inv.getContents();
             for (int i = 0; i < contents.length && remaining > 0; i++) {
@@ -86,8 +89,29 @@ final class PaperInventoryHelper {
         return amount - remaining;
     }
 
-    static boolean hasEnough(Player player, String materialKey, long amount, boolean searchShulkers) {
-        return count(player, materialKey, searchShulkers) >= amount;
+    /** Give items back; overflow drops at the player location. */
+    static void giveOrDrop(Player player, String materialKey, long count) {
+        if (count <= 0) return;
+        Material mat = resolveMaterial(materialKey);
+        if (mat == null || !mat.isItem()) return;
+        long left = count;
+        while (left > 0) {
+            int stack = (int) Math.min(left, mat.getMaxStackSize());
+            ItemStack item = new ItemStack(mat, stack);
+            HashMap<Integer, ItemStack> leftover = player.getInventory().addItem(item);
+            dropLeftover(player, leftover);
+            left -= stack;
+        }
+    }
+
+    private static void dropLeftover(Player player, Map<Integer, ItemStack> leftover) {
+        if (leftover == null || leftover.isEmpty()) return;
+        World world = player.getWorld();
+        Location loc = player.getLocation();
+        for (ItemStack stack : leftover.values()) {
+            if (stack == null || stack.getType().isAir() || stack.getAmount() <= 0) continue;
+            world.dropItemNaturally(loc, stack);
+        }
     }
 
     static String itemKeyFromBlockState(String blockState) {
@@ -111,7 +135,6 @@ final class PaperInventoryHelper {
         return total;
     }
 
-    /** Mutates {@code boxStack} in place; caller must write it back to the inventory slot. */
     private static long takeFromShulker(ItemStack boxStack, Material material, long amount) {
         if (amount <= 0 || !isShulkerBox(boxStack.getType())) return 0;
         if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;

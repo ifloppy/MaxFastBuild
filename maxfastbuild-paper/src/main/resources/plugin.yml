@@ -8,24 +8,21 @@ softdepend: [Vault, CoreProtect]
 commands:
   mfb:
     description: MaxFastBuild building commands
-    usage: /mfb <mode|pos1|pos2|apply|cancel|undo|redo|status|language>
+    usage: /mfb <mode|pos1|pos2|apply|cancel|status|hollow|material>
     permission: maxfastbuild.use
   mfbadmin:
     description: MaxFastBuild administration
-    usage: /mfbadmin <reload|tasks|task|cancel|resume|ledger|refunds|recovery|limits>
+    usage: /mfbadmin <reload|recovery>
     permission: maxfastbuild.admin
 permissions:
   maxfastbuild.use:
+    description: Use place builds via client protocol or /mfb
     default: true
   maxfastbuild.break:
-    default: op
-  maxfastbuild.interact:
-    default: op
-  maxfastbuild.undo:
-    default: true
-  maxfastbuild.redo:
+    description: Use break builds via client protocol
     default: true
   maxfastbuild.material.shulker:
+    description: Allow counting/taking place materials from carried shulker boxes when configured
     default: false
   # Explicit grants only — OP does NOT auto-bypass cost/materials/rate-limit.
   maxfastbuild.bypass.cost:

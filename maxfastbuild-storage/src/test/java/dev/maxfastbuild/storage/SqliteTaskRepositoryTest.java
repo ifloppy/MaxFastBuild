@@ -13,7 +13,7 @@ import static org.assertj.core.api.Assertions.*;
 class SqliteTaskRepositoryTest {
     @TempDir Path directory;
 
-    @Test void persistsAndRecoversTaskCursor() {
+    @Test void persistsAndRecoversTaskCursorAndApplied() {
         SqliteDatabase database = new SqliteDatabase(directory.resolve("test.db"));
         SqliteTaskRepository repository = new SqliteTaskRepository(database);
         repository.initialize();
@@ -22,11 +22,12 @@ class SqliteTaskRepositoryTest {
                 new BlockMutation(new BlockPos(0, 0, 0), "minecraft:air", "minecraft:stone"),
                 new BlockMutation(new BlockPos(1, 0, 0), "minecraft:air", "minecraft:stone")));
         Instant now = Instant.now();
-        BuildTask task = new BuildTask(id, player, "Builder", plan, TaskStatus.RUNNING, 1, "escrow", BigDecimal.TEN, BigDecimal.ZERO, now, now, null);
+        BuildTask task = new BuildTask(id, player, "Builder", plan, TaskStatus.RUNNING, 1, 1, "escrow", BigDecimal.TEN, BigDecimal.ZERO, now, now, null);
 
         repository.save(task);
 
         assertThat(repository.find(id)).contains(task);
+        assertThat(repository.find(id).orElseThrow().appliedCount()).isEqualTo(1);
         assertThat(repository.recoverable()).extracting(BuildTask::id).containsExactly(id);
         repository.close();
     }

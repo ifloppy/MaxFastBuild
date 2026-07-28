@@ -6,6 +6,7 @@ import dev.maxfastbuild.core.billing.BillingPolicy;
 import dev.maxfastbuild.core.limit.TokenBucket;
 import dev.maxfastbuild.core.protocol.*;
 import dev.maxfastbuild.core.shape.DefaultShapeGenerator;
+import dev.maxfastbuild.core.shape.ShapeLimitException;
 import dev.maxfastbuild.core.task.*;
 import dev.maxfastbuild.storage.*;
 import net.milkbowl.vault.economy.Economy;
@@ -36,41 +37,134 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private TaskExecutor executor;
     private EconomyService economy;
     private AuditService audit;
+    /** Guards handlers and ticks during PlugMan unload / failed enable. */
+    private volatile boolean active;
 
     @Override public void onEnable() {
+        active = false;
         saveDefaultConfig();
-        protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), getConfig().getInt("protocol.max-payload-bytes", 16384));
-        database = new SqliteDatabase(getDataFolder().toPath().resolve("maxfastbuild.db"));
-        tasks = new SqliteTaskRepository(database);
-        ledger = new EconomyLedger(database);
-        tasks.initialize(); ledger.initialize();
-        audit = safeDiscoverAudit();
-        economy = safeDiscoverEconomy();
-        executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC());
-        validateIntegrations();
+        try {
+            protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), getConfig().getInt("protocol.max-payload-bytes", 16384));
+            database = new SqliteDatabase(getDataFolder().toPath().resolve("maxfastbuild.db"));
+            tasks = new SqliteTaskRepository(database);
+            ledger = new EconomyLedger(database);
+            tasks.initialize();
+            ledger.initialize();
+            audit = safeDiscoverAudit();
+            economy = safeDiscoverEconomy();
+            executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC());
+            validateIntegrations();
 
-        PublicCommand publicCommand = new PublicCommand(this);
-        PluginCommand mfb = Objects.requireNonNull(getCommand("mfb"));
-        mfb.setExecutor(publicCommand); mfb.setTabCompleter(publicCommand);
-        Objects.requireNonNull(getCommand("mfbadmin")).setExecutor((sender, command, label, args) -> handleAdmin(sender, args));
-        getServer().getPluginManager().registerEvents(this, this);
-        resumeTasks();
-        long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
-        getServer().getScheduler().runTaskTimer(this, this::tickTasks, period, period);
+            PublicCommand publicCommand = new PublicCommand(this);
+            PluginCommand mfb = Objects.requireNonNull(getCommand("mfb"), "mfb command missing from plugin.yml");
+            mfb.setExecutor(publicCommand);
+            mfb.setTabCompleter(publicCommand);
+            PluginCommand mfbAdmin = Objects.requireNonNull(getCommand("mfbadmin"), "mfbadmin command missing from plugin.yml");
+            mfbAdmin.setExecutor((sender, command, label, args) -> handleAdmin(sender, args));
+            getServer().getPluginManager().registerEvents(this, this);
+            resumeTasks();
+            long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
+            getServer().getScheduler().runTaskTimer(this, this::tickTasks, period, period);
+            active = true;
+        } catch (RuntimeException ex) {
+            getLogger().severe("MaxFastBuild failed to enable: " + ex.getMessage());
+            shutdownResources(false);
+            throw ex;
+        }
     }
 
     @Override public void onDisable() {
-        if (tasks != null) {
-            for (BuildTask task : tasks.recoverable()) {
-                if (task.status() == TaskStatus.RUNNING || task.status() == TaskStatus.QUEUED)
-                    tasks.save(task.transition(TaskStatus.PAUSED_SHUTDOWN, Instant.now()));
+        // Order matters for PlugMan unload: stop ticks first, then persist, then close DB.
+        active = false;
+        try {
+            getServer().getScheduler().cancelTasks(this);
+        } catch (RuntimeException ex) {
+            getLogger().warning("Failed to cancel scheduler tasks: " + ex.getMessage());
+        }
+        try {
+            HandlerList.unregisterAll((Listener) this);
+        } catch (RuntimeException ex) {
+            getLogger().warning("Failed to unregister listeners: " + ex.getMessage());
+        }
+        clearCommandHandlers();
+        shutdownResources(true);
+    }
+
+    /**
+     * Persist active work, clear in-memory state, close SQLite.
+     * @param pauseTasks when true (normal disable), mark QUEUED/RUNNING as PAUSED_SHUTDOWN for reload resume.
+     */
+    private void shutdownResources(boolean pauseTasks) {
+        try {
+            if (pauseTasks && tasks != null && executor != null) {
+                Instant now = Instant.now();
+                // Prefer executor memory (fresh applied_count), then any remaining DB-active rows.
+                for (UUID id : executor.activeIds()) {
+                    try {
+                        BuildTask latest = tasks.find(id).orElse(null);
+                        executor.detach(id);
+                        if (latest == null) continue;
+                        latest = tasks.find(id).orElse(latest);
+                        if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
+                            tasks.save(latest.transition(TaskStatus.PAUSED_SHUTDOWN, now));
+                        }
+                    } catch (RuntimeException ex) {
+                        getLogger().warning("Failed to pause task " + id + " on disable: " + ex.getMessage());
+                    }
+                }
+                try {
+                    for (BuildTask task : tasks.recoverable()) {
+                        if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
+                        if (executor != null) executor.detach(task.id());
+                        BuildTask latest = tasks.find(task.id()).orElse(task);
+                        if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
+                            tasks.save(latest.transition(TaskStatus.PAUSED_SHUTDOWN, now));
+                        }
+                    }
+                } catch (RuntimeException ex) {
+                    getLogger().warning("Failed to scan recoverable tasks on disable: " + ex.getMessage());
+                }
             }
-            tasks.close();
+        } finally {
+            if (executor != null) {
+                try { executor.clear(); } catch (RuntimeException ignored) { }
+            }
+            selections.clear();
+            limits.clear();
+            sessions.clear();
+            try { chunks.clear(); } catch (RuntimeException ignored) { }
+            if (tasks != null) {
+                try { tasks.closeQuietly(); } catch (RuntimeException ex) {
+                    getLogger().warning("SQLite close failed: " + ex.getMessage());
+                }
+            }
+            tasks = null;
+            ledger = null;
+            database = null;
+            executor = null;
+            economy = null;
+            audit = null;
+            protocol = null;
+        }
+    }
+
+    private void clearCommandHandlers() {
+        try {
+            PluginCommand mfb = getCommand("mfb");
+            if (mfb != null) {
+                mfb.setExecutor(null);
+                mfb.setTabCompleter(null);
+            }
+            PluginCommand mfbAdmin = getCommand("mfbadmin");
+            if (mfbAdmin != null) mfbAdmin.setExecutor(null);
+        } catch (RuntimeException ex) {
+            getLogger().warning("Failed to clear command handlers: " + ex.getMessage());
         }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInternalCommand(PlayerCommandPreprocessEvent event) {
+        if (!active || tasks == null || executor == null) return;
         String message = event.getMessage();
         if (message.startsWith("/")) message = message.substring(1);
         if (!message.equals("__mfb") && !message.startsWith("__mfb ")) return;
@@ -85,6 +179,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             switch (parts[1]) {
                 case "hello" -> issueSession(player);
                 case "place" -> {
+                    if (!player.hasPermission("maxfastbuild.use")) {
+                        sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+                        return;
+                    }
                     if (!rateLimit(player)) {
                         sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
                         return;
@@ -94,6 +192,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                             intent.first(), intent.second(), intent.hollow(), intent.material()));
                 }
                 case "break" -> {
+                    if (!player.hasPermission("maxfastbuild.use") || !player.hasPermission("maxfastbuild.break")) {
+                        sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
+                        return;
+                    }
                     if (!rateLimit(player)) {
                         sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
                         return;
@@ -119,6 +221,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     ProtocolEnvelope envelope = new ProtocolEnvelope(Integer.parseInt(envelopeParts[0]), envelopeParts[1], Long.parseLong(envelopeParts[2]), envelopeParts[3], envelopeParts[4]);
                     byte[] json = protocol.verify(player.getUniqueId(), envelope);
                     ClientRequest request = GSON.fromJson(new String(json, StandardCharsets.UTF_8), ClientRequest.class);
+                    if ("break".equalsIgnoreCase(request.operation())) {
+                        if (!player.hasPermission("maxfastbuild.use") || !player.hasPermission("maxfastbuild.break")) {
+                            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
+                            return;
+                        }
+                    } else if (!player.hasPermission("maxfastbuild.use")) {
+                        sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+                        return;
+                    }
                     handleClientRequest(player, request);
                 }
                 default -> sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "unknown_subcmd"));
@@ -130,17 +241,47 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent event) {
-        for (BuildTask task : tasks.recoverable()) if (task.playerId().equals(event.getPlayer().getUniqueId()) && task.status() == TaskStatus.RUNNING)
-            tasks.save(task.transition(TaskStatus.PAUSED_OFFLINE, Instant.now()));
+        if (!active || tasks == null || executor == null) return;
+        UUID playerId = event.getPlayer().getUniqueId();
+        for (BuildTask task : tasks.recoverable()) {
+            if (!task.playerId().equals(playerId)) continue;
+            if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
+            try {
+                // Prefer in-memory snapshot (has latest applied_count) when present.
+                BuildTask latest = tasks.find(task.id()).orElse(task);
+                if (executor.isActive(task.id())) {
+                    // Detach first so a concurrent tick cannot race; applied already flushed each tick.
+                    executor.detach(task.id());
+                    latest = tasks.find(task.id()).orElse(task);
+                }
+                if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
+                    tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, Instant.now()));
+                }
+            } catch (RuntimeException ex) {
+                getLogger().warning("Failed to pause task " + task.id() + " on quit: " + ex.getMessage());
+            }
+        }
     }
 
     @EventHandler public void onJoin(PlayerJoinEvent event) {
-        for (BuildTask task : tasks.recoverable()) if (task.playerId().equals(event.getPlayer().getUniqueId()) && task.status() == TaskStatus.PAUSED_OFFLINE)
+        if (!active || tasks == null || executor == null) return;
+        for (BuildTask task : tasks.recoverable()) {
+            if (!task.playerId().equals(event.getPlayer().getUniqueId())) continue;
+            if (task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) continue;
+            if (executor.isActive(task.id())) continue;
             executor.enqueue(task.transition(TaskStatus.QUEUED, Instant.now()));
+        }
     }
 
     void handlePublicCommand(Player player, String[] args) {
-        if (args.length == 0) { player.sendMessage(Component.text("/mfb mode|pos1|pos2|apply|cancel|undo|redo|status|language")); return; }
+        if (!active || tasks == null) {
+            player.sendMessage(Component.text("MaxFastBuild is not ready"));
+            return;
+        }
+        if (args.length == 0) {
+            player.sendMessage(Component.text("/mfb mode|pos1|pos2|apply|cancel|status|hollow|material"));
+            return;
+        }
         Selection selection = selections.computeIfAbsent(player.getUniqueId(), ignored -> new Selection(BuildMode.LINE, null, null, false, "minecraft:stone"));
         switch (args[0].toLowerCase(Locale.ROOT)) {
             case "mode" -> {
@@ -155,7 +296,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             case "apply" -> submit(player, selection, OperationKind.PLACE);
             case "status" -> player.sendMessage(Component.text("Active tasks: " + tasks.activeCount(player.getUniqueId())));
             case "cancel" -> cancelPlayerTasks(player);
-            default -> player.sendMessage(Component.text("This command is available through the client UI or a later command phase."));
+            default -> player.sendMessage(Component.text("Unknown subcommand. Use /mfb mode|pos1|pos2|apply|cancel|status|hollow|material"));
         }
     }
 
@@ -167,15 +308,51 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void submit(Player player, Selection selection, OperationKind operation) {
-        if (selection.first() == null || selection.second() == null) { sendProtocol(player, "error", "maxfastbuild.error.positions_required", Map.of()); return; }
-        if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) { sendProtocol(player, "error", "maxfastbuild.error.coreprotect_unavailable", Map.of()); return; }
-        if (getConfig().getBoolean("economy.enabled") && !economy.enabled() && !player.hasPermission("maxfastbuild.bypass.cost")) { sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of()); return; }
+        if (!player.hasPermission("maxfastbuild.use")) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+            return;
+        }
+        if (operation == OperationKind.BREAK && !player.hasPermission("maxfastbuild.break")) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
+            return;
+        }
+        if (selection.first() == null || selection.second() == null) {
+            sendProtocol(player, "error", "maxfastbuild.error.positions_required", Map.of());
+            return;
+        }
+        if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) {
+            sendProtocol(player, "error", "maxfastbuild.error.coreprotect_unavailable", Map.of());
+            return;
+        }
+        if (getConfig().getBoolean("economy.enabled") && !economy.enabled() && !player.hasPermission("maxfastbuild.bypass.cost")) {
+            sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
+            return;
+        }
         int max = getConfig().getInt("execution.max-region-blocks", 100000);
-        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) { sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of()); return; }
-        Set<BlockPos> positions = new DefaultShapeGenerator().generate(new ShapeRequest(selection.mode(), selection.first(), selection.second(), selection.hollow()), max);
+        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
+            sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
+            return;
+        }
+
+        Set<BlockPos> positions;
+        try {
+            positions = new DefaultShapeGenerator().generate(
+                    new ShapeRequest(selection.mode(), selection.first(), selection.second(), selection.hollow()), max);
+        } catch (ShapeLimitException ex) {
+            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", max));
+            return;
+        } catch (RuntimeException ex) {
+            sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", ex.getMessage() == null ? "shape" : ex.getMessage()));
+            return;
+        }
+
         PaperWorldAccess world = new PaperWorldAccess();
         List<BlockMutation> mutations = new ArrayList<>();
         for (BlockPos pos : positions) {
+            if (pos.y() < player.getWorld().getMinHeight() || pos.y() >= player.getWorld().getMaxHeight()) {
+                sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
+                return;
+            }
             String before = world.stateAt(player.getWorld().getName(), pos);
             if (operation == OperationKind.BREAK && before.equals("minecraft:air")) continue;
             BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : selection.material());
@@ -183,6 +360,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (!validation.allowed()) {
                 if ("insufficient_tool".equals(validation.reason())) {
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
+                    return;
+                }
+                if ("forbidden_material".equals(validation.reason())) {
+                    sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(selection.material())));
                     return;
                 }
                 sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", validation.reason()));
@@ -196,7 +377,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
                 return;
             }
-            // Every planned block must be breakable with some inventory tool (before charging).
             for (BlockMutation mutation : mutations) {
                 org.bukkit.block.Block target = player.getWorld().getBlockAt(
                         mutation.position().x(), mutation.position().y(), mutation.position().z());
@@ -214,7 +394,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         boolean requireMaterials = operation == OperationKind.PLACE
                 && player.getGameMode() != GameMode.CREATIVE
                 && !player.hasPermission("maxfastbuild.bypass.materials");
-        // Config flag alone enables shulker contents; optional extra permission gate.
         boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
         if (searchShulkers && getConfig().getBoolean("inventory.require-shulker-permission", false)
                 && !player.hasPermission("maxfastbuild.material.shulker")) {
@@ -223,7 +402,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         String itemKey = PaperInventoryHelper.itemKeyFromBlockState(selection.material());
         long need = mutations.size();
         if (requireMaterials) {
-            if (PaperInventoryHelper.resolveMaterial(itemKey) == null) {
+            org.bukkit.Material resolved = PaperInventoryHelper.resolveMaterial(itemKey);
+            if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(selection.material())));
                 return;
             }
@@ -256,10 +436,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (requireMaterials) {
             long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers);
             if (removed < need) {
-                if (removed > 0) {
-                    org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(itemKey);
-                    if (mat != null) player.getInventory().addItem(new org.bukkit.inventory.ItemStack(mat, (int) removed));
-                }
+                if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                         Map.of("need", need, "have", removed, "material", itemKey));
@@ -269,14 +446,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         Instant now = Instant.now();
-        BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+        BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
+                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
         try {
             executor.enqueue(task);
         } catch (RuntimeException ex) {
-            if (tookItems) {
-                org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(itemKey);
-                if (mat != null) player.getInventory().addItem(new org.bukkit.inventory.ItemStack(mat, (int) need));
-            }
+            if (tookItems) PaperInventoryHelper.giveOrDrop(player, itemKey, need);
             compensate(player, taskId, tookMoney ? charge.total() : BigDecimal.ZERO, transactionId, ex);
             return;
         }
@@ -300,10 +475,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void tickTasks() {
+        if (!active || tasks == null || executor == null) return;
         int count = Math.max(1, getConfig().getInt("execution.blocks-per-step", 1));
         for (BuildTask task : tasks.recoverable()) {
             if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING) continue;
             if (Bukkit.getPlayer(task.playerId()) == null) continue;
+            if (!executor.isActive(task.id())) {
+                // DB says active but memory was detached (quit/shutdown) — reattach when player is online.
+                try {
+                    executor.enqueue(task.status() == TaskStatus.QUEUED ? task : task.transition(TaskStatus.QUEUED, Instant.now()));
+                } catch (RuntimeException ex) {
+                    getLogger().warning("Reattach task " + task.id() + " failed: " + ex.getMessage());
+                    continue;
+                }
+            }
             try {
                 TaskExecutor.TickResult result = executor.tick(task.id(), count);
                 if (result.finished()) settlePartial(result);
@@ -316,11 +501,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     /**
      * After a task finishes or is cancelled: refund per-block/per-area for mutations that never applied,
      * and return unused place materials. Fixed per-operation fee is not refunded once execution started.
+     * Applied count is read from the persisted task (restart-safe).
      */
     private void settlePartial(TaskExecutor.TickResult result) {
         BuildTask task = result.task();
         long planned = task.plan().mutations().size();
-        long appliedCount = result.totalApplied();
+        long appliedCount = Math.max(task.appliedCount(), result.totalApplied());
         long missed = Math.max(0, planned - appliedCount);
 
         BillingPolicy policy = billing();
@@ -330,7 +516,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         BigDecimal blockPart = policy.perBlockEnabled()
                 ? policy.perBlock().multiply(BigDecimal.valueOf(planned))
                 : BigDecimal.ZERO;
-        // If never started (0 applied) and still only queued conceptually, also refund operation fee.
         BigDecimal operationPart = BigDecimal.ZERO;
         if (appliedCount == 0 && policy.perOperationEnabled()) {
             operationPart = policy.perOperation();
@@ -352,13 +537,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 EconomyService.TransactionResult dep = economy.deposit(task.playerId(), refund, tx + ":compensation");
                 ledger.complete(tx + ":compensation", task.id(), task.playerId(), EconomyLedger.Kind.REFUND, refund, dep.successful(), dep.message());
             }
-            tasks.save(new BuildTask(task.id(), task.playerId(), task.playerName(), task.plan(), task.status(),
-                    task.cursor(), task.escrowId(), task.charged(), task.refunded().add(refund),
-                    task.createdAt(), Instant.now(), task.failure()));
+            tasks.save(task.withRefunded(task.refunded().add(refund), Instant.now()));
         }
 
-        if (task.plan().operation() == OperationKind.PLACE && missed > 0 && player != null
-                && player.getGameMode() != GameMode.CREATIVE) {
+        if (task.plan().operation() == OperationKind.PLACE && missed > 0) {
             returnPlaceMaterials(player, task, missed);
         }
 
@@ -371,48 +553,72 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     private void returnPlaceMaterials(Player player, BuildTask task, long count) {
         if (task.plan().mutations().isEmpty() || count <= 0) return;
+        if (player != null && player.getGameMode() == GameMode.CREATIVE) return;
         String itemKey = PaperInventoryHelper.itemKeyFromBlockState(task.plan().mutations().getFirst().targetState());
+        if (player != null) {
+            PaperInventoryHelper.giveOrDrop(player, itemKey, count);
+            return;
+        }
+        // Offline: drop near first mutation so materials are not silently lost.
         org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(itemKey);
         if (mat == null || !mat.isItem()) return;
+        World world = Bukkit.getWorld(task.plan().world());
+        if (world == null) return;
+        BlockPos pos = task.plan().mutations().getFirst().position();
+        Location loc = new Location(world, pos.x() + 0.5, pos.y() + 0.5, pos.z() + 0.5);
         long left = count;
         while (left > 0) {
             int stack = (int) Math.min(left, mat.getMaxStackSize());
-            player.getInventory().addItem(new org.bukkit.inventory.ItemStack(mat, stack));
+            world.dropItemNaturally(loc, new org.bukkit.inventory.ItemStack(mat, stack));
             left -= stack;
         }
     }
 
     private void resumeTasks() {
+        if (tasks == null || executor == null) return;
         for (BuildTask task : tasks.recoverable()) {
             TaskStatus status = task.status();
-            if ((status == TaskStatus.RUNNING || status == TaskStatus.PAUSED_SHUTDOWN) && Bukkit.getPlayer(task.playerId()) != null)
-                executor.enqueue(task.transition(TaskStatus.QUEUED, Instant.now()));
+            if (status != TaskStatus.RUNNING && status != TaskStatus.PAUSED_SHUTDOWN && status != TaskStatus.QUEUED) continue;
+            if (Bukkit.getPlayer(task.playerId()) == null) continue;
+            if (executor.isActive(task.id())) continue;
+            BuildTask queued = status == TaskStatus.QUEUED ? task : task.transition(TaskStatus.QUEUED, Instant.now());
+            executor.enqueue(queued);
         }
     }
 
     private boolean handleAdmin(org.bukkit.command.CommandSender sender, String[] args) {
+        if (!active || tasks == null || ledger == null) {
+            sender.sendMessage("MaxFastBuild is not ready");
+            return true;
+        }
         if (!sender.hasPermission("maxfastbuild.admin")) return true;
-        if (args.length > 0 && args[0].equalsIgnoreCase("reload")) { reloadConfig(); sender.sendMessage("MaxFastBuild configuration reloaded"); }
-        else if (args.length > 0 && args[0].equalsIgnoreCase("recovery")) sender.sendMessage("Recoverable tasks: " + tasks.recoverable().size() + ", pending ledger entries: " + ledger.pending().size());
-        else sender.sendMessage("/mfbadmin reload|recovery");
+        if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
+            reloadConfig();
+            sender.sendMessage("MaxFastBuild configuration reloaded");
+        } else if (args.length > 0 && args[0].equalsIgnoreCase("recovery")) {
+            sender.sendMessage("Recoverable tasks: " + tasks.recoverable().size() + ", pending ledger entries: " + ledger.pending().size());
+        } else {
+            sender.sendMessage("/mfbadmin reload|recovery");
+        }
         return true;
     }
 
     private void cancelPlayerTasks(Player player) {
+        if (!active || tasks == null || executor == null) return;
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(player.getUniqueId())) continue;
-            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING) continue;
+            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
+                    && task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) continue;
             try {
                 TaskExecutor.TickResult aborted = executor.abort(task.id());
                 settlePartial(aborted);
             } catch (RuntimeException ex) {
-                // Not in executor memory (e.g. recovered only in DB): full miss refund using charged total block/area.
                 try {
                     BuildTask cancelling = task.transition(TaskStatus.CANCELLING, Instant.now());
                     tasks.save(cancelling);
-                    int appliedGuess = Math.min(task.cursor(), task.plan().mutations().size());
+                    int applied = task.appliedCount();
                     settlePartial(new TaskExecutor.TickResult(
-                            cancelling.transition(TaskStatus.CANCELLED, Instant.now()), 0, 0, appliedGuess, true));
+                            cancelling.transition(TaskStatus.CANCELLED, Instant.now()), 0, 0, applied, true));
                 } catch (RuntimeException inner) {
                     getLogger().warning("Cancel settle failed for " + task.id() + ": " + inner.getMessage());
                 }
@@ -428,11 +634,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private EconomyService discoverEconomy() {
         RegisteredServiceProvider<Economy> registration = getServer().getServicesManager().getRegistration(Economy.class);
         if (registration != null) return new VaultEconomyService(registration.getProvider());
-        return new EconomyService() {
-            public TransactionResult withdraw(UUID id, BigDecimal amount, String tx) { return new TransactionResult(false, "economy_unavailable"); }
-            public TransactionResult deposit(UUID id, BigDecimal amount, String tx) { return new TransactionResult(false, "economy_unavailable"); }
-            public boolean enabled() { return false; }
-        };
+        return unavailableEconomy();
     }
 
     private EconomyService safeDiscoverEconomy() {
@@ -475,9 +677,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void issueSession(Player player) {
+        // Legacy HMAC path only. Secret is sent once over the marked system channel (same trust as other protocol traffic).
+        // Compact place/break do not use this session; prefer those for normal clients.
         SecureProtocol.Session session = protocol.issue(player.getUniqueId());
         sessions.put(player.getUniqueId(), session);
-        sendMarked(player, GSON.toJson(Map.of("mfb", 1, "type", "hello", "sessionId", session.id(), "secret", Base64.getUrlEncoder().withoutPadding().encodeToString(session.secret()), "expiresAt", session.expiresAt().toString())));
+        sendMarked(player, GSON.toJson(Map.of(
+                "mfb", 1,
+                "type", "hello",
+                "sessionId", session.id(),
+                "secret", Base64.getUrlEncoder().withoutPadding().encodeToString(session.secret()),
+                "expiresAt", session.expiresAt().toString())));
     }
 
     private void sendProtocol(Player player, String type, String key, Map<String, ?> data) {

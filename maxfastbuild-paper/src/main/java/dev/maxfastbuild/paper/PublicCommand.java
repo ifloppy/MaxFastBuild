@@ -6,7 +6,8 @@ import org.bukkit.entity.Player;
 import java.util.*;
 
 final class PublicCommand implements TabExecutor {
-    private static final List<String> ROOT = List.of("mode", "pos1", "pos2", "apply", "cancel", "undo", "redo", "status", "replace", "hollow", "material", "mirror", "array", "language");
+    private static final List<String> ROOT = List.of(
+            "mode", "pos1", "pos2", "apply", "cancel", "status", "hollow", "material");
     private final MaxFastBuildPlugin plugin;
     PublicCommand(MaxFastBuildPlugin plugin) { this.plugin = plugin; }
 
@@ -18,8 +19,12 @@ final class PublicCommand implements TabExecutor {
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) return matching(ROOT, args[0]);
-        if (args.length == 2 && args[0].equalsIgnoreCase("mode")) return matching(Arrays.stream(BuildMode.values()).map(v -> v.name().toLowerCase(Locale.ROOT)).toList(), args[1]);
-        if (args.length == 2 && args[0].equalsIgnoreCase("language")) return matching(List.of("en_us", "zh_cn"), args[1]);
+        if (args.length == 2 && args[0].equalsIgnoreCase("mode")) {
+            return matching(Arrays.stream(BuildMode.values()).map(v -> v.name().toLowerCase(Locale.ROOT)).toList(), args[1]);
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("hollow")) {
+            return matching(List.of("true", "false"), args[1]);
+        }
         return List.of();
     }
 

@@ -49,18 +49,18 @@
 
 ## 没有客户端时
 
-可使用服务器公开命令（若服务器开放），例如：
+可使用服务器公开命令（需权限 `maxfastbuild.use`）：
 
 ```text
 /mfb mode line
 /mfb pos1
 /mfb pos2
+/mfb material minecraft:stone
+/mfb hollow false
 /mfb apply
 /mfb status
 /mfb cancel
 ```
-
-具体子命令以服务器说明为准。
 
 ## 常见问题
 

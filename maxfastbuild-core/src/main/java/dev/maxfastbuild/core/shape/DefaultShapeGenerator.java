@@ -7,6 +7,7 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
     @Override
     public Set<BlockPos> generate(ShapeRequest request, int limit) {
         if (limit < 1) throw new IllegalArgumentException("limit must be positive");
+        ShapeScanBudget.ensureWithinLimit(request, limit);
         LinkedHashSet<BlockPos> result = new LinkedHashSet<>();
         switch (request.mode()) {
             case SINGLE -> add(result, request.first(), limit);

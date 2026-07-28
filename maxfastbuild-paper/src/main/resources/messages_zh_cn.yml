@@ -12,3 +12,5 @@ insufficient-materials: "<red>材料不足：需要 {0}，仅有 {1}（{2}）。
 insufficient-tool: "<red>没有合适的挖掘工具（耐久须保留至少 4）。</red>"
 wrong-tool: "<red>工具无法破坏该方块：{0}。</red>"
 payment-failed: "<red>扣款失败：{0}</red>"
+no-permission-key: "<red>缺少权限：{0}</red>"
+shape-too-large: "<red>形状超过服务器上限（{0}）。</red>"

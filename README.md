@@ -94,7 +94,7 @@ Player controls and workflows: [English](docs/USER_MANUAL_en_US.md) / [中文](d
 | Surface | Files |
 |---------|--------|
 | Fabric client UI / HUD / errors | `maxfastbuild-fabric/.../lang/en_us.json`, `zh_cn.json` |
-| Paper admin-facing messages | `maxfastbuild-paper/.../messages_en_us.yml`, `messages_zh_cn.yml` |
+| Paper message templates (not loaded yet; protocol keys + hard-coded admin strings) | `maxfastbuild-paper/.../messages_en_us.yml`, `messages_zh_cn.yml` |
 | Player manuals | `docs/USER_MANUAL_en_US.md`, `docs/USER_MANUAL_zh_CN.md` |
 
 Protocol responses use translation keys (e.g. `maxfastbuild.task.accepted`); the client resolves them with language files.

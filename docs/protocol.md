@@ -2,6 +2,8 @@
 
 The protocol deliberately uses vanilla command and system-message packet types. It does not use plugin messaging or a Fabric custom payload.
 
+Anyone who can send chat commands can attempt `/__mfb`; the **server** enforces permissions (`maxfastbuild.use` / `maxfastbuild.break`), rate limits, shape caps, materials, economy, and world protection. The compact path does **not** require an HMAC session.
+
 ## Client to server
 
 Primary place intent (single command, always under 240 characters):
@@ -30,13 +32,15 @@ Example:
 
 Break execution uses main-hand tool first, then other inventory tools. A tool is never worn below 4 remaining durability; drops and economy charges still apply.
 
-Optional handshake (legacy):
+Optional handshake (legacy HMAC path — not used by the Fabric client compact commands):
 
 ```text
 /__mfb hello
 ```
 
-Legacy chunked authenticated payload (still accepted):
+The hello reply includes a per-player session secret over the same marked system-message channel. Treat it as legacy; do not rely on chat secrecy for new clients. Permission checks still apply after envelope verify.
+
+Legacy chunked authenticated payload (still accepted; same permission checks after reassembly):
 
 ```text
 /__mfb p <transfer-id> <index> <total> <chunk>
@@ -50,7 +54,9 @@ The server sends a system message whose literal content starts with the invisibl
 
 Common `messageKey` values:
 
-- `maxfastbuild.task.accepted` — data: `blocks`, `charge`
+- `maxfastbuild.task.accepted` — data: `blocks`, `charge` (and `taskId`)
 - `maxfastbuild.task.completed` / `maxfastbuild.task.partial` — data: `applied`, `planned`, `refund`
 - `maxfastbuild.error.insufficient_materials` — data: `need`, `have`, `material` (may be JSON numbers)
 - `maxfastbuild.error.payment_failed` — data: `reason`
+- `maxfastbuild.error.no_permission` — data: `permission`
+- `maxfastbuild.error.shape_too_large` — data: `limit`

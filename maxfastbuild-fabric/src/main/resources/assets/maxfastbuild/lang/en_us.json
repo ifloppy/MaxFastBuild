@@ -20,6 +20,8 @@
   "maxfastbuild.error.wrong_tool": "No effective tool for block: %s",
   "maxfastbuild.error.insufficient_materials": "Not enough materials: need %s, have %s (%s)",
   "maxfastbuild.error.invalid_material": "Invalid material: %s",
+  "maxfastbuild.error.no_permission": "Missing permission: %s",
+  "maxfastbuild.error.shape_too_large": "Shape exceeds server limit (%s blocks / volume)",
   "maxfastbuild.radial.title": "MaxFastBuild modes",
   "maxfastbuild.radial.heading": "MAX FAST BUILD",
   "maxfastbuild.radial.move_mouse": "Choose mode",

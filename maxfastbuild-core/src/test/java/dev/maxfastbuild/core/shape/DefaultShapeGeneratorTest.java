@@ -21,4 +21,11 @@ class DefaultShapeGeneratorTest {
         assertThatThrownBy(() -> generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(10, 10, 10), false), 100))
                 .isInstanceOf(ShapeLimitException.class);
     }
+
+    @Test void rejectsHollowCuboidWhenBoundingVolumeExceedsLimit() {
+        // Surface alone would be under a high surface budget, but volume scan would be huge.
+        assertThatThrownBy(() -> generator.generate(
+                new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(50, 50, 50), true), 1000))
+                .isInstanceOf(ShapeLimitException.class);
+    }
 }

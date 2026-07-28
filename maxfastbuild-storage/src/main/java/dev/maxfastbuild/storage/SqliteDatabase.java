@@ -34,7 +34,19 @@ public final class SqliteDatabase implements AutoCloseable {
     }
 
     @Override public synchronized void close() {
-        try { connection.close(); } catch (SQLException ex) { throw new StorageException("Unable to close SQLite database", ex); }
+        try {
+            if (connection != null && !connection.isClosed()) connection.close();
+        } catch (SQLException ex) {
+            // Prefer soft close on plugin unload (PlugMan) so disable never aborts mid-cleanup.
+            throw new StorageException("Unable to close SQLite database", ex);
+        }
+    }
+
+    /** Close without throwing — for plugin disable / hot-reload paths. */
+    public synchronized void closeQuietly() {
+        try {
+            if (connection != null && !connection.isClosed()) connection.close();
+        } catch (SQLException ignored) { }
     }
 
     @FunctionalInterface public interface SqlWork<T> { T run(Connection connection) throws Exception; }
