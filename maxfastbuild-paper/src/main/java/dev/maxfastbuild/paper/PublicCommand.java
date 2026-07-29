@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
 
 final class PublicCommand implements TabExecutor {
     static final List<String> ROOT = List.of(
-            "help", "mode", "pos1", "pos2", "apply", "cancel", "status", "hollow", "material");
+            "help", "about", "mode", "pos1", "pos2", "apply", "cancel", "status", "hollow", "material");
     private static final List<String> BOOLS = List.of("true", "false");
     private static final List<String> MODES = Arrays.stream(BuildMode.values())
             .map(v -> v.name().toLowerCase(Locale.ROOT))

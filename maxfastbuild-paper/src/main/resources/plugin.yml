@@ -17,10 +17,7 @@ commands:
     permission: maxfastbuild.admin
 permissions:
   maxfastbuild.use:
-    description: 使用 /mfb 或客户端放置建造
-    default: true
-  maxfastbuild.break:
-    description: 使用破坏建造（客户端或 /mfb apply break）
+    description: 使用 /mfb 或客户端建造（放置与破坏）
     default: true
   maxfastbuild.material.shulker:
     description: 在配置开启时允许从潜影盒取材料

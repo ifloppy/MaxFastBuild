@@ -27,8 +27,7 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 
 | Permission | Effect |
 |------------|--------|
-| `maxfastbuild.use` | `/mfb` and place via `/__mfb` |
-| `maxfastbuild.break` | Break via `/__mfb` (also requires `use`) |
+| `maxfastbuild.use` | `/mfb` and `/__mfb` place/break (default true) |
 | `maxfastbuild.material.shulker` | Shulker search when `require-shulker-permission` is true |
 | `maxfastbuild.bypass.cost` / `.materials` / `.rate-limit` | Explicit bypass (default false; not OP) |
 | `maxfastbuild.admin` | `/mfbadmin reload\|recovery` |

@@ -15,6 +15,7 @@ import java.util.Map;
 /**
  * Hold-key radial menu (Effortless-style): open while key is held, close on release.
  * Transparent background — world stays visible behind the ring.
+ * Ring size scales to the smaller screen axis so it never overflows odd aspect ratios / GUI scales.
  */
 final class RadialBuildScreen extends Screen {
     private static final BuildMode[] OUTER = {
@@ -27,11 +28,17 @@ final class RadialBuildScreen extends Screen {
     };
 
     private static final int TEX = 512;
+    /** Design size at 1.0 scale (matches authored 512 textures drawn into a 320 box). */
+    private static final int BASE_RING_PX = 320;
+    private static final int MIN_RING_PX = 140;
+    /** Margin from each screen edge so the ring + heading stay inside the viewport. */
+    private static final int EDGE_MARGIN = 8;
+    private static final int HEADING_RESERVE = 22;
+
     private static final double TEX_INNER_HOLE = 42 * (512.0 / 320.0);
     private static final double TEX_INNER_OUTER = 91 * (512.0 / 320.0);
     private static final double TEX_OUTER_INNER = 96 * (512.0 / 320.0);
     private static final double TEX_OUTER_OUTER = 154 * (512.0 / 320.0);
-    private static final int RING_PX = 320;
 
     private static final Identifier BASE = Identifier.fromNamespaceAndPath("maxfastbuild", "textures/gui/radial_base.png");
     private static final Map<BuildMode, Identifier> ICONS = new EnumMap<>(BuildMode.class);
@@ -54,6 +61,8 @@ final class RadialBuildScreen extends Screen {
     private BuildMode hovered;
     /** True after left-click selected a mode; release should not re-select. */
     private boolean selectedByClick;
+    /** Current ring diameter in GUI pixels (recomputed every frame from screen size). */
+    private int ringPx = BASE_RING_PX;
 
     RadialBuildScreen() {
         super(Component.translatable("maxfastbuild.radial.title"));
@@ -79,10 +88,11 @@ final class RadialBuildScreen extends Screen {
     @Override
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float delta) {
         // No full-screen scrim / no extractTransparentBackground — keep world visible.
+        ringPx = computeRingPx();
         int cx = width / 2;
         int cy = height / 2;
-        int left = cx - RING_PX / 2;
-        int top = cy - RING_PX / 2;
+        int left = cx - ringPx / 2;
+        int top = cy - ringPx / 2;
         hovered = hit(mouseX, mouseY);
 
         blitScaled(graphics, BASE, left, top);
@@ -101,19 +111,39 @@ final class RadialBuildScreen extends Screen {
         Component name = hovered == null
                 ? Component.translatable("maxfastbuild.radial.move_mouse")
                 : Component.translatable("maxfastbuild.mode." + hovered.name().toLowerCase(Locale.ROOT));
-        graphics.centeredText(font, name, cx, cy - 8, hovered == null ? 0xFFB8C2CE : 0xFFFFFFFF);
-        graphics.centeredText(font, Component.translatable("maxfastbuild.radial.release_select"), cx, cy + 6, 0xFF8593A3);
-        graphics.centeredText(font, Component.translatable("maxfastbuild.radial.heading"), cx, cy - RING_PX / 2 - 18, 0xFF8EE9FF);
+        int hubTextY = Math.max(2, (int) Math.round(ringPx * 0.025));
+        graphics.centeredText(font, name, cx, cy - hubTextY - 4, hovered == null ? 0xFFB8C2CE : 0xFFFFFFFF);
+        graphics.centeredText(font, Component.translatable("maxfastbuild.radial.release_select"), cx, cy + hubTextY + 2, 0xFF8593A3);
+
+        int headingY = top - Math.max(12, HEADING_RESERVE - 4);
+        if (headingY < 2) headingY = 2;
+        graphics.centeredText(font, Component.translatable("maxfastbuild.radial.heading"), cx, headingY, 0xFF8EE9FF);
         super.extractRenderState(graphics, mouseX, mouseY, delta);
     }
 
-    private static void blitScaled(GuiGraphicsExtractor graphics, Identifier texture, int left, int top) {
+    /**
+     * Fit the ring inside the smaller screen axis, leaving room for the heading and a thin margin.
+     * Never larger than the design size; never smaller than {@link #MIN_RING_PX} unless the screen is tinier.
+     */
+    private int computeRingPx() {
+        int availW = Math.max(1, width - EDGE_MARGIN * 2);
+        int availH = Math.max(1, height - EDGE_MARGIN * 2 - HEADING_RESERVE);
+        int fit = Math.min(availW, availH);
+        int desired = Math.min(BASE_RING_PX, fit);
+        // Prefer at least MIN_RING_PX when the screen can take it; otherwise shrink further to fit.
+        if (fit >= MIN_RING_PX) {
+            return Math.max(MIN_RING_PX, desired);
+        }
+        return Math.max(96, fit);
+    }
+
+    private void blitScaled(GuiGraphicsExtractor graphics, Identifier texture, int left, int top) {
         graphics.blit(
                 RenderPipelines.GUI_TEXTURED,
                 texture,
                 left, top,
                 0f, 0f,
-                RING_PX, RING_PX,
+                ringPx, ringPx,
                 TEX, TEX,
                 TEX, TEX);
     }
@@ -134,14 +164,22 @@ final class RadialBuildScreen extends Screen {
 
     private void drawIconsAndLabels(GuiGraphicsExtractor graphics, int cx, int cy, BuildMode[] modes, double iconR, double labelR) {
         double sector = Math.PI * 2 / modes.length;
+        double uiScale = ringPx / (double) BASE_RING_PX;
+        int iconSize = Math.max(12, (int) Math.round(24 * uiScale));
+        int iconHalf = iconSize / 2;
+        int iconTex = 32;
         for (int index = 0; index < modes.length; index++) {
             double angle = -Math.PI / 2 + (index + 0.5) * sector;
-            int ix = cx + (int) Math.round(Math.cos(angle) * iconR) - 12;
-            int iy = cy + (int) Math.round(Math.sin(angle) * iconR) - 14;
-            graphics.blit(RenderPipelines.GUI_TEXTURED, ICONS.get(modes[index]), ix, iy, 0f, 0f, 24, 24, 32, 32);
+            int ix = cx + (int) Math.round(Math.cos(angle) * iconR) - iconHalf;
+            int iy = cy + (int) Math.round(Math.sin(angle) * iconR) - iconHalf - (int) Math.round(2 * uiScale);
+            graphics.blit(RenderPipelines.GUI_TEXTURED, ICONS.get(modes[index]),
+                    ix, iy, 0f, 0f, iconSize, iconSize, iconTex, iconTex);
 
             int lx = cx + (int) Math.round(Math.cos(angle) * labelR);
-            int ly = cy + (int) Math.round(Math.sin(angle) * labelR) - 4;
+            int ly = cy + (int) Math.round(Math.sin(angle) * labelR) - (int) Math.round(4 * uiScale);
+            // Keep labels inside the screen; clamp slightly if a short axis would clip text.
+            lx = Math.max(font.width("W"), Math.min(width - font.width("W"), lx));
+            ly = Math.max(2, Math.min(height - 10, ly));
             int color = modes[index] == hovered ? 0xFFFFFFFF : 0xFFE7EEF7;
             graphics.centeredText(font,
                     Component.translatable("maxfastbuild.mode.short." + modes[index].name().toLowerCase(Locale.ROOT)),
@@ -171,8 +209,8 @@ final class RadialBuildScreen extends Screen {
         return null;
     }
 
-    private static double screenRadius(double textureRadius) {
-        return textureRadius * (RING_PX / (double) TEX);
+    private double screenRadius(double textureRadius) {
+        return textureRadius * (ringPx / (double) TEX);
     }
 
     private static BuildMode sector(BuildMode[] modes, double dx, double dy) {

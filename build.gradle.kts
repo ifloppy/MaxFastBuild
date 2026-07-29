@@ -59,13 +59,22 @@ val copyReleaseJars by tasks.registering {
     doLast {
         val out = releaseDir.asFile
         out.mkdirs()
+        fun copySafe(src: File, dest: File) {
+            try {
+                src.copyTo(dest, overwrite = true)
+            } catch (ex: Exception) {
+                logger.warn("Could not write ${dest.name}: ${ex.message}")
+            }
+        }
         val paper = pickDistributableJar(":maxfastbuild-paper")
         val fabric = pickDistributableJar(":maxfastbuild-fabric")
-        paper.copyTo(out.resolve("MaxFastBuild-Paper-$releaseVersion.jar"), overwrite = true)
-        fabric.copyTo(out.resolve("MaxFastBuild-Fabric-$releaseVersion.jar"), overwrite = true)
+        val paperOut = out.resolve("MaxFastBuild-Paper-$releaseVersion.jar")
+        val fabricOut = out.resolve("MaxFastBuild-Fabric-$releaseVersion.jar")
+        copySafe(paper, paperOut)
+        copySafe(fabric, fabricOut)
         logger.lifecycle("Release jars:")
-        logger.lifecycle("  ${out.resolve("MaxFastBuild-Paper-$releaseVersion.jar")}")
-        logger.lifecycle("  ${out.resolve("MaxFastBuild-Fabric-$releaseVersion.jar")}")
+        logger.lifecycle("  $paperOut")
+        logger.lifecycle("  $fabricOut")
     }
 }
 

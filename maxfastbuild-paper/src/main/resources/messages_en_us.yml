@@ -13,6 +13,7 @@ help-line-hollow: "<yellow>/mfb hollow [true|false]</yellow> <gray>— hollow mo
 help-line-apply: "<yellow>/mfb apply</yellow> <gray>— submit from main hand: block=place/replace, tool=break, empty=reject</gray>"
 help-line-status: "<yellow>/mfb status</yellow> <gray>— selection and tasks</gray>"
 help-line-cancel: "<yellow>/mfb cancel</yellow> <gray>— cancel your active tasks</gray>"
+help-line-about: "<yellow>/mfb about</yellow> <gray>— plugin information</gray>"
 help-line-help: "<yellow>/mfb help</yellow> <gray>— this help</gray>"
 help-modes: "<gray>Shapes: single line wall floor cube diagonal_line diagonal_wall slope_floor circle cylinder sphere pyramid cone</gray>"
 help-tip: "<gray>Flow: mode → pos1 → pos2 → hold block or tool → apply. Same hand rules as /__mfb. Or use the Fabric radial menu.</gray>"
@@ -82,3 +83,5 @@ no-changes: "<yellow>No blocks would change.</yellow>"
 rate-limited: "<red>Too many requests; try again later.</red>"
 persistence-failed: "<red>Failed to save task: {0}</red>"
 protocol-rejected: "<red>Request rejected: {0}</red>"
+
+about: "<gold>===== MaxFastBuild about =====</gold>\n<gray>MaxFastBuild</gray> <dark_gray>- Server-authoritative mass building tool</dark_gray>\n<gray>License:</gray> <gold>LGPL-3.0-only</gold>\n<gray>Copyright:</gray> <gold>Copyright (C) 2026 MaxFastBuild contributors</gold>\n<gray>Website:</gray> <click:OPEN_URL:https://max.iruanp.com><u><aqua>max.iruanp.com</aqua></u></click>\n<gray>Repository:</gray> <click:OPEN_URL:https://github.com/ifloppy/MaxFastBuild><u><aqua>github.com/ifloppy/MaxFastBuild</aqua></u></click>\n<dark_gray>Distributed under LGPL-3.0-only — copyright notices must be preserved.</dark_gray>\n<dark_gray>Interaction concepts inspired by Effortless Building (Requios).</dark_gray>"

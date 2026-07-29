@@ -9,16 +9,16 @@ Transforms (`mirror` / `array`) exist in `maxfastbuild-core` but are **not** app
 ## Request pipeline (Paper)
 
 1. Intercept `/__mfb` (not registered in Brigadier). Primary intents are single-line `place` / `break`. Optional legacy path: `hello` session + chunked `p` envelopes with HMAC (still accepted; not required for compact commands).
-2. Check `maxfastbuild.use` (and `maxfastbuild.break` for break), request rate limit, and concurrent task limits.
+2. Check `maxfastbuild.use`, request rate limit, and concurrent task limits.
 3. Generate the shape on the server (bounding volume must not exceed `execution.max-region-blocks` before cell enumeration).
 4. Reject invalid materials, forbidden place/break blocks, and coordinates outside world height.
-5. Invoke platform protection checks for every mutation (`BlockPlaceEvent` / `BlockBreakEvent`).  
-   Place over a solid block first requires the same break rules (unbreakable list, tool, durability, `BlockBreakEvent`); execution breaks then places. Soft/replaceable cells (air, fluids, short plants, …) skip the break step. Per-block economy fees charge place + each required replace-break.
+5. Local protection checks only during planning (no synthetic `BlockBreakEvent`/`BlockPlaceEvent` — those multi-logged in CoreProtect).  
+   **Execute with vanilla APIs:** break = `breakNaturally` (CP records one break); place = `setBlockData`. Soft cells skip break. Per-block fees charge place + each replace-break.
 6. Count inventory (optional shulker contents when configured); take materials immediately when accepted.
 7. Write a withdrawal intent, withdraw through Vault when economy is enabled, then record the result.
 8. Persist the task (including `cursor` and `applied_count`) before queueing. `escrow_id` is unused (null).
 9. Revalidate expected state and protection immediately before each mutation.
-10. Record successful changes to CoreProtect under the requesting player's name (placement uses target block data; break uses pre-break expected state).
+10. CoreProtect: trust `breakNaturally` for removals (do **not** also `logRemoval`). After place `setBlockData`, call `logPlacement` once.
 11. Persist cursor and applied count after each execution step (restart-safe partial refunds).
 12. On completion or cancel, refund unfinished per-block/per-area fees and return unused place materials (inventory or world drop if full/offline).
 

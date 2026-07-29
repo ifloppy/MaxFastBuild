@@ -2,7 +2,7 @@
 
 The protocol deliberately uses vanilla command and system-message packet types. It does not use plugin messaging or a Fabric custom payload.
 
-Anyone who can send chat commands can attempt `/__mfb`; the **server** enforces permissions (`maxfastbuild.use` / `maxfastbuild.break`), rate limits, shape caps, materials, economy, and world protection. The compact path does **not** require an HMAC session.
+Anyone who can send chat commands can attempt `/__mfb`; the **server** enforces `maxfastbuild.use`, rate limits, shape caps, materials, economy, and world protection. The compact path does **not** require an HMAC session.
 
 ## Client to server
 

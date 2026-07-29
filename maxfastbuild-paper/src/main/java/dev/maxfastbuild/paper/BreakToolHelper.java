@@ -69,18 +69,18 @@ final class BreakToolHelper {
         if (player.getGameMode() != GameMode.CREATIVE && !isEffectiveFor(tool, block)) {
             return false;
         }
-        // Prefer Paper breakNaturally(tool, triggerEffect, dropExperience) when present; fall back for older APIs.
-        boolean changed = breakNaturallyCompat(block, tool);
+        // Vanilla break (CoreProtect sees this once). Prefer Paper 3-arg when present.
+        boolean changed = breakNaturallyVanilla(block, tool);
         if (!changed) return false;
         if (player.getGameMode() == GameMode.CREATIVE) return true;
         if (!isMiningTool(tool)) return true;
+        // breakNaturally does not always apply item damage the same as player mining — wear once here.
         applyDamage(player, selection.slot(), BREAK_DAMAGE);
         return true;
     }
 
-    private static boolean breakNaturallyCompat(Block block, ItemStack tool) {
+    private static boolean breakNaturallyVanilla(Block block, ItemStack tool) {
         try {
-            // Paper: breakNaturally(ItemStack, boolean triggerEffect, boolean dropExperience)
             var method = Block.class.getMethod("breakNaturally", ItemStack.class, boolean.class, boolean.class);
             Object result = method.invoke(block, tool, true, true);
             return result instanceof Boolean b && b;
@@ -89,7 +89,8 @@ final class BreakToolHelper {
         }
     }
 
-    private static void applyDamage(Player player, int slot, int amount) {
+    /** Package-visible so silent break can wear tools without going through breakNaturally. */
+    static void applyDamage(Player player, int slot, int amount) {
         PlayerInventory inv = player.getInventory();
         ItemStack stack = slot == 40 ? inv.getItemInOffHand() : inv.getItem(slot);
         if (stack == null || stack.getType().isAir() || !isMiningTool(stack)) return;
@@ -129,6 +130,7 @@ final class BreakToolHelper {
      * - destroy speed better than bare hand for hard blocks, OR
      * - soft blocks (hardness 0) accept any mining tool.
      */
+    /** Public for silent break effectiveness checks. */
     static boolean isEffectiveFor(ItemStack stack, Block block) {
         if (stack == null || block == null) return false;
         Material type = block.getType();

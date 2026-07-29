@@ -74,6 +74,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getScheduler().runTaskTimer(this, this::tickTasks, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
+            getLogger().info("CoreProtect mode: vanilla breakNaturally + one API logPlacement; no synthetic break events / no double logRemoval");
             ensureSqliteDriver();
         } catch (RuntimeException ex) {
             getLogger().severe("MaxFastBuild failed to enable: " + ex.getMessage());
@@ -213,8 +214,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                             intent.first(), intent.second(), intent.hollow(), intent.material()));
                 }
                 case "break" -> {
-                    if (!player.hasPermission("maxfastbuild.use") || !player.hasPermission("maxfastbuild.break")) {
-                        sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
+                    if (!player.hasPermission("maxfastbuild.use")) {
+                        sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
                         return;
                     }
                     if (!rateLimit(player)) {
@@ -242,12 +243,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     ProtocolEnvelope envelope = new ProtocolEnvelope(Integer.parseInt(envelopeParts[0]), envelopeParts[1], Long.parseLong(envelopeParts[2]), envelopeParts[3], envelopeParts[4]);
                     byte[] json = protocol.verify(player.getUniqueId(), envelope);
                     ClientRequest request = GSON.fromJson(new String(json, StandardCharsets.UTF_8), ClientRequest.class);
-                    if ("break".equalsIgnoreCase(request.operation())) {
-                        if (!player.hasPermission("maxfastbuild.use") || !player.hasPermission("maxfastbuild.break")) {
-                            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
-                            return;
-                        }
-                    } else if (!player.hasPermission("maxfastbuild.use")) {
+                    if (!player.hasPermission("maxfastbuild.use")) {
                         sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
                         return;
                     }
@@ -389,6 +385,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "status-tasks", tasks.activeCount(player.getUniqueId()));
             }
             case "cancel" -> cancelPlayerTasks(player);
+            case "about" -> messages.send(player, "about");
             default -> messages.send(player, "unknown-subcommand", args[0]);
         }
     }
@@ -404,6 +401,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         messages.send(player, "help-line-apply");
         messages.send(player, "help-line-status");
         messages.send(player, "help-line-cancel");
+        messages.send(player, "help-line-about");
         messages.send(player, "help-modes");
         messages.send(player, "help-tip");
     }
@@ -475,10 +473,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void submit(Player player, Selection selection, OperationKind operation) {
         if (!player.hasPermission("maxfastbuild.use")) {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
-            return;
-        }
-        if (operation == OperationKind.BREAK && !player.hasPermission("maxfastbuild.break")) {
-            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.break"));
             return;
         }
         if (selection.first() == null || selection.second() == null) {
@@ -891,6 +885,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return new AuditService() {
                 public boolean available() { return false; }
                 public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind) {}
+                public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind, boolean breakAlreadyLogged) {}
             };
         }
     }

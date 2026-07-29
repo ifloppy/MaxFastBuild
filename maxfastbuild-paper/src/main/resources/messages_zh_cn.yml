@@ -13,6 +13,7 @@ help-line-hollow: "<yellow>/mfb hollow [true|false]</yellow> <gray>— 空心模
 help-line-apply: "<yellow>/mfb apply</yellow> <gray>— 按主手提交：方块=放置/替换，工具=破坏，空手拒绝</gray>"
 help-line-status: "<yellow>/mfb status</yellow> <gray>— 查看选区与任务</gray>"
 help-line-cancel: "<yellow>/mfb cancel</yellow> <gray>— 取消自己的进行中任务</gray>"
+help-line-about: "<yellow>/mfb about</yellow> <gray>— 显示插件信息</gray>"
 help-line-help: "<yellow>/mfb help</yellow> <gray>— 显示本帮助</gray>"
 help-modes: "<gray>形状：单方块(single) 直线(line) 墙(wall) 地板(floor) 立方体(cube) 对角线(diagonal_line) 对角墙(diagonal_wall) 斜坡地板(slope_floor) 圆(circle) 圆柱(cylinder) 球体(sphere) 棱锥(pyramid) 圆锥(cone)</gray>"
 help-tip: "<gray>流程：mode → pos1 → pos2 → 主手持方块或工具 → apply。与客户端 /__mfb 同一套主手判定。也可用 Fabric 径向菜单。</gray>"
@@ -82,3 +83,5 @@ no-changes: "<yellow>没有需要改变的方块。</yellow>"
 rate-limited: "<red>操作过于频繁，请稍后再试。</red>"
 persistence-failed: "<red>任务保存失败：{0}</red>"
 protocol-rejected: "<red>请求被拒绝：{0}</red>"
+
+about: "<gold>===== MaxFastBuild 关于 =====</gold>\n<gray>MaxFastBuild</gray> <dark_gray>- 服务端权威的大规模建造工具</dark_gray>\n<gray>许可证：</gray><gold>LGPL-3.0-only</gold>\n<gray>版权：</gray><gold>Copyright (C) 2026 MaxFastBuild contributors</gold>\n<gray>官网：</gray><click:OPEN_URL:https://max.iruanp.com><u><aqua>max.iruanp.com</aqua></u></click>\n<gray>仓库：</gray><click:OPEN_URL:https://github.com/ifloppy/MaxFastBuild><u><aqua>github.com/ifloppy/MaxFastBuild</aqua></u></click>\n<dark_gray>本插件基于 LGPL-3.0-only 发布，分发时不可移除版权声明。</dark_gray>\n<dark_gray>交互概念受 Effortless Building (Requios) 启发。</dark_gray>"

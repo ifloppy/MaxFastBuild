@@ -72,7 +72,13 @@ public final class TaskExecutor {
                     if (result.changed()) {
                         changed++;
                         applied++;
-                        audit.record(task.playerId(), task.playerName(), task.plan().world(), mutation, task.plan().operation());
+                        audit.record(
+                                task.playerId(),
+                                task.playerName(),
+                                task.plan().world(),
+                                mutation,
+                                task.plan().operation(),
+                                result.breakAlreadyLogged());
                     } else skipped++;
                 }
             }
