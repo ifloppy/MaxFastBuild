@@ -12,6 +12,8 @@ import dev.maxfastbuild.storage.*;
 import net.milkbowl.vault.economy.Economy;
 import net.kyori.adventure.text.Component;
 import org.bukkit.*;
+import org.bukkit.block.Block;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
@@ -372,6 +374,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
                 submitFromHand(player, current);
             }
+            case "setblock" -> {
+                if (!rateLimit(player)) {
+                    notifyPlayer(player, "error", "maxfastbuild.error.rate_limited", Map.of());
+                    return;
+                }
+                submitSetBlock(player, args);
+            }
             case "status" -> {
                 Selection current = selections.getOrDefault(player.getUniqueId(), selection);
                 String missing = plain(messages.raw("status-pos-missing"));
@@ -450,6 +459,254 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
         submit(player, effective, intent.operation());
+    }
+
+    private void submitSetBlock(Player player, String[] args) {
+        if (args.length < 5) {
+            messages.send(player, "setblock-usage");
+            return;
+        }
+        String mode = "replace";
+        if (args.length >= 6) {
+            mode = args[5].toLowerCase(Locale.ROOT);
+            if (!mode.equals("replace") && !mode.equals("destroy") && !mode.equals("keep")) {
+                messages.send(player, "setblock-invalid-mode", mode);
+                return;
+            }
+        }
+
+        // Parse position (supports ~ ~ ~ relative to player's feet)
+        BlockPos position;
+        try {
+            Location loc = player.getLocation();
+            int x = parseCoordinate(args[1], loc.getBlockX());
+            int y = parseCoordinate(args[2], loc.getBlockY());
+            int z = parseCoordinate(args[3], loc.getBlockZ());
+            position = new BlockPos(x, y, z);
+        } catch (NumberFormatException ex) {
+            messages.send(player, "setblock-invalid-pos", Arrays.toString(Arrays.copyOfRange(args, 1, 4)));
+            return;
+        }
+
+        // Parse block state
+        String blockState = args[4];
+        if (!blockState.contains(":")) {
+            blockState = "minecraft:" + blockState;
+        }
+        BlockData blockData;
+        try {
+            blockData = Bukkit.createBlockData(blockState);
+        } catch (IllegalArgumentException ex) {
+            messages.send(player, "setblock-invalid-block", blockState);
+            return;
+        }
+        Material material = blockData.getMaterial();
+        if (material == null || !material.isBlock() || material.isAir() || RestrictedMaterials.isForbiddenPlace(material)) {
+            messages.send(player, "setblock-invalid-block", blockState);
+            return;
+        }
+
+        // Check permissions
+        if (!player.hasPermission("maxfastbuild.use")) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+            return;
+        }
+
+        // Check height
+        if (position.y() < player.getWorld().getMinHeight() || position.y() >= player.getWorld().getMaxHeight()) {
+            sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", position.toString(), "reason", "unsafe_height"));
+            return;
+        }
+
+        // Check CoreProtect
+        if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) {
+            sendProtocol(player, "error", "maxfastbuild.error.coreprotect_unavailable", Map.of());
+            return;
+        }
+
+        // Check economy enabled
+        if (getConfig().getBoolean("economy.enabled") && !economy.enabled() && !player.hasPermission("maxfastbuild.bypass.cost")) {
+            sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
+            return;
+        }
+
+        // Check task limit
+        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
+            sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
+            return;
+        }
+
+        PaperWorldAccess world = new PaperWorldAccess();
+        String worldName = player.getWorld().getName();
+        String before = world.stateAt(worldName, position);
+
+        // Mode: keep - only place if air/replaceable
+        if ("keep".equals(mode) && !PaperWorldAccess.isReplaceableOccupant(Bukkit.createBlockData(before).getMaterial())) {
+            messages.send(player, "setblock-success", formatPos(position), blockState);
+            return; // No-op, but show success
+        }
+
+        // Mode: destroy - always break first
+        boolean destroy = "destroy".equals(mode);
+        OperationKind operation = OperationKind.PLACE;
+        if (destroy) {
+            operation = OperationKind.BREAK;
+        }
+
+        BlockMutation mutation = new BlockMutation(position, before, destroy ? "minecraft:air" : blockState);
+
+        // Validate
+        WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
+        if (!validation.allowed()) {
+            handleValidationError(player, position, validation, before);
+            return;
+        }
+
+        // For destroy mode, also validate the place after break
+        if (destroy) {
+            BlockMutation placeMutation = new BlockMutation(position, "minecraft:air", blockState);
+            WorldAccess.ValidationResult placeValidation = world.mayMutate(player.getUniqueId(), worldName, placeMutation, OperationKind.PLACE);
+            if (!placeValidation.allowed()) {
+                handleValidationError(player, position, placeValidation, "minecraft:air");
+                return;
+            }
+        }
+
+        // For replace mode, check if we need to break a solid block first
+        long replaceBreakCount = 0;
+        boolean needsBreak = false;
+        if (!destroy && "replace".equals(mode)) {
+            if (!PaperWorldAccess.isReplaceableOccupant(Bukkit.createBlockData(before).getMaterial())) {
+                replaceBreakCount = 1;
+                needsBreak = true;
+            }
+        }
+
+        // Check tools/durability for break operations
+        if ((destroy || needsBreak) && player.getGameMode() != GameMode.CREATIVE) {
+            if (!BreakToolHelper.hasAnyMiningTool(player)) {
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
+                return;
+            }
+            Block target = player.getWorld().getBlockAt(position.x(), position.y(), position.z());
+            if (!BreakToolHelper.canBreakBlock(player, target)) {
+                sendProtocol(player, "error", "maxfastbuild.error.wrong_tool",
+                        Map.of("block", target.getType().getKey().toString(), "reason", "no_effective_tool"));
+                return;
+            }
+            long usable = estimateUsableToolHits(player);
+            long needBreaks = destroy ? 1 : replaceBreakCount;
+            if (usable < needBreaks) {
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool_durability",
+                        Map.of("reason", "durability", "need", needBreaks, "have", usable));
+                return;
+            }
+        }
+
+        // Check materials for place
+        boolean requireMaterials = player.getGameMode() != GameMode.CREATIVE && !player.hasPermission("maxfastbuild.bypass.materials");
+        boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
+        if (searchShulkers && getConfig().getBoolean("inventory.require-shulker-permission", false)
+                && !player.hasPermission("maxfastbuild.material.shulker")) {
+            searchShulkers = false;
+        }
+        String itemKey = PaperInventoryHelper.itemKeyFromBlockState(blockState);
+        long need = 1;
+        if (requireMaterials && !destroy) {
+            Material resolved = PaperInventoryHelper.resolveMaterial(itemKey);
+            if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
+                sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", blockState));
+                return;
+            }
+            long have = PaperInventoryHelper.count(player, itemKey, searchShulkers);
+            if (have < need) {
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                        Map.of("need", need, "have", have, "material", itemKey));
+                return;
+            }
+        }
+
+        // Calculate charge
+        List<BlockMutation> mutations = List.of(new BlockMutation(position, before, blockState));
+        Bounds bounds = new Bounds(position, position);
+        BuildPlan plan = new BuildPlan(worldName, OperationKind.PLACE, bounds, mutations);
+        BillingPolicy.Charge charge = billing().quote(plan, replaceBreakCount);
+
+        boolean tookMoney = false;
+        boolean tookItems = false;
+        UUID taskId = UUID.randomUUID();
+        String transactionId = taskId + ":withdraw";
+
+        if (charge.total().signum() > 0 && !player.hasPermission("maxfastbuild.bypass.cost")) {
+            if (getConfig().getBoolean("economy.enabled") && !economy.enabled()) {
+                sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
+                return;
+            }
+            ledger.intent(transactionId, taskId, player.getUniqueId(), EconomyLedger.Kind.WITHDRAW, charge.total());
+            EconomyService.TransactionResult result = economy.withdraw(player.getUniqueId(), charge.total(), transactionId);
+            ledger.complete(transactionId, taskId, player.getUniqueId(), EconomyLedger.Kind.WITHDRAW, charge.total(), result.successful(), result.message());
+            if (!result.successful()) {
+                sendProtocol(player, "error", "maxfastbuild.error.payment_failed", Map.of("reason", result.message() == null ? "failed" : result.message()));
+                return;
+            }
+            tookMoney = true;
+        }
+
+        if (requireMaterials && !destroy) {
+            long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers);
+            if (removed < need) {
+                if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
+                if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                        Map.of("need", need, "have", removed, "material", itemKey));
+                return;
+            }
+            tookItems = true;
+        }
+
+        Instant now = Instant.now();
+        BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
+                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+        try {
+            executor.enqueue(task);
+        } catch (RuntimeException ex) {
+            if (tookItems) PaperInventoryHelper.giveOrDrop(player, itemKey, need);
+            compensate(player, taskId, tookMoney ? charge.total() : BigDecimal.ZERO, transactionId, ex);
+            return;
+        }
+
+        sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
+                "taskId", taskId.toString(),
+                "blocks", 1,
+                "charge", charge.total().toPlainString()));
+        messages.send(player, "setblock-success", formatPos(position), blockState);
+    }
+
+    private int parseCoordinate(String arg, int base) {
+        if (arg.startsWith("~")) {
+            String offset = arg.substring(1);
+            int delta = offset.isEmpty() ? 0 : Integer.parseInt(offset);
+            return base + delta;
+        }
+        return Integer.parseInt(arg);
+    }
+
+    private void handleValidationError(Player player, BlockPos position, WorldAccess.ValidationResult validation, String before) {
+        String reason = validation.reason();
+        if ("insufficient_tool".equals(reason)) {
+            sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", reason));
+            return;
+        }
+        if ("unbreakable_block".equals(reason) || "unbreakable_replace".equals(reason)) {
+            sendProtocol(player, "error", "maxfastbuild.error.unbreakable_block",
+                    Map.of("position", position.toString(), "block", before, "reason", reason));
+            return;
+        }
+        if ("forbidden_material".equals(reason)) {
+            sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", before));
+            return;
+        }
+        sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", position.toString(), "reason", reason));
     }
 
     private String modeDisplayName(BuildMode mode) {
