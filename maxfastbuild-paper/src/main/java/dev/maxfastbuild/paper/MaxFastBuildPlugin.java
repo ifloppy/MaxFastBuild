@@ -546,28 +546,29 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return; // No-op, but show success
         }
 
-        // Mode: destroy - always break first
+        // Mode: destroy - break first then place
+        // Vanilla behavior: destroy on air = just place (no break needed)
         boolean destroy = "destroy".equals(mode);
-        OperationKind operation = OperationKind.PLACE;
-        if (destroy) {
-            operation = OperationKind.BREAK;
-        }
+        boolean targetIsAir = before.equals("minecraft:air");
+        boolean willBreak = destroy && !targetIsAir;
 
-        BlockMutation mutation = new BlockMutation(position, before, destroy ? "minecraft:air" : blockState);
+        // Validate: for destroy on air, only validate PLACE; otherwise validate BREAK then PLACE
+        OperationKind operation = willBreak ? OperationKind.BREAK : OperationKind.PLACE;
+        BlockMutation mutation = new BlockMutation(position, before, willBreak ? "minecraft:air" : blockState);
 
-        // Validate
+        // Validate first operation
         WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
         if (!validation.allowed()) {
             handleValidationError(player, position, validation, before);
             return;
         }
 
-        // For destroy mode, also validate the place after break
+        // For destroy mode (including destroy on air), also validate the place after break
         if (destroy) {
-            BlockMutation placeMutation = new BlockMutation(position, "minecraft:air", blockState);
+            BlockMutation placeMutation = new BlockMutation(position, willBreak ? "minecraft:air" : before, blockState);
             WorldAccess.ValidationResult placeValidation = world.mayMutate(player.getUniqueId(), worldName, placeMutation, OperationKind.PLACE);
             if (!placeValidation.allowed()) {
-                handleValidationError(player, position, placeValidation, "minecraft:air");
+                handleValidationError(player, position, placeValidation, willBreak ? "minecraft:air" : before);
                 return;
             }
         }
@@ -582,8 +583,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        // Check tools/durability for break operations
-        if ((destroy || needsBreak) && player.getGameMode() != GameMode.CREATIVE) {
+        // Check tools/durability for break operations (only if actually breaking)
+        if ((willBreak || needsBreak) && player.getGameMode() != GameMode.CREATIVE) {
             if (!BreakToolHelper.hasAnyMiningTool(player)) {
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
                 return;
@@ -595,8 +596,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 return;
             }
             long usable = estimateUsableToolHits(player);
-            long needBreaks = destroy ? 1 : replaceBreakCount;
-            if (usable < needBreaks) {
+            long needBreaks = (willBreak || needsBreak) ? 1 : 0;
+            if (needBreaks > 0 && usable < needBreaks) {
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool_durability",
                         Map.of("reason", "durability", "need", needBreaks, "have", usable));
                 return;
@@ -612,7 +613,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         String itemKey = PaperInventoryHelper.itemKeyFromBlockState(blockState);
         long need = 1;
-        if (requireMaterials && !destroy) {
+        if (requireMaterials && !willBreak) {
             Material resolved = PaperInventoryHelper.resolveMaterial(itemKey);
             if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", blockState));
