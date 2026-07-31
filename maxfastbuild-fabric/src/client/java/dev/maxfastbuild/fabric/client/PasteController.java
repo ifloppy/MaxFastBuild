@@ -51,7 +51,9 @@ final class PasteController {
 
     /** Called from the client tick; also tracks the paste key press edge. */
     static void tick(Minecraft client) {
-        boolean down = client.player != null && MaxFastBuildClient.isKeyPhysicallyDown(MaxFastBuildClient.pasteKey);
+        boolean down = client.player != null
+                && !ClientPlatform.instance().isScreenOpen(client)
+                && MaxFastBuildClient.isKeyPhysicallyDown(MaxFastBuildClient.pasteKey);
         if (down && !prevKeyDown) {
             startPaste();
         }
