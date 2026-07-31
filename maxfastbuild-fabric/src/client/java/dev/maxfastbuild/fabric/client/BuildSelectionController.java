@@ -35,7 +35,8 @@ import java.util.Set;
  * including floating air cells. Preview draws only the outer shell.
  */
 public final class BuildSelectionController {
-    private static final int PREVIEW_LIMIT = 8192;
+    /** No client-side preview cap; the server enforces {@code execution.max-region-blocks}. */
+    private static final int UNBOUNDED = Integer.MAX_VALUE;
     private static final int FACE_DRAW_LIMIT = 6000;
     /** Max floating look depth and ray length for selection (Shift+scroll). */
     private static final int MAX_LOOK_DISTANCE = 64;
@@ -158,7 +159,9 @@ public final class BuildSelectionController {
         boolean breaking = client.player != null && isBreakIntent(client.player);
         boolean placing = client.player != null && isPlaceIntent(client.player);
         int center = canvas.guiWidth() / 2;
-        int y = canvas.guiHeight() - 84;
+        // Kept clear of the vanilla actionbar area (which sits just above the hotbar and carries
+        // MFB feedback such as "preview too large"), so error text is never covered by this box.
+        int y = canvas.guiHeight() - 108;
         int outline = !breaking && !placing ? 0xCCB7C0CC : (breaking ? 0xCCFF8A4D : 0xCC65D9FF);
         int titleColor = !breaking && !placing ? 0xFFB7C0CC : (breaking ? 0xFFFF8A4D : 0xFF8EE9FF);
         canvas.fill(center - 170, y - 5, center + 170, y + 52, 0xB018202A);
@@ -281,7 +284,7 @@ public final class BuildSelectionController {
         cacheBreak = breaking;
         try {
             Set<BlockPos> full = new DefaultShapeGenerator().generate(
-                    new ShapeRequest(mode, first, end, false), PREVIEW_LIMIT);
+                    new ShapeRequest(mode, first, end, false), UNBOUNDED);
             cachedFull = full instanceof HashSet ? full : new HashSet<>(full);
             // Cuboid modes only need bounds; skip face enumeration.
             if (isSimpleCuboidPreview(mode)) {
@@ -312,13 +315,7 @@ public final class BuildSelectionController {
     }
 
     private static void submit(Player player, BlockPos second, boolean breaking) {
-        int count;
-        try {
-            count = new DefaultShapeGenerator().generate(new ShapeRequest(mode, first, second, false), PREVIEW_LIMIT).size();
-        } catch (RuntimeException ex) {
-            notify(Component.translatable("maxfastbuild.selection.too_large"));
-            return;
-        }
+        int count = new DefaultShapeGenerator().generate(new ShapeRequest(mode, first, second, false), UNBOUNDED).size();
         String modeKey = mode.name().toLowerCase(Locale.ROOT);
         if (breaking) {
             if (!isBreakIntent(player)) {

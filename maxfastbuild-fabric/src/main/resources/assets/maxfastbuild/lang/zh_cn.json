@@ -63,7 +63,6 @@
   "maxfastbuild.selection.hold_block": "完成放置前，请在主手持有可放置的方块。",
   "maxfastbuild.selection.hold_tool": "完成破坏前，请在主手持有镐/斧/铲等工具。",
   "maxfastbuild.selection.hold_block_or_tool": "请主手持可放置方块，或镐/斧/铲/锄/剑/剪刀。",
-  "maxfastbuild.selection.too_large": "预览超过 4096 个方块，请缩小选区。",
   "maxfastbuild.selection.submitted": "已提交 %s 个方块的建造请求。",
   "maxfastbuild.selection.submitted_break": "已提交 %s 个方块的破坏请求。",
   "maxfastbuild.selection.cancelled": "已取消选区。",

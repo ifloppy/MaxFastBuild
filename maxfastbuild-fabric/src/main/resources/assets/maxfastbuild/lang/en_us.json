@@ -63,7 +63,6 @@
   "maxfastbuild.selection.hold_block": "Hold a placeable block before completing placement.",
   "maxfastbuild.selection.hold_tool": "Hold a pickaxe/axe/shovel/etc. before completing break.",
   "maxfastbuild.selection.hold_block_or_tool": "Hold a placeable block or a mining tool (pick/axe/shovel/hoe/sword/shears).",
-  "maxfastbuild.selection.too_large": "Preview exceeds 4096 blocks. Select a smaller area.",
   "maxfastbuild.selection.submitted": "Submitted %s-block build request.",
   "maxfastbuild.selection.submitted_break": "Submitted %s-block break request.",
   "maxfastbuild.selection.cancelled": "Selection cancelled.",
