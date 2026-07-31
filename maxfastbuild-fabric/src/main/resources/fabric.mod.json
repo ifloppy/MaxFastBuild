@@ -24,6 +24,7 @@
     "fabric-api": ">=0.155.2"
   },
   "suggests": {
-    "luckperms": "*"
+    "luckperms": "*",
+    "litematica": "*"
   }
 }

@@ -1,10 +1,13 @@
 package dev.maxfastbuild.fabric.client.platform;
 
 import com.mojang.blaze3d.platform.InputConstants;
+import dev.maxfastbuild.fabric.client.PasteBlock;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
+
+import java.util.List;
 
 /**
  * Per-MC-version SPI. Every version module supplies a {@code ClientPlatformImpl} class
@@ -33,6 +36,9 @@ public abstract class ClientPlatform {
     /** Create the radial key binding using the version's KeyMapping category API. */
     public abstract KeyMapping createRadialKey();
 
+    /** Create the Litematica bulk-paste key binding (default unbound, rebindable in Controls). */
+    public abstract KeyMapping createPasteKey();
+
     /** True when a screen is currently open (radial must not re-open). */
     public abstract boolean isScreenOpen(Minecraft client);
 
@@ -55,4 +61,7 @@ public abstract class ClientPlatform {
 
     /** Hook hotbar-scroll cancellation while a selection is active (no-op where unsupported). */
     public abstract void registerHotbarScrollHook();
+
+    /** Absolute block list of the player's active Litematica placement, empty when unavailable. */
+    public abstract List<PasteBlock> collectLitematicaPlacement();
 }

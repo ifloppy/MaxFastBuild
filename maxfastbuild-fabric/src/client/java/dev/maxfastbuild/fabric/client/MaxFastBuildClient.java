@@ -18,10 +18,13 @@ import net.minecraft.network.chat.Component;
 public final class MaxFastBuildClient implements ClientModInitializer {
     /** Hold to open radial (default Left Alt). Rebindable in controls. */
     public static KeyMapping radialKey;
+    /** Paste the active Litematica placement (default unbound; requires Litematica + server support). */
+    public static KeyMapping pasteKey;
 
     @Override
     public void onInitializeClient() {
         radialKey = ClientPlatform.instance().createRadialKey();
+        pasteKey = ClientPlatform.instance().createPasteKey();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Hold-to-open: use physical key (Screen opens → KeyMapping.releaseAll clears isDown).
@@ -31,6 +34,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
                     && !ClientPlatform.instance().isScreenOpen(client)) {
                 ClientPlatform.instance().setScreen(new RadialBuildScreen());
             }
+            PasteController.tick(client);
             BuildSelectionController.tick(client);
         });
 
@@ -52,7 +56,17 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         try {
             JsonObject object = JsonParser.parseString(text.substring(ProtocolEnvelope.MESSAGE_MARKER.length())).getAsJsonObject();
             String type = object.has("type") ? object.get("type").getAsString() : "response";
-            if ("hello".equals(type)) return false;
+            if ("hello".equals(type)) {
+                PasteController.onHello(object);
+                return false;
+            }
+            if ("paste_ack".equals(type)) {
+                PasteController.onAck(object);
+                return false;
+            }
+            if ("error".equals(type)) {
+                PasteController.onError(object);
+            }
             String key = object.has("messageKey") ? object.get("messageKey").getAsString() : "maxfastbuild.error.protocol";
             Object[] args = arguments(key, object);
             Minecraft client = Minecraft.getInstance();
@@ -201,8 +215,12 @@ public final class MaxFastBuildClient implements ClientModInitializer {
      * Physical bind state via GLFW — works while a Screen is open.
      * {@link KeyMapping#isDown()} is cleared by {@code KeyMapping.releaseAll()} on setScreen.
      */
+    static boolean isKeyPhysicallyDown(KeyMapping mapping) {
+        if (mapping == null) return false;
+        return ClientPlatform.instance().isKeyPhysicalDown(((KeyMappingAccessor) mapping).maxfastbuild$getKey());
+    }
+
     static boolean isRadialKeyPhysicallyDown() {
-        if (radialKey == null) return false;
-        return ClientPlatform.instance().isKeyPhysicalDown(((KeyMappingAccessor) radialKey).maxfastbuild$getKey());
+        return isKeyPhysicallyDown(radialKey);
     }
 }

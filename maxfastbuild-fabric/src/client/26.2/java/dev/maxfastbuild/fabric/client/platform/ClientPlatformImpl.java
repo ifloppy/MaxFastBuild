@@ -2,7 +2,10 @@ package dev.maxfastbuild.fabric.client.platform;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import dev.maxfastbuild.fabric.client.BuildSelectionController;
+import dev.maxfastbuild.fabric.client.LitematicaBridge;
+import dev.maxfastbuild.fabric.client.PasteBlock;
 import dev.maxfastbuild.fabric.client.RadialBuildScreen;
+import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
@@ -14,6 +17,8 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.List;
+
 /** Minecraft 26.2 implementation: extract-phase rendering, gizmos, KeyMapping.Category. */
 public final class ClientPlatformImpl extends ClientPlatform {
     private static final KeyMapping.Category CATEGORY = KeyMapping.Category.register(
@@ -21,7 +26,12 @@ public final class ClientPlatformImpl extends ClientPlatform {
 
     @Override
     public KeyMapping createRadialKey() {
-        return new KeyMapping("key.maxfastbuild.radial", GLFW.GLFW_KEY_LEFT_ALT, CATEGORY);
+        return KeyMappingHelper.registerKeyMapping(new KeyMapping("key.maxfastbuild.radial", GLFW.GLFW_KEY_LEFT_ALT, CATEGORY));
+    }
+
+    @Override
+    public KeyMapping createPasteKey() {
+        return KeyMappingHelper.registerKeyMapping(new KeyMapping("key.maxfastbuild.paste", GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
     }
 
     @Override
@@ -78,5 +88,10 @@ public final class ClientPlatformImpl extends ClientPlatform {
     public void registerHotbarScrollHook() {
         ClientHotbarScrollEvents.ALLOW.register((inventory, selected, next, horizontal, vertical) ->
                 !BuildSelectionController.onHotbarScroll(vertical));
+    }
+
+    @Override
+    public List<PasteBlock> collectLitematicaPlacement() {
+        return LitematicaBridge.collect();
     }
 }

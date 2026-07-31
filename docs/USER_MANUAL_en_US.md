@@ -64,6 +64,21 @@ Public server commands (permission `maxfastbuild.use`). Use `/mfb` or `/mfb help
 
 `apply` matches the client: main-hand block = place/replace, mining tool = break, empty hand = reject (material comes from the held block).
 
+## Litematica bulk paste
+
+With the client mod and **Litematica** both installed, the current active placement can be pasted as a **single** build task (the server still validates every block and charges materials/fees):
+
+1. Open Litematica and place a **SchematicPlacement** in the world.
+2. Bind MaxFastBuild's "**Paste active Litematica placement**" key (default unbound; Options → Controls → MaxFastBuild).
+3. Press the key and wait for the server to validate.
+
+Notes:
+
+- Block entities (chests, signs, lecterns, …) paste **empty** — contents/text are not preserved.
+- A single paste is bounded by the server's `execution.max-region-blocks` limit (default 100000); split larger schematics.
+- As with normal placement, survival deducts **per block type** from the inventory and applies world-protection, tool-durability and economy checks.
+- Without Litematica the key does nothing; creative mode still goes through the same validation.
+
 ## Troubleshooting
 
 - **Menu does not open**: check key conflicts; confirm the client mod and server version.

@@ -2,6 +2,8 @@ package dev.maxfastbuild.fabric.client.platform;
 
 import com.mojang.blaze3d.platform.InputConstants;
 import dev.maxfastbuild.fabric.client.BuildSelectionController;
+import dev.maxfastbuild.fabric.client.LitematicaBridge;
+import dev.maxfastbuild.fabric.client.PasteBlock;
 import dev.maxfastbuild.fabric.client.RadialBuildScreen;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
@@ -12,12 +14,22 @@ import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.List;
+
 /** Minecraft 1.21.7 implementation: classic render events, String key category, render-thread rendering. */
 public final class ClientPlatformImpl extends ClientPlatform {
     @Override
     public KeyMapping createRadialKey() {
         KeyMapping mapping = new KeyMapping("key.maxfastbuild.radial",
                 InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_LEFT_ALT, "maxfastbuild.main");
+        KeyBindingHelper.registerKeyBinding(mapping);
+        return mapping;
+    }
+
+    @Override
+    public KeyMapping createPasteKey() {
+        KeyMapping mapping = new KeyMapping("key.maxfastbuild.paste",
+                InputConstants.Type.KEYSYM, GLFW.GLFW_KEY_UNKNOWN, "maxfastbuild.main");
         KeyBindingHelper.registerKeyBinding(mapping);
         return mapping;
     }
@@ -68,5 +80,10 @@ public final class ClientPlatformImpl extends ClientPlatform {
     /** fabric-api for 1.21.7 has no hotbar-scroll event — radial scroll lock is unavailable. */
     @Override
     public void registerHotbarScrollHook() {
+    }
+
+    @Override
+    public List<PasteBlock> collectLitematicaPlacement() {
+        return LitematicaBridge.collect();
     }
 }

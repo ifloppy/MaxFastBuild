@@ -6,6 +6,8 @@ There is **no durable inventory escrow** in the current release: place materials
 
 Transforms (`mirror` / `array`) exist in `maxfastbuild-core` but are **not** applied on the Paper submit path.
 
+The one channel where the client submits a block list is the **Litematica bulk paste** (`/__mfb p` with a gzipped paste envelope). It skips only shape generation: every pasted mutation still goes through world-state, protection, tool, material and economy validation and is persisted as a normal task. See `docs/protocol.md`.
+
 ## Request pipeline (Paper)
 
 1. Intercept `/__mfb` (not registered in Brigadier). Primary intents are single-line `place` / `break`. Optional legacy path: `hello` session + chunked `p` envelopes with HMAC (still accepted; not required for compact commands).

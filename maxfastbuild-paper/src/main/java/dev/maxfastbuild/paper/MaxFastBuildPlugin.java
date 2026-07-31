@@ -36,8 +36,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, TokenBucket> limits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
+    private final Map<UUID, PendingPaste> pendingPastes = new ConcurrentHashMap<>();
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
+    /** Reassembles multi-part Litematica paste payloads (session per player+id, 120s window). */
+    private final PasteAccumulator pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120));
     private SecureProtocol protocol;
     private SqliteDatabase database;
     private SqliteTaskRepository tasks;
@@ -88,7 +91,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getPluginManager().registerEvents(this, this);
             resumeTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
-            getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickTasks(); processCommandQueues(); }, period, period);
+            getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickPastePlanners(); tickTasks(); processCommandQueues(); }, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
             getLogger().info("CoreProtect mode: vanilla breakNaturally + one API logPlacement; no synthetic break events / no double logRemoval");
@@ -198,8 +201,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             limits.clear();
             sessions.clear();
             pendingBuilds.clear();
+            pendingPastes.clear();
             commandQueues.clear();
             try { chunks.clear(); } catch (RuntimeException ignored) { }
+            try { pastes.clear(); } catch (RuntimeException ignored) { }
             if (tasks != null) {
                 try { tasks.closeQuietly(); } catch (RuntimeException ex) {
                     getLogger().warning("SQLite close failed: " + ex.getMessage());
@@ -275,8 +280,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     String[] envelopeParts = complete.get().split(" ", 5);
                     if (envelopeParts.length != 5) throw new IllegalArgumentException("invalid_envelope");
                     ProtocolEnvelope envelope = new ProtocolEnvelope(Integer.parseInt(envelopeParts[0]), envelopeParts[1], Long.parseLong(envelopeParts[2]), envelopeParts[3], envelopeParts[4]);
-                    byte[] json = protocol.verify(player.getUniqueId(), envelope);
-                    ClientRequest request = GSON.fromJson(new String(json, StandardCharsets.UTF_8), ClientRequest.class);
+                    byte[] verified = protocol.verify(player.getUniqueId(), envelope);
+                    if (isGzipPayload(verified)) {
+                        PasteTransfer.Payload paste = PasteTransfer.decode(PasteTransfer.gunzip(verified));
+                        handlePastePayload(player, paste);
+                        return;
+                    }
+                    ClientRequest request = GSON.fromJson(new String(verified, StandardCharsets.UTF_8), ClientRequest.class);
                     if (!player.hasPermission("maxfastbuild.use")) {
                         sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
                         return;
@@ -1111,6 +1121,288 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 "charge", charge.total().toPlainString()));
     }
 
+    /** Gzip magic bytes (0x1f 0x8b) — paste envelopes are gzipped JSON, legacy envelopes are plain JSON. */
+    private static boolean isGzipPayload(byte[] bytes) {
+        return bytes.length >= 2 && (bytes[0] & 0xFF) == 0x1F && (bytes[1] & 0xFF) == 0x8B;
+    }
+
+    /**
+     * A verified envelope carrying a gzipped paste part. Each part is acknowledged immediately so the
+     * client streams the next part; when the final part arrives the whole paste is planned and enqueued
+     * as a single build task.
+     */
+    private void handlePastePayload(Player player, PasteTransfer.Payload payload) {
+        if (!player.hasPermission("maxfastbuild.use")) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+            return;
+        }
+        Optional<PasteAccumulator.Assembled> assembled = pastes.accept(player.getUniqueId(), payload);
+        sendMarked(player, GSON.toJson(Map.of("mfb", 1, "type", "paste_ack",
+                "pasteSessionId", payload.pasteSessionId(), "part", payload.part(), "parts", payload.parts())));
+        assembled.ifPresent(complete -> submitPaste(player, complete));
+    }
+
+    /**
+     * Turn an assembled paste into a per-tick planning job. The block list is client-supplied, so every
+     * mutation is re-validated against world state, protection, tool rules and materials exactly like the
+     * shape-generated paths — this channel only skips shape generation.
+     */
+    private void submitPaste(Player player, PasteAccumulator.Assembled assembled) {
+        String worldName = player.getWorld().getName();
+        int maxBlocks = getConfig().getInt("execution.max-region-blocks", 100000);
+        int[] origin = assembled.origin();
+        List<String> palette = assembled.palette();
+        // Defensive: strip any block-entity NBT ({...}) so states stay parseable. Block entities paste empty.
+        List<String> normalized = new ArrayList<>(palette.size());
+        for (String state : palette) {
+            int brace = state.indexOf('{');
+            normalized.add(brace >= 0 ? state.substring(0, brace) : state);
+        }
+        List<PastePos> positions = new ArrayList<>(assembled.entries().size());
+        for (PasteTransfer.Entry entry : assembled.entries()) {
+            if (entry.paletteIndex() >= normalized.size()) {
+                sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "palette_index_out_of_range"));
+                return;
+            }
+            String target = normalized.get(entry.paletteIndex());
+            Material material;
+            try {
+                material = Bukkit.createBlockData(target).getMaterial();
+            } catch (IllegalArgumentException ex) {
+                sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", target));
+                return;
+            }
+            if (material.isAir() || !material.isBlock() || RestrictedMaterials.isForbiddenPlace(material)) {
+                continue;
+            }
+            positions.add(new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target));
+        }
+        if (positions.isEmpty()) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
+            return;
+        }
+        if (positions.size() > maxBlocks) {
+            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", maxBlocks));
+            return;
+        }
+        if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) {
+            sendProtocol(player, "error", "maxfastbuild.error.coreprotect_unavailable", Map.of());
+            return;
+        }
+        if (getConfig().getBoolean("economy.enabled") && !economy.enabled() && !player.hasPermission("maxfastbuild.bypass.cost")) {
+            sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
+            return;
+        }
+        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
+            sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
+            return;
+        }
+        if (pendingPastes.containsKey(player.getUniqueId())) {
+            sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", "paste_in_progress"));
+            return;
+        }
+        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, positions));
+    }
+
+    private void tickPastePlanners() {
+        if (!active || pendingPastes.isEmpty()) return;
+        int batch = Math.max(1, getConfig().getInt("execution.planning.blocks-per-tick", 2000));
+        Iterator<Map.Entry<UUID, PendingPaste>> it = pendingPastes.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, PendingPaste> entry = it.next();
+            PendingPaste pending = entry.getValue();
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.getWorld().getName().equals(pending.world)) {
+                it.remove();
+                continue;
+            }
+            PlanningError error = advancePastePlanning(pending, batch);
+            if (error != null) {
+                sendProtocol(player, "error", error.key(), error.data());
+                it.remove();
+                continue;
+            }
+            if (!pending.iterator.hasNext()) {
+                finalizePastePlanning(pending);
+                it.remove();
+            }
+        }
+    }
+
+    private PlanningError advancePastePlanning(PendingPaste pending, int batch) {
+        PaperWorldAccess world = new PaperWorldAccess();
+        Player player = pending.player;
+        World selectedWorld = Bukkit.getWorld(pending.world);
+        if (selectedWorld == null) {
+            return new PlanningError("maxfastbuild.error.protected", Map.of("position", "unknown", "reason", "world_unloaded"));
+        }
+        int minHeight = selectedWorld.getMinHeight();
+        int maxHeight = selectedWorld.getMaxHeight();
+        for (int i = 0; i < batch && pending.iterator.hasNext(); i++) {
+            PastePos pp = pending.iterator.next();
+            pending.processed++;
+            BlockPos pos = pp.position();
+            if (pos.y() < minHeight || pos.y() >= maxHeight) {
+                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
+            }
+            String before = world.stateAt(pending.world, pos);
+            if (before.equals(pp.targetState())) continue;
+            BlockMutation mutation = new BlockMutation(pos, before, pp.targetState());
+            WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+            if (!validation.allowed()) {
+                if ("insufficient_tool".equals(validation.reason())) {
+                    return new PlanningError("maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
+                }
+                if ("unbreakable_block".equals(validation.reason()) || "unbreakable_replace".equals(validation.reason())) {
+                    return new PlanningError("maxfastbuild.error.unbreakable_block",
+                            Map.of("position", pos.toString(), "block", before, "reason", validation.reason()));
+                }
+                if ("forbidden_material".equals(validation.reason())) {
+                    return new PlanningError("maxfastbuild.error.invalid_material", Map.of("material", pp.targetState()));
+                }
+                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", validation.reason()));
+            }
+            pending.mutations.add(mutation);
+            if (PaperWorldAccess.requiresBreakToReplace(before)) {
+                pending.replaceBreakCount++;
+            }
+        }
+        return null;
+    }
+
+    private void finalizePastePlanning(PendingPaste pending) {
+        Player player = pending.player;
+        List<BlockMutation> mutations = pending.mutations;
+        if (mutations.isEmpty()) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
+            return;
+        }
+
+        // Place-over-solid survival paste needs effective tools for every solid replace target.
+        if (pending.replaceBreakCount > 0 && player.getGameMode() != GameMode.CREATIVE) {
+            if (!BreakToolHelper.hasAnyMiningTool(player)) {
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
+                return;
+            }
+            Map<Material, Boolean> canBreakCache = new HashMap<>();
+            for (BlockMutation mutation : mutations) {
+                if (!PaperWorldAccess.requiresBreakToReplace(mutation.expectedState())) continue;
+                Block target = player.getWorld().getBlockAt(mutation.position().x(), mutation.position().y(), mutation.position().z());
+                Material material = target.getType();
+                Boolean cached = canBreakCache.get(material);
+                if (cached == null) {
+                    cached = BreakToolHelper.canBreakBlock(player, target);
+                    canBreakCache.put(material, cached);
+                }
+                if (!cached) {
+                    sendProtocol(player, "error", "maxfastbuild.error.wrong_tool",
+                            Map.of("block", target.getType().getKey().toString(), "reason", "no_effective_tool"));
+                    return;
+                }
+            }
+            long usable = estimateUsableToolHits(player);
+            if (usable < pending.replaceBreakCount) {
+                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool_durability",
+                        Map.of("reason", "durability", "need", pending.replaceBreakCount, "have", usable));
+                return;
+            }
+        }
+
+        BlockPos first = mutations.getFirst().position();
+        BlockPos min = first;
+        BlockPos max = first;
+        for (BlockMutation mutation : mutations) {
+            BlockPos pos = mutation.position();
+            min = new BlockPos(Math.min(min.x(), pos.x()), Math.min(min.y(), pos.y()), Math.min(min.z(), pos.z()));
+            max = new BlockPos(Math.max(max.x(), pos.x()), Math.max(max.y(), pos.y()), Math.max(max.z(), pos.z()));
+        }
+        BuildPlan plan = new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max), mutations);
+        BillingPolicy.Charge charge = billing().quote(plan, pending.replaceBreakCount);
+        boolean requireMaterials = player.getGameMode() != GameMode.CREATIVE
+                && !player.hasPermission("maxfastbuild.bypass.materials");
+        boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
+        if (searchShulkers && getConfig().getBoolean("inventory.require-shulker-permission", false)
+                && !player.hasPermission("maxfastbuild.material.shulker")) {
+            searchShulkers = false;
+        }
+
+        // A paste uses many block types: count and deduct per unique material.
+        Map<String, Long> needByMaterial = new LinkedHashMap<>();
+        if (requireMaterials) {
+            for (BlockMutation mutation : mutations) {
+                needByMaterial.merge(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1L, Long::sum);
+            }
+            for (Map.Entry<String, Long> entry : needByMaterial.entrySet()) {
+                Material resolved = PaperInventoryHelper.resolveMaterial(entry.getKey());
+                if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
+                    sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", entry.getKey()));
+                    return;
+                }
+                long have = PaperInventoryHelper.count(player, entry.getKey(), searchShulkers);
+                if (have < entry.getValue()) {
+                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                            Map.of("need", entry.getValue(), "have", have, "material", entry.getKey()));
+                    return;
+                }
+            }
+        }
+
+        UUID taskId = UUID.randomUUID();
+        String transactionId = taskId + ":withdraw";
+        boolean tookMoney = false;
+        boolean tookItems = false;
+        if (charge.total().signum() > 0 && !player.hasPermission("maxfastbuild.bypass.cost")) {
+            if (getConfig().getBoolean("economy.enabled") && !economy.enabled()) {
+                sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
+                return;
+            }
+            ledger.intent(transactionId, taskId, player.getUniqueId(), EconomyLedger.Kind.WITHDRAW, charge.total());
+            EconomyService.TransactionResult result = economy.withdraw(player.getUniqueId(), charge.total(), transactionId);
+            ledger.complete(transactionId, taskId, player.getUniqueId(), EconomyLedger.Kind.WITHDRAW, charge.total(), result.successful(), result.message());
+            if (!result.successful()) {
+                sendProtocol(player, "error", "maxfastbuild.error.payment_failed", Map.of("reason", result.message() == null ? "failed" : result.message()));
+                return;
+            }
+            tookMoney = true;
+        }
+        Map<String, Long> takenByMaterial = new LinkedHashMap<>();
+        if (requireMaterials) {
+            for (Map.Entry<String, Long> entry : needByMaterial.entrySet()) {
+                long removed = PaperInventoryHelper.take(player, entry.getKey(), entry.getValue(), searchShulkers);
+                if (removed < entry.getValue()) {
+                    for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
+                        PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
+                    }
+                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
+                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                            Map.of("need", entry.getValue(), "have", removed, "material", entry.getKey()));
+                    return;
+                }
+                takenByMaterial.put(entry.getKey(), removed);
+            }
+            tookItems = true;
+        }
+
+        Instant now = Instant.now();
+        BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
+                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+        try {
+            executor.enqueue(task);
+        } catch (RuntimeException ex) {
+            if (tookItems) {
+                for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
+                    PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
+                }
+            }
+            compensate(player, taskId, tookMoney ? charge.total() : BigDecimal.ZERO, transactionId, ex);
+            return;
+        }
+        sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
+                "taskId", taskId.toString(),
+                "blocks", mutations.size(),
+                "charge", charge.total().toPlainString()));
+    }
+
     private void refundMoney(Player player, UUID taskId, BigDecimal amount, String transactionId) {
         if (amount == null || amount.signum() <= 0) return;
         String refundId = transactionId + ":compensation";
@@ -1279,6 +1571,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (pendingBuilds.remove(player.getUniqueId()) != null) {
             cancelled++;
         }
+        if (pendingPastes.remove(player.getUniqueId()) != null) {
+            cancelled++;
+        }
         if (commandQueues.remove(player.getUniqueId()) != null) {
             cancelled++;
         }
@@ -1420,8 +1715,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     /** In-progress region planning for a player. Planning runs over multiple server ticks to avoid freezing the main thread. */
-    private static final class PendingBuild {
-        final Player player;
+    private static final class PendingBuild {        final Player player;
         final OperationKind operation;
         final Selection selection;
         final int maxBlocks;
@@ -1450,6 +1744,25 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             this.filter = filter;
             this.keepOnly = keepOnly;
             this.startedAt = System.currentTimeMillis();
+        }
+    }
+
+    /** Absolute position and its palette target state (client-supplied, re-validated per tick). */
+    private record PastePos(BlockPos position, String targetState) {}
+
+    /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
+    private static final class PendingPaste {
+        final Player player;
+        final String world;
+        final Iterator<PastePos> iterator;
+        final List<BlockMutation> mutations = new ArrayList<>();
+        long replaceBreakCount = 0;
+        long processed = 0;
+
+        PendingPaste(Player player, String world, List<PastePos> positions) {
+            this.player = player;
+            this.world = world;
+            this.iterator = positions.iterator();
         }
     }
 }

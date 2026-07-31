@@ -46,7 +46,19 @@ Legacy chunked authenticated payload (still accepted; same permission checks aft
 /__mfb p <transfer-id> <index> <total> <chunk>
 ```
 
-`__mfb` is intercepted before Brigadier dispatch and is never registered in the command tree. The server regenerates shapes from anchors and mode; the client never submits a trusted block list.
+`__mfb` is intercepted before Brigadier dispatch and is never registered in the command tree. The server regenerates shapes from anchors and mode; the client never submits a trusted block list — **except** the Litematica bulk-paste channel below, where the client-supplied block list is re-validated mutation by mutation.
+
+## Litematica bulk paste (client → server)
+
+The Fabric client can stream a Litematica placement as a single bulk build request:
+
+1. Client runs `/__mfb hello` to obtain a per-player HMAC session (same legacy handshake).
+2. The paste is encoded as a palette (unique block-state strings) plus entries `dx,dy,dz:paletteIndex` (schematic-relative), gzipped, wrapped in the authenticated envelope, and split into `p` transfers via the chunk assembler. Each envelope therefore arrives as `version sessionId sequence <base64(gzip)> mac`.
+3. Server detects gzip magic bytes on the verified payload and reassembles parts per `(player, pasteSessionId)`. Part count is capped at `MAX_PARTS` (64) and block entries per part at `MAX_BLOCKS_PER_PART` (1600).
+4. After each part the server replies a protocol-only `paste_ack` (`type: paste_ack`, data `pasteSessionId`, `part`, `parts`). The client sends one part at a time, waiting for the ack.
+5. When the final part arrives the whole paste is planned as **one build task**: every mutation is validated against world height, protection, tool rules, materials (per unique block type), economy, then enqueued like any other task. NBT block-entity data is stripped — block entities paste empty.
+
+The ack is sent over the marked system-message channel only (no chat line) and is consumed by the client before rendering.
 
 ## Server to client
 
