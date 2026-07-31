@@ -10,10 +10,17 @@ public final class TaskExecutor {
     private final WorldAccess world;
     private final AuditService audit;
     private final Clock clock;
+    private final int saveInterval;
     private final Map<UUID, BuildTask> running = new ConcurrentHashMap<>();
+    private int tickCounter;
+
+    public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock, int saveInterval) {
+        this.repository = repository; this.world = world; this.audit = audit; this.clock = clock;
+        this.saveInterval = Math.max(1, saveInterval);
+    }
 
     public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock) {
-        this.repository = repository; this.world = world; this.audit = audit; this.clock = clock;
+        this(repository, world, audit, clock, 1);
     }
 
     public void enqueue(BuildTask task) {
@@ -55,6 +62,10 @@ public final class TaskExecutor {
     }
 
     public TickResult tick(UUID id, int blocksPerStep) {
+        return tick(id, blocksPerStep, false);
+    }
+
+    public TickResult tick(UUID id, int blocksPerStep, boolean forceSave) {
         BuildTask task = Objects.requireNonNull(running.get(id), "Unknown running task");
         if (task.status() == TaskStatus.QUEUED) task = task.transition(TaskStatus.RUNNING, clock.instant());
         int changed = 0, skipped = 0;
@@ -88,8 +99,14 @@ public final class TaskExecutor {
         if (finished) {
             task = task.transition(TaskStatus.COMPLETED, clock.instant());
             running.remove(id);
-        } else running.put(id, task);
-        repository.save(task);
+            repository.save(task);
+        } else {
+            running.put(id, task);
+            tickCounter++;
+            if (forceSave || tickCounter % saveInterval == 0) {
+                repository.saveProgress(task);
+            }
+        }
         return new TickResult(task, changed, skipped, task.appliedCount(), finished);
     }
 

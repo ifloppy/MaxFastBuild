@@ -68,6 +68,27 @@ public final class SqliteTaskRepository implements TaskRepository {
         });
     }
 
+    @Override public void saveProgress(BuildTask task) {
+        database.transaction(connection -> {
+            try (PreparedStatement s = connection.prepareStatement("""
+                UPDATE build_tasks SET status=?,cursor=?,applied_count=?,escrow_id=?,charged=?,refunded=?,updated_at=?,failure=? WHERE id=?
+                """)) {
+                int i = 1;
+                s.setString(i++, task.status().name()); s.setInt(i++, task.cursor()); s.setInt(i++, task.appliedCount());
+                s.setString(i++, task.escrowId());
+                s.setString(i++, task.charged().toPlainString()); s.setString(i++, task.refunded().toPlainString());
+                s.setString(i++, task.updatedAt().toString()); s.setString(i, task.failure());
+                s.setString(i, task.id().toString());
+                s.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    @Override public void flush() {
+        // Synchronous repository — nothing to flush.
+    }
+
     @Override public Optional<BuildTask> find(UUID id) {
         return database.transaction(connection -> {
             try (PreparedStatement s = connection.prepareStatement("SELECT * FROM build_tasks WHERE id=?")) {

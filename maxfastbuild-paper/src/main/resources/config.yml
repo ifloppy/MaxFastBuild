@@ -5,6 +5,8 @@ execution:
   blocks-per-step: 1
   max-region-blocks: 100000
   max-concurrent-tasks-per-player: 2
+  # How many server ticks between progress writes to SQLite (higher = less disk I/O, more progress lost on crash).
+  save-interval-ticks: 20
   # Documented for operators; offline pause is always applied in code today.
   pause-when-player-offline: true
   # Maximum number of commands a single player may have waiting in the rate-limited queue.
@@ -13,6 +15,13 @@ execution:
     # How many blocks are scanned per server tick while planning a large region.
     # Higher values finish faster but use more time per tick; lower values spread the load.
     blocks-per-tick: 2000
+  async-queue:
+    # Offload SQLite writes to a background thread so the main server thread never blocks on I/O.
+    enabled: true
+    # How many queued writes to bundle into a single SQLite transaction.
+    batch-size: 10
+    # Maximum time (ms) to wait before flushing a partial batch.
+    max-delay-ms: 200
 rate-limit:
   requests: 3
   interval-seconds: 10

@@ -43,7 +43,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final PasteAccumulator pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120));
     private SecureProtocol protocol;
     private SqliteDatabase database;
-    private SqliteTaskRepository tasks;
+    private TaskRepository tasks;
     private EconomyLedger ledger;
     private TaskExecutor executor;
     private EconomyService economy;
@@ -65,13 +65,21 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         try {
             protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), getConfig().getInt("protocol.max-payload-bytes", 16384));
             database = new SqliteDatabase(getDataFolder().toPath().resolve("maxfastbuild.db"));
-            tasks = new SqliteTaskRepository(database);
+            SqliteTaskRepository sqliteTasks = new SqliteTaskRepository(database);
+            sqliteTasks.initialize();
+            if (getConfig().getBoolean("execution.async-queue.enabled", true)) {
+                int batchSize = Math.max(1, getConfig().getInt("execution.async-queue.batch-size", 10));
+                long maxDelayMs = Math.max(1, getConfig().getLong("execution.async-queue.max-delay-ms", 200));
+                tasks = new AsyncTaskRepository(sqliteTasks, batchSize, maxDelayMs);
+            } else {
+                tasks = sqliteTasks;
+            }
             ledger = new EconomyLedger(database);
-            tasks.initialize();
             ledger.initialize();
             audit = safeDiscoverAudit();
             economy = safeDiscoverEconomy();
-            executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC());
+            int saveInterval = Math.max(1, getConfig().getInt("execution.save-interval-ticks", 20));
+            executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC(), saveInterval);
             validateIntegrations();
 
             PublicCommand publicCommand = new PublicCommand(this);

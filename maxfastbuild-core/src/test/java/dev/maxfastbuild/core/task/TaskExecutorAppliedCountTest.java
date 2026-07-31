@@ -55,6 +55,8 @@ class TaskExecutorAppliedCountTest {
         private final Map<UUID, BuildTask> tasks = new HashMap<>();
         @Override public void initialize() {}
         @Override public void save(BuildTask task) { tasks.put(task.id(), task); }
+        @Override public void saveProgress(BuildTask task) { tasks.put(task.id(), task); }
+        @Override public void flush() {}
         @Override public Optional<BuildTask> find(UUID id) { return Optional.ofNullable(tasks.get(id)); }
         @Override public List<BuildTask> recoverable() { return List.copyOf(tasks.values()); }
         @Override public int activeCount(UUID playerId) {
