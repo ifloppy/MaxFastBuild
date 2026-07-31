@@ -38,17 +38,22 @@ final class PublicCommand implements TabExecutor {
                 case "mode" -> matching(MODES, args[1]);
                 case "hollow" -> matching(BOOLS, args[1]);
                 case "material" -> materialSuggestions(args[1]);
-                case "setblock" -> matching(SETBLOCK_MODES, args[1]);
                 default -> List.of();
             };
         }
-        if (args.length == 5 && "setblock".equals(sub)) {
-            return matching(SETBLOCK_MODES, args[4]);
+        if ("setblock".equals(sub)) {
+            if (!(sender instanceof Player player)) return List.of();
+            return switch (args.length) {
+                case 3, 4 -> SetBlockCommand.coordinateSuggestions(player, args.length - 1, args[args.length - 1]);
+                case 5 -> materialSuggestions(args[4]);
+                case 6 -> matching(SETBLOCK_MODES, args[5]);
+                default -> List.of();
+            };
         }
         return List.of();
     }
 
-    private static List<String> materialSuggestions(String prefix) {
+    static List<String> materialSuggestions(String prefix) {
         String lower = prefix.toLowerCase(Locale.ROOT);
         List<String> out = new ArrayList<>();
         for (Material material : Material.values()) {
@@ -62,7 +67,7 @@ final class PublicCommand implements TabExecutor {
         return out;
     }
 
-    private static List<String> matching(List<String> values, String prefix) {
+    static List<String> matching(List<String> values, String prefix) {
         return StringUtil.copyPartialMatches(prefix, values, new ArrayList<>());
     }
 

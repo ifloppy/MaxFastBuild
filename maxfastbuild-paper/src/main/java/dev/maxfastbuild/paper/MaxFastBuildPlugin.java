@@ -81,6 +81,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             PluginCommand mfbFill = Objects.requireNonNull(getCommand("mfbfill"), "mfbfill command missing from plugin.yml");
             mfbFill.setExecutor(fillCommand);
             mfbFill.setTabCompleter(fillCommand);
+            SetBlockCommand setBlockCommand = new SetBlockCommand(this);
+            PluginCommand mfbSetblock = Objects.requireNonNull(getCommand("mfbsetblock"), "mfbsetblock command missing from plugin.yml");
+            mfbSetblock.setExecutor(setBlockCommand);
+            mfbSetblock.setTabCompleter(setBlockCommand);
             getServer().getPluginManager().registerEvents(this, this);
             resumeTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
@@ -485,6 +489,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
         submit(player, effective, intent.operation());
+    }
+
+    /** /mfbsetblock — standalone entry; routes into the /mfb setblock pipeline. */
+    void handleSetBlockCommand(Player player, String[] args) {
+        String[] routed = new String[args.length + 1];
+        routed[0] = "setblock";
+        System.arraycopy(args, 0, routed, 1, args.length);
+        submitSetBlock(player, routed);
     }
 
     private void submitSetBlock(Player player, String[] args) {
