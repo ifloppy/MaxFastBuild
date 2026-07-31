@@ -2,48 +2,34 @@ package dev.maxfastbuild.fabric.client;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import com.mojang.blaze3d.platform.InputConstants;
 import dev.maxfastbuild.core.protocol.ProtocolEnvelope;
+import dev.maxfastbuild.fabric.client.platform.ClientPlatform;
 import dev.maxfastbuild.fabric.mixin.KeyMappingAccessor;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
-import net.fabricmc.fabric.api.client.rendering.v1.level.LevelRenderEvents;
-import net.fabricmc.fabric.api.event.client.player.ClientHotbarScrollEvents;
 import net.fabricmc.fabric.api.event.client.player.ClientPreAttackCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
-import org.lwjgl.glfw.GLFW;
 
 public final class MaxFastBuildClient implements ClientModInitializer {
-    /** Dedicated controls category: Options → Controls → MaxFastBuild */
-    public static final KeyMapping.Category CATEGORY = KeyMapping.Category.register(
-            Identifier.fromNamespaceAndPath("maxfastbuild", "main"));
-
     /** Hold to open radial (default Left Alt). Rebindable in controls. */
     public static KeyMapping radialKey;
 
     @Override
     public void onInitializeClient() {
-        radialKey = KeyMappingHelper.registerKeyMapping(new KeyMapping(
-                "key.maxfastbuild.radial",
-                GLFW.GLFW_KEY_LEFT_ALT,
-                CATEGORY));
+        radialKey = ClientPlatform.instance().createRadialKey();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Hold-to-open: use physical key (Screen opens → KeyMapping.releaseAll clears isDown).
             if (isRadialKeyPhysicallyDown()
                     && client.player != null
                     && client.level != null
-                    && client.gui.screen() == null) {
-                client.gui.setScreen(new RadialBuildScreen());
+                    && !ClientPlatform.instance().isScreenOpen(client)) {
+                ClientPlatform.instance().setScreen(new RadialBuildScreen());
             }
             BuildSelectionController.tick(client);
         });
@@ -54,20 +40,10 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         ClientPreAttackCallback.EVENT.register((client, player, clickCount) ->
                 BuildSelectionController.cancelOnAttack(client, clickCount));
         // Selection active + Shift: scroll adjusts look distance instead of hotbar.
-        ClientHotbarScrollEvents.ALLOW.register((inventory, selected, next, horizontal, vertical) ->
-                !BuildSelectionController.onHotbarScroll(vertical));
+        ClientPlatform.instance().registerHotbarScrollHook();
 
-        HudElementRegistry.attachElementBefore(VanillaHudElements.CHAT,
-                Identifier.fromNamespaceAndPath("maxfastbuild", "selection_help"),
-                (graphics, delta) -> BuildSelectionController.renderHud(graphics));
-
-        LevelRenderEvents.BEFORE_GIZMOS.register(context -> {
-            Minecraft client = Minecraft.getInstance();
-            if (client.levelRenderer == null) return;
-            try (var ignored = client.levelRenderer.collectPerFrameRenderThreadGizmos()) {
-                BuildSelectionController.submitGizmos();
-            }
-        });
+        ClientPlatform.instance().registerHud();
+        ClientPlatform.instance().registerPreviewRenderer();
     }
 
     private static boolean consumeProtocol(Component message) {
@@ -85,15 +61,15 @@ public final class MaxFastBuildClient implements ClientModInitializer {
                 String plain = translated.getString();
                 // Fall back if key unresolved OR format placeholders left unfilled (%s).
                 if (plain.equals(key) || plain.contains("%s") || plain.contains("%d")) {
-                    client.player.sendSystemMessage(Component.literal(formatFallback(key, args)));
+                    ClientPlatform.instance().sendSystemMessage(Component.literal(formatFallback(key, args)));
                 } else {
-                    client.player.sendSystemMessage(translated);
+                    ClientPlatform.instance().sendSystemMessage(translated);
                 }
             }
         } catch (RuntimeException ex) {
             Minecraft client = Minecraft.getInstance();
             if (client.player != null) {
-                client.player.sendSystemMessage(Component.literal("MaxFastBuild: invalid server response"));
+                ClientPlatform.instance().sendSystemMessage(Component.literal("MaxFastBuild: invalid server response"));
             }
         }
         return false;
@@ -227,12 +203,6 @@ public final class MaxFastBuildClient implements ClientModInitializer {
      */
     static boolean isRadialKeyPhysicallyDown() {
         if (radialKey == null) return false;
-        Minecraft client = Minecraft.getInstance();
-        if (client.getWindow() == null) return false;
-        InputConstants.Key bound = ((KeyMappingAccessor) radialKey).maxfastbuild$getKey();
-        if (bound.getType() == InputConstants.Type.MOUSE) {
-            return GLFW.glfwGetMouseButton(client.getWindow().handle(), bound.getValue()) == GLFW.GLFW_PRESS;
-        }
-        return InputConstants.isKeyDown(client.getWindow(), bound.getValue());
+        return ClientPlatform.instance().isKeyPhysicalDown(((KeyMappingAccessor) radialKey).maxfastbuild$getKey());
     }
 }

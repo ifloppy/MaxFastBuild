@@ -1,7 +1,15 @@
 plugins {
     java
     id("net.fabricmc.fabric-loom") version "1.17-SNAPSHOT" apply false
+    id("net.fabricmc.fabric-loom-remap") version "1.17.17" apply false
 }
+
+// Modules whose jars ride inside the 1.21.7 Fabric client (jar-in-jar) or paper plugin:
+// bytecode must stay ≤ Java 21 so a Java 21 runtime (MC 1.21.x) can load them.
+val java21Modules = setOf(
+    "maxfastbuild-api", "maxfastbuild-core", "maxfastbuild-storage",
+    "maxfastbuild-fabric-1_21_7",
+)
 
 allprojects {
     group = "dev.maxfastbuild"
@@ -23,7 +31,7 @@ subprojects {
             withSourcesJar()
         }
         tasks.withType<JavaCompile>().configureEach {
-            options.release.set(25)
+            options.release.set(if (project.name in java21Modules) 21 else 25)
             options.encoding = "UTF-8"
         }
         tasks.withType<Test>().configureEach { useJUnitPlatform() }
@@ -48,11 +56,16 @@ fun pickDistributableJar(projectPath: String): File {
 val copyReleaseJars by tasks.registering {
     group = "distribution"
     description = "Copy Paper plugin and Fabric mod jars into release/"
-    dependsOn(":maxfastbuild-paper:jar", ":maxfastbuild-fabric:jar")
+    dependsOn(
+        ":maxfastbuild-paper:jar",
+        ":maxfastbuild-fabric:jar",
+        ":maxfastbuild-fabric-1_21_7:remapJar",
+    )
 
     inputs.files(
         project(":maxfastbuild-paper").tasks.named("jar").map { it.outputs.files },
         project(":maxfastbuild-fabric").tasks.named("jar").map { it.outputs.files },
+        project(":maxfastbuild-fabric-1_21_7").tasks.named("remapJar").map { it.outputs.files },
     )
     outputs.dir(releaseDir)
 
@@ -68,13 +81,17 @@ val copyReleaseJars by tasks.registering {
         }
         val paper = pickDistributableJar(":maxfastbuild-paper")
         val fabric = pickDistributableJar(":maxfastbuild-fabric")
+        val fabricLegacy = pickDistributableJar(":maxfastbuild-fabric-1_21_7")
         val paperOut = out.resolve("MaxFastBuild-Paper-$releaseVersion.jar")
-        val fabricOut = out.resolve("MaxFastBuild-Fabric-$releaseVersion.jar")
+        val fabricOut = out.resolve("MaxFastBuild-Fabric-26.2-$releaseVersion.jar")
+        val fabricLegacyOut = out.resolve("MaxFastBuild-Fabric-1.21.7-$releaseVersion.jar")
         copySafe(paper, paperOut)
         copySafe(fabric, fabricOut)
+        copySafe(fabricLegacy, fabricLegacyOut)
         logger.lifecycle("Release jars:")
         logger.lifecycle("  $paperOut")
         logger.lifecycle("  $fabricOut")
+        logger.lifecycle("  $fabricLegacyOut")
     }
 }
 

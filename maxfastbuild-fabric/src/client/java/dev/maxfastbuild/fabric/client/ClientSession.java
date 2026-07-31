@@ -5,6 +5,7 @@ import dev.maxfastbuild.api.BuildMode;
 import dev.maxfastbuild.core.protocol.CommandChunkAssembler;
 import dev.maxfastbuild.core.protocol.CompactBreakCommand;
 import dev.maxfastbuild.core.protocol.CompactPlaceCommand;
+import dev.maxfastbuild.fabric.client.platform.ClientPlatform;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 
@@ -33,7 +34,7 @@ final class ClientSession {
         if (command.length() > CommandChunkAssembler.MAX_COMMAND_LENGTH) {
             Minecraft client = Minecraft.getInstance();
             if (client.player != null) {
-                client.player.sendSystemMessage(Component.translatable("maxfastbuild.error.command_too_long"));
+                ClientPlatform.instance().sendSystemMessage(Component.translatable("maxfastbuild.error.command_too_long"));
             }
             return;
         }

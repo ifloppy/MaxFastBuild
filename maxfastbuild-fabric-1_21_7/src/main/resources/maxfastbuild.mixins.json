@@ -3,6 +3,7 @@
   "minVersion": "0.8",
   "package": "dev.maxfastbuild.fabric.mixin",
   "compatibilityLevel": "JAVA_17",
+  "refmap": "maxfastbuild-refmap.json",
   "mixins": ["ServerCommandInterceptorMixin"],
   "client": ["KeyMappingAccessor"],
   "injectors": { "defaultRequire": 1 }

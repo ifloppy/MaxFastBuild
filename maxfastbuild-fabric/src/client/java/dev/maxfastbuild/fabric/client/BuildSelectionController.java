@@ -2,14 +2,13 @@ package dev.maxfastbuild.fabric.client;
 
 import dev.maxfastbuild.api.*;
 import dev.maxfastbuild.core.shape.DefaultShapeGenerator;
+import dev.maxfastbuild.fabric.client.platform.ClientPlatform;
+import dev.maxfastbuild.fabric.client.platform.HudCanvas;
+import dev.maxfastbuild.fabric.client.platform.PreviewSnapshot;
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.core.Direction;
 import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.gizmos.GizmoStyle;
-import net.minecraft.gizmos.Gizmos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.resources.Identifier;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.player.Player;
@@ -35,17 +34,11 @@ import java.util.Set;
  * Shift+scroll adjusts look-distance up to {@link #MAX_LOOK_DISTANCE}. Right-click confirms,
  * including floating air cells. Preview draws only the outer shell.
  */
-final class BuildSelectionController {
+public final class BuildSelectionController {
     private static final int PREVIEW_LIMIT = 8192;
     private static final int FACE_DRAW_LIMIT = 6000;
     /** Max floating look depth and ray length for selection (Shift+scroll). */
     private static final int MAX_LOOK_DISTANCE = 64;
-    private static final int PLACE_STROKE = 0xFF4DE4FF;
-    private static final int PLACE_FIRST = 0x664DE4FF;
-    private static final int PLACE_FACE = 0x3365E08A;
-    private static final int BREAK_STROKE = 0xFFFF8A4D;
-    private static final int BREAK_FIRST = 0x66FF8A4D;
-    private static final int BREAK_FACE = 0x33E08A65;
     private static final int[][] NEIGHBORS = {
             {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}
     };
@@ -67,8 +60,6 @@ final class BuildSelectionController {
     private static BlockPos cacheSecond;
     private static BuildMode cacheMode;
     private static boolean cacheBreak;
-
-    private record PreviewFace(BlockPos pos, Direction face) {}
 
     private BuildSelectionController() {}
 
@@ -100,7 +91,7 @@ final class BuildSelectionController {
      *
      * @return true if the scroll was consumed (hotbar must not change).
      */
-    static boolean onHotbarScroll(double vertical) {
+    public static boolean onHotbarScroll(double vertical) {
         if (!active || vertical == 0) return false;
         Minecraft client = Minecraft.getInstance();
         if (client.player == null || !client.player.isShiftKeyDown()) return false;
@@ -140,94 +131,58 @@ final class BuildSelectionController {
         refreshPreviewCache(client.player);
     }
 
-    static void submitGizmos() {
-        if (!active) return;
+    /** Snapshot of the current selection for the version-specific world-space renderer. */
+    public static PreviewSnapshot collectPreview() {
+        if (!active) return null;
         Minecraft client = Minecraft.getInstance();
-        boolean breaking = client.player != null && isBreakIntent(client.player);
-        boolean placing = client.player != null && isPlaceIntent(client.player);
-        if (!breaking && !placing) {
-            if (hovered != null) {
-                net.minecraft.core.BlockPos hp = new net.minecraft.core.BlockPos(hovered.x(), hovered.y(), hovered.z());
-                Gizmos.cuboid(hp, GizmoStyle.stroke(0xFFB7C0CC, 1.5f));
-            }
-            return;
-        }
-        int stroke = breaking ? BREAK_STROKE : PLACE_STROKE;
-        int firstFill = breaking ? BREAK_FIRST : PLACE_FIRST;
-        int faceFill = breaking ? BREAK_FACE : PLACE_FACE;
-        int boundsStroke = breaking ? 0xFFFFB48E : 0xFF8EE9FF;
-        if (first != null) {
-            net.minecraft.core.BlockPos fp = new net.minecraft.core.BlockPos(first.x(), first.y(), first.z());
-            Gizmos.cuboid(fp, GizmoStyle.strokeAndFill(stroke, 2f, firstFill));
-        }
-        if (hovered != null && first == null) {
-            net.minecraft.core.BlockPos hp = new net.minecraft.core.BlockPos(hovered.x(), hovered.y(), hovered.z());
-            Gizmos.cuboid(hp, GizmoStyle.stroke(stroke, 1.5f));
-            return;
-        }
-        if (first == null) return;
-
+        if (client.player == null) return null;
+        boolean breaking = isBreakIntent(client.player);
+        boolean placing = isPlaceIntent(client.player);
+        if (!breaking && !placing && hovered == null) return null;
         BlockPos end = hovered != null ? hovered : first;
-        Bounds b = new Bounds(first, end);
-        AABB box = new AABB(b.min().x(), b.min().y(), b.min().z(), b.max().x() + 1, b.max().y() + 1, b.max().z() + 1);
-
-        // Axis-aligned cuboid shapes: one outer box only (no per-block grid).
-        if (isSimpleCuboidPreview(mode) && !cachedFull.isEmpty()) {
-            Gizmos.cuboid(box, GizmoStyle.strokeAndFill(boundsStroke, 2.5f, faceFill));
-            return;
-        }
-
-        // General shapes: only outward faces (no shared faces between neighbors).
-        GizmoStyle faceStyle = GizmoStyle.fill(faceFill);
-        int drawn = 0;
-        for (PreviewFace face : cachedFaces) {
-            if (drawn++ >= FACE_DRAW_LIMIT) break;
-            drawExposedFace(face.pos(), face.face(), faceStyle);
-        }
-        Gizmos.cuboid(box, GizmoStyle.stroke(boundsStroke, 2.5f));
+        Bounds b = first != null && end != null ? new Bounds(first, end) : null;
+        AABB box = b != null
+                ? new AABB(b.min().x(), b.min().y(), b.min().z(), b.max().x() + 1, b.max().y() + 1, b.max().z() + 1)
+                : null;
+        return new PreviewSnapshot(first, hovered, box, mode, breaking, placing,
+                first != null && isSimpleCuboidPreview(mode) && !cachedFull.isEmpty(), cachedFaces);
     }
 
     private static boolean isSimpleCuboidPreview(BuildMode m) {
         return m == BuildMode.CUBE || m == BuildMode.FLOOR || m == BuildMode.SINGLE;
     }
 
-    private static void drawExposedFace(BlockPos pos, Direction face, GizmoStyle style) {
-        Vec3 min = new Vec3(pos.x(), pos.y(), pos.z());
-        Vec3 max = new Vec3(pos.x() + 1, pos.y() + 1, pos.z() + 1);
-        Gizmos.rect(min, max, face, style);
-    }
-
-    static void renderHud(GuiGraphicsExtractor graphics) {
+    public static void renderHud(HudCanvas canvas) {
         if (!active) return;
         Minecraft client = Minecraft.getInstance();
         boolean breaking = client.player != null && isBreakIntent(client.player);
         boolean placing = client.player != null && isPlaceIntent(client.player);
-        int center = graphics.guiWidth() / 2;
-        int y = graphics.guiHeight() - 84;
+        int center = canvas.guiWidth() / 2;
+        int y = canvas.guiHeight() - 84;
         int outline = !breaking && !placing ? 0xCCB7C0CC : (breaking ? 0xCCFF8A4D : 0xCC65D9FF);
         int titleColor = !breaking && !placing ? 0xFFB7C0CC : (breaking ? 0xFFFF8A4D : 0xFF8EE9FF);
-        graphics.fill(center - 170, y - 5, center + 170, y + 52, 0xB018202A);
-        graphics.outline(center - 170, y - 5, 340, 57, outline);
+        canvas.fill(center - 170, y - 5, center + 170, y + 52, 0xB018202A);
+        canvas.outline(center - 170, y - 5, 340, 57, outline);
         Component title = !breaking && !placing
                 ? Component.translatable("maxfastbuild.selection.title_none", modeName())
                 : Component.translatable(
                         breaking ? "maxfastbuild.selection.title_break" : "maxfastbuild.selection.title", modeName());
-        graphics.centeredText(client.font, title, center, y, titleColor);
+        canvas.centeredText(client.font, title, center, y, titleColor);
         if (!breaking && !placing) {
-            graphics.centeredText(client.font, Component.translatable("maxfastbuild.selection.hold_block_or_tool"),
+            canvas.centeredText(client.font, Component.translatable("maxfastbuild.selection.hold_block_or_tool"),
                     center, y + 12, 0xFFFFFFFF);
         } else if (first == null) {
-            graphics.centeredText(client.font, Component.translatable("maxfastbuild.selection.pick_first"), center, y + 12, 0xFFFFFFFF);
+            canvas.centeredText(client.font, Component.translatable("maxfastbuild.selection.pick_first"), center, y + 12, 0xFFFFFFFF);
         } else {
             String second = hovered == null ? "-" : coordinates(hovered);
-            graphics.centeredText(client.font, Component.translatable("maxfastbuild.selection.pick_second", coordinates(first), second),
+            canvas.centeredText(client.font, Component.translatable("maxfastbuild.selection.pick_second", coordinates(first), second),
                     center, y + 12, 0xFFFFFFFF);
         }
-        graphics.centeredText(client.font, Component.translatable(
+        canvas.centeredText(client.font, Component.translatable(
                         "maxfastbuild.selection.aim_hud",
                         lookDistance, MAX_LOOK_DISTANCE),
                 center, y + 24, 0xFFB7C0CC);
-        graphics.centeredText(client.font, Component.translatable(
+        canvas.centeredText(client.font, Component.translatable(
                         breaking ? "maxfastbuild.selection.cancel_hint_break"
                                 : (placing ? "maxfastbuild.selection.cancel_hint" : "maxfastbuild.selection.cancel_hint_none")),
                 center, y + 36, 0xFFB7C0CC);
@@ -409,7 +364,7 @@ final class BuildSelectionController {
         ItemStack stack = player.getMainHandItem();
         if (stack.isEmpty() || stack.getItem() instanceof BlockItem) return false;
         if (!stack.isDamageableItem()) return false;
-        Identifier id = BuiltInRegistries.ITEM.getKey(stack.getItem());
+        var id = BuiltInRegistries.ITEM.getKey(stack.getItem());
         if (id == null) return false;
         String path = id.getPath();
         return path.endsWith("_pickaxe")
@@ -435,6 +390,6 @@ final class BuildSelectionController {
 
     private static void notify(Component message) {
         Minecraft client = Minecraft.getInstance();
-        if (client.player != null) client.player.sendOverlayMessage(message);
+        if (client.player != null) ClientPlatform.instance().sendOverlayMessage(message);
     }
 }

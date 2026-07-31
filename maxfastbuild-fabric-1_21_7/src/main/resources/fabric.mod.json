@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "maxfastbuild",
+  "version": "${version}",
+  "name": "MaxFastBuild",
+  "description": "Server-authoritative mass building for Minecraft 1.21.7 (Fabric client + Paper/Leaf plugin protocol)",
+  "authors": ["MaxFastBuild contributors"],
+  "contact": {
+    "sources": "https://github.com/ifloppy/MaxFastBuild",
+    "issues": "https://github.com/ifloppy/MaxFastBuild/issues"
+  },
+  "license": "LGPL-3.0-only",
+  "icon": "assets/maxfastbuild/icon/icon_128.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["dev.maxfastbuild.fabric.MaxFastBuildFabric"],
+    "client": ["dev.maxfastbuild.fabric.client.MaxFastBuildClient"]
+  },
+  "mixins": ["maxfastbuild.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "1.21.7",
+    "java": ">=21",
+    "fabric-api": ">=0.129.0"
+  },
+  "suggests": {
+    "luckperms": "*"
+  }
+}

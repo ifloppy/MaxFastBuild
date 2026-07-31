@@ -10,6 +10,14 @@ loom {
     }
 }
 
+// 26.2-specific implementations of the ClientPlatform SPI.
+// Shared sources (also compiled by maxfastbuild-fabric-1_21_7) stay in src/main|client/java.
+sourceSets {
+    named("client") {
+        java.srcDir("src/client/26.2/java")
+    }
+}
+
 dependencies {
     minecraft("com.mojang:minecraft:${property("minecraft_version")}")
     implementation("net.fabricmc:fabric-loader:${property("loader_version")}")
