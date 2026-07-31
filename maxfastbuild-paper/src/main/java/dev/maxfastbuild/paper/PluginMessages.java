@@ -149,7 +149,9 @@ final class PluginMessages {
         }
         java.io.File file = new java.io.File(plugin.getDataFolder(), path);
         if (file.isFile()) {
-            return YamlConfiguration.loadConfiguration(file);
+            FileConfiguration config = YamlConfiguration.loadConfiguration(file);
+            mergeDefaults(config, path);
+            return config;
         }
         InputStream stream = plugin.getResource(path);
         if (stream == null) return null;
@@ -157,6 +159,31 @@ final class PluginMessages {
             return YamlConfiguration.loadConfiguration(reader);
         } catch (Exception ex) {
             return null;
+        }
+    }
+
+    /**
+     * Copies bundled message keys missing from an existing on-disk bundle so messages added in
+     * updates appear after reload without clobbering admin customizations. Only rewrites the file
+     * when something new was added.
+     */
+    private void mergeDefaults(FileConfiguration config, String resourcePath) {
+        InputStream stream = plugin.getResource(resourcePath);
+        if (stream == null) return;
+        try (InputStreamReader reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
+            FileConfiguration defaults = YamlConfiguration.loadConfiguration(reader);
+            boolean changed = false;
+            for (String key : defaults.getKeys(true)) {
+                if (!config.contains(key)) {
+                    config.set(key, defaults.get(key));
+                    changed = true;
+                }
+            }
+            if (changed) {
+                config.save(new java.io.File(plugin.getDataFolder(), resourcePath));
+            }
+        } catch (Exception ex) {
+            // best-effort: keep the on-disk bundle as-is
         }
     }
 

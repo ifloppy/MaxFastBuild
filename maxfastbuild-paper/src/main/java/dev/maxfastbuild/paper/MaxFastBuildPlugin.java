@@ -15,11 +15,15 @@ import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.player.*;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.*;
@@ -52,6 +56,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     @Override public void onEnable() {
         active = false;
         saveDefaultConfig();
+        mergeConfigDefaults();
         messages = new PluginMessages(this);
         messages.reload();
         try {
@@ -99,6 +104,33 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getLogger().severe(
                     "org.sqlite.JDBC not found. Place sqlite-jdbc on the server classpath "
                             + "(e.g. paper libraries) or install a JDBC provider. MaxFastBuild no longer bundles SQLite.");
+        }
+    }
+
+    /**
+     * Copies bundled config keys missing from an existing on-disk config.yml so new options
+     * appear after updates without clobbering operator customizations. Only rewrites the file
+     * when something new was added (preserves comments otherwise).
+     */
+    private void mergeConfigDefaults() {
+        java.io.File file = new java.io.File(getDataFolder(), "config.yml");
+        InputStream stream = getResource("config.yml");
+        if (!file.isFile() || stream == null) return;
+        try (InputStreamReader reader = new InputStreamReader(stream, StandardCharsets.UTF_8)) {
+            FileConfiguration defaults = YamlConfiguration.loadConfiguration(reader);
+            FileConfiguration config = YamlConfiguration.loadConfiguration(file);
+            boolean changed = false;
+            for (String key : defaults.getKeys(true)) {
+                if (!config.contains(key)) {
+                    config.set(key, defaults.get(key));
+                    changed = true;
+                }
+            }
+            if (changed) {
+                config.save(file);
+            }
+        } catch (Exception ex) {
+            getLogger().warning("Failed to merge config defaults: " + ex.getMessage());
         }
     }
 
@@ -215,10 +247,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
                         return;
                     }
-                    if (!rateLimit(player)) {
-                        sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
-                        return;
-                    }
                     CompactPlaceCommand.Intent intent = CompactPlaceCommand.parse(message);
                     handleClientRequest(player, new ClientRequest("place", intent.mode().name().toLowerCase(Locale.ROOT),
                             intent.first(), intent.second(), intent.hollow(), intent.material()));
@@ -226,10 +254,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 case "break" -> {
                     if (!player.hasPermission("maxfastbuild.use")) {
                         sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
-                        return;
-                    }
-                    if (!rateLimit(player)) {
-                        sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
                         return;
                     }
                     CompactBreakCommand.Intent intent = CompactBreakCommand.parse(message);
@@ -244,10 +268,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     String chunk = parts.length == 6 ? parts[5] : String.join(" ", Arrays.copyOfRange(parts, 5, parts.length));
                     Optional<String> complete = chunks.accept(player.getUniqueId(), parts[2], Integer.parseInt(parts[3]), Integer.parseInt(parts[4]), chunk);
                     if (complete.isEmpty()) return;
-                    if (!rateLimit(player)) {
-                        sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
-                        return;
-                    }
                     String[] envelopeParts = complete.get().split(" ", 5);
                     if (envelopeParts.length != 5) throw new IllegalArgumentException("invalid_envelope");
                     ProtocolEnvelope envelope = new ProtocolEnvelope(Integer.parseInt(envelopeParts[0]), envelopeParts[1], Long.parseLong(envelopeParts[2]), envelopeParts[3], envelopeParts[4]);
@@ -378,19 +398,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     // Legacy args ignored for operation; hand is source of truth (same as client mod).
                     messages.send(player, "apply-hand-hint");
                 }
-                if (!rateLimit(player)) {
-                    notifyPlayer(player, "error", "maxfastbuild.error.rate_limited", Map.of());
-                    return;
-                }
                 submitFromHand(player, current);
             }
-            case "setblock" -> {
-                if (!rateLimit(player)) {
-                    notifyPlayer(player, "error", "maxfastbuild.error.rate_limited", Map.of());
-                    return;
-                }
-                submitSetBlock(player, args);
-            }
+            case "setblock" -> submitSetBlock(player, args);
             case "status" -> {
                 Selection current = selections.getOrDefault(player.getUniqueId(), selection);
                 String missing = plain(messages.raw("status-pos-missing"));
@@ -1237,6 +1247,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return true;
         }
         if (args[0].equalsIgnoreCase("reload")) {
+            reloadConfig();
+            mergeConfigDefaults();
             reloadConfig();
             messages.reload();
             sender.sendMessage(messages.component("reloaded"));
