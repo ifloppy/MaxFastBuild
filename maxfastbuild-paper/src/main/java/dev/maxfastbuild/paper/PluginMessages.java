@@ -126,6 +126,12 @@ final class PluginMessages {
                     component("persistence-failed", data.get("reason"));
             case "maxfastbuild.error.protocol", "maxfastbuild.error.malformed" ->
                     component("protocol-rejected", data.get("reason"));
+            case "maxfastbuild.error.world_mismatch" ->
+                    component("world-mismatch", data.get("world"));
+            case "maxfastbuild.error.planning_in_progress" ->
+                    component("planning-in-progress");
+            case "maxfastbuild.task.planning_started" ->
+                    component("planning-started", data.get("world"));
             default -> component("protocol-rejected", messageKey);
         };
     }

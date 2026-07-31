@@ -89,5 +89,8 @@ no-changes: "<yellow>没有需要改变的方块。</yellow>"
 rate-limited: "<red>操作过于频繁，请稍后再试。</red>"
 persistence-failed: "<red>任务保存失败：{0}</red>"
 protocol-rejected: "<red>请求被拒绝：{0}</red>"
+world-mismatch: "<red>选区世界与当前世界不一致（{0}）。请重新设置选区。</red>"
+planning-in-progress: "<yellow>正在规划上一个区域，请稍候再试。</yellow>"
+planning-started: "<yellow>正在规划区域（{0}），完成后自动开始。请稍候。</yellow>"
 
 about: "<gold>===== MaxFastBuild 关于 =====</gold>\n<gray>MaxFastBuild</gray> <dark_gray>- 服务端权威的大规模建造工具</dark_gray>\n<gray>许可证：</gray><gold>LGPL-3.0-only</gold>\n<gray>版权：</gray><gold>Copyright (C) 2026 MaxFastBuild contributors</gold>\n<gray>官网：</gray><click:OPEN_URL:https://max.iruanp.com><u><aqua>max.iruanp.com</aqua></u></click>\n<gray>仓库：</gray><click:OPEN_URL:https://github.com/ifloppy/MaxFastBuild><u><aqua>github.com/ifloppy/MaxFastBuild</aqua></u></click>\n<dark_gray>本插件基于 LGPL-3.0-only 发布，分发时不可移除版权声明。</dark_gray>\n<dark_gray>交互概念受 Effortless Building (Requios) 启发。</dark_gray>"

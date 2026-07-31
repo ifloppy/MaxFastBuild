@@ -10,6 +10,10 @@ public final class CommandChunkAssembler {
     public static final int MAX_COMMAND_LENGTH = 240;
     public static final int CHUNK_SIZE = 128;
     public static final int MAX_CHUNKS = 128;
+    /** Maximum number of in-flight transfers a single player may have at once. */
+    public static final int MAX_TRANSFERS_PER_PLAYER = 3;
+    /** Maximum number of chunk parts kept in memory across all players. */
+    public static final int MAX_TOTAL_CHUNKS = 512;
     private final Clock clock;
     private final Duration timeout;
     private final Map<Key, Transfer> transfers = new ConcurrentHashMap<>();
@@ -37,6 +41,14 @@ public final class CommandChunkAssembler {
         purgeExpired();
         if (!transferId.matches("[0-9a-f]{8}") || total < 1 || total > MAX_CHUNKS || index < 0 || index >= total || chunk.length() > CHUNK_SIZE)
             throw new IllegalArgumentException("invalid_chunk");
+        long playerTransfers = transfers.keySet().stream().filter(k -> k.playerId().equals(playerId)).count();
+        if (playerTransfers >= MAX_TRANSFERS_PER_PLAYER) {
+            throw new IllegalArgumentException("too_many_transfers");
+        }
+        int totalChunksInMemory = transfers.values().stream().mapToInt(t -> t.parts.size()).sum();
+        if (totalChunksInMemory >= MAX_TOTAL_CHUNKS) {
+            throw new IllegalArgumentException("too_many_chunks");
+        }
         Key key = new Key(playerId, transferId);
         Transfer transfer = transfers.compute(key, (ignored, current) -> {
             if (current == null) current = new Transfer(total, clock.millis());

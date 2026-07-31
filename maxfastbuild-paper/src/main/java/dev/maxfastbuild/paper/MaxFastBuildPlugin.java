@@ -31,6 +31,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Selection> selections = new ConcurrentHashMap<>();
     private final Map<UUID, TokenBucket> limits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
+    private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     private SecureProtocol protocol;
     private SqliteDatabase database;
@@ -73,7 +74,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getPluginManager().registerEvents(this, this);
             resumeTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
-            getServer().getScheduler().runTaskTimer(this, this::tickTasks, period, period);
+            getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickTasks(); }, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
             getLogger().info("CoreProtect mode: vanilla breakNaturally + one API logPlacement; no synthetic break events / no double logRemoval");
@@ -155,6 +156,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             selections.clear();
             limits.clear();
             sessions.clear();
+            pendingBuilds.clear();
             try { chunks.clear(); } catch (RuntimeException ignored) { }
             if (tasks != null) {
                 try { tasks.closeQuietly(); } catch (RuntimeException ex) {
@@ -262,6 +264,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     @EventHandler public void onQuit(PlayerQuitEvent event) {
         if (!active || tasks == null || executor == null) return;
         UUID playerId = event.getPlayer().getUniqueId();
+        pendingBuilds.remove(playerId);
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(playerId)) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
@@ -303,7 +306,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
         Selection selection = selections.computeIfAbsent(player.getUniqueId(),
-                ignored -> new Selection(BuildMode.LINE, null, null, false, "minecraft:stone"));
+                ignored -> new Selection(BuildMode.LINE, null, null, false, "minecraft:stone", player.getWorld().getName()));
         String sub = args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
             case "mode" -> {
@@ -323,12 +326,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             case "pos1" -> {
                 BlockPos pos = at(player);
-                selections.put(player.getUniqueId(), selection.withFirst(pos));
+                selections.put(player.getUniqueId(), selection.withFirst(pos).withWorld(player.getWorld().getName()));
                 messages.send(player, "pos1-set", formatPos(pos));
             }
             case "pos2" -> {
                 BlockPos pos = at(player);
-                selections.put(player.getUniqueId(), selection.withSecond(pos));
+                selections.put(player.getUniqueId(), selection.withSecond(pos).withWorld(player.getWorld().getName()));
                 messages.send(player, "pos2-set", formatPos(pos));
             }
             case "hollow" -> {
@@ -428,7 +431,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         BuildMode mode = BuildMode.valueOf(request.mode().toUpperCase(Locale.ROOT));
         // Same hand resolution as /mfb apply (HandIntent) — protocol op/material are not trusted.
         Selection anchors = new Selection(mode, request.first(), request.second(), request.hollow(),
-                request.material() == null ? "minecraft:stone" : request.material());
+                request.material() == null ? "minecraft:stone" : request.material(), player.getWorld().getName());
         submitFromHand(player, anchors, false);
     }
 
@@ -737,6 +740,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.positions_required", Map.of());
             return;
         }
+        String currentWorld = player.getWorld().getName();
+        if (selection.world() == null || !selection.world().equals(currentWorld)) {
+            sendProtocol(player, "error", "maxfastbuild.error.world_mismatch", Map.of("world", currentWorld));
+            return;
+        }
         if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) {
             sendProtocol(player, "error", "maxfastbuild.error.coreprotect_unavailable", Map.of());
             return;
@@ -745,77 +753,138 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
             return;
         }
-        int max = getConfig().getInt("execution.max-region-blocks", 100000);
         if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
             sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
             return;
         }
-
-        Set<BlockPos> positions;
-        try {
-            positions = new DefaultShapeGenerator().generate(
-                    new ShapeRequest(selection.mode(), selection.first(), selection.second(), selection.hollow()), max);
-        } catch (ShapeLimitException ex) {
-            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", max));
-            return;
-        } catch (RuntimeException ex) {
-            sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", ex.getMessage() == null ? "shape" : ex.getMessage()));
+        if (pendingBuilds.containsKey(player.getUniqueId())) {
+            sendProtocol(player, "error", "maxfastbuild.error.planning_in_progress", Map.of());
             return;
         }
+        int max = getConfig().getInt("execution.max-region-blocks", 100000);
+        pendingBuilds.put(player.getUniqueId(), new PendingBuild(player, selection, operation, max));
+        sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", currentWorld));
+    }
 
-        PaperWorldAccess world = new PaperWorldAccess();
-        List<BlockMutation> mutations = new ArrayList<>();
-        long replaceBreakCount = 0;
-        for (BlockPos pos : positions) {
-            if (pos.y() < player.getWorld().getMinHeight() || pos.y() >= player.getWorld().getMaxHeight()) {
-                sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
-                return;
+    private void tickPlanners() {
+        if (!active || pendingBuilds.isEmpty()) return;
+        int batch = Math.max(1, getConfig().getInt("execution.planning.blocks-per-tick", 2000));
+        Iterator<Map.Entry<UUID, PendingBuild>> it = pendingBuilds.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, PendingBuild> entry = it.next();
+            PendingBuild pending = entry.getValue();
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.getWorld().getName().equals(pending.selection.world())) {
+                it.remove();
+                continue;
             }
-            String before = world.stateAt(player.getWorld().getName(), pos);
+            if (pending.positions == null) {
+                try {
+                    pending.positions = new DefaultShapeGenerator().generate(
+                            new ShapeRequest(pending.selection.mode(), pending.selection.first(), pending.selection.second(), pending.selection.hollow()), pending.maxBlocks);
+                    pending.totalPositions = pending.positions.size();
+                    pending.iterator = pending.positions.iterator();
+                } catch (ShapeLimitException ex) {
+                    sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", pending.maxBlocks));
+                    it.remove();
+                    continue;
+                } catch (RuntimeException ex) {
+                    sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", ex.getMessage() == null ? "shape" : ex.getMessage()));
+                    it.remove();
+                    continue;
+                }
+            }
+            PlanningError error = advancePlanning(pending, batch);
+            if (error != null) {
+                sendProtocol(player, "error", error.key(), error.data());
+                it.remove();
+                continue;
+            }
+            if (!pending.iterator.hasNext()) {
+                finalizePlanning(pending);
+                it.remove();
+            }
+        }
+    }
+
+    private record PlanningError(String key, Map<String, ?> data) {}
+
+    private PlanningError advancePlanning(PendingBuild pending, int batch) {
+        PaperWorldAccess world = new PaperWorldAccess();
+        Player player = pending.player;
+        OperationKind operation = pending.operation;
+        org.bukkit.World selectedWorld = Bukkit.getWorld(pending.selection.world());
+        if (selectedWorld == null) {
+            return new PlanningError("maxfastbuild.error.protected", Map.of("position", "unknown", "reason", "world_unloaded"));
+        }
+        String worldName = selectedWorld.getName();
+        int minHeight = selectedWorld.getMinHeight();
+        int maxHeight = selectedWorld.getMaxHeight();
+        for (int i = 0; i < batch && pending.iterator.hasNext(); i++) {
+            BlockPos pos = pending.iterator.next();
+            pending.processed++;
+            if (pos.y() < minHeight || pos.y() >= maxHeight) {
+                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
+            }
+            String before = world.stateAt(worldName, pos);
             if (operation == OperationKind.BREAK && before.equals("minecraft:air")) continue;
-            BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : selection.material());
-            WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), player.getWorld().getName(), mutation, operation);
+            BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : pending.selection.material());
+            WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
             if (!validation.allowed()) {
                 if ("insufficient_tool".equals(validation.reason())) {
-                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
-                    return;
+                    return new PlanningError("maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
                 }
                 if ("unbreakable_block".equals(validation.reason()) || "unbreakable_replace".equals(validation.reason())) {
-                    sendProtocol(player, "error", "maxfastbuild.error.unbreakable_block",
+                    return new PlanningError("maxfastbuild.error.unbreakable_block",
                             Map.of("position", pos.toString(), "block", before, "reason", validation.reason()));
-                    return;
                 }
                 if ("forbidden_material".equals(validation.reason())) {
-                    sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(selection.material())));
-                    return;
+                    return new PlanningError("maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(pending.selection.material())));
                 }
-                sendProtocol(player, "error", "maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", validation.reason()));
-                return;
+                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", validation.reason()));
             }
             if (!before.equals(mutation.targetState())) {
-                mutations.add(mutation);
+                pending.mutations.add(mutation);
                 if (operation == OperationKind.PLACE && PaperWorldAccess.requiresBreakToReplace(before)) {
-                    replaceBreakCount++;
+                    pending.replaceBreakCount++;
                 }
             }
         }
-        if (mutations.isEmpty()) { sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of()); return; }
+        return null;
+    }
+
+    private void finalizePlanning(PendingBuild pending) {
+        Player player = pending.player;
+        OperationKind operation = pending.operation;
+        Selection selection = pending.selection;
+        List<BlockMutation> mutations = pending.mutations;
+        if (mutations.isEmpty()) {
+            sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
+            return;
+        }
 
         // Break mode, or place-over-solid: survival needs effective tools for every break target.
         boolean needsBreakTools = operation == OperationKind.BREAK
-                || (operation == OperationKind.PLACE && replaceBreakCount > 0);
+                || (operation == OperationKind.PLACE && pending.replaceBreakCount > 0);
         if (needsBreakTools && player.getGameMode() != GameMode.CREATIVE) {
             if (!BreakToolHelper.hasAnyMiningTool(player)) {
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
                 return;
             }
+            Map<org.bukkit.Material, Boolean> canBreakCache = new HashMap<>();
             for (BlockMutation mutation : mutations) {
                 if (operation == OperationKind.PLACE && !PaperWorldAccess.requiresBreakToReplace(mutation.expectedState())) {
                     continue;
                 }
                 org.bukkit.block.Block target = player.getWorld().getBlockAt(
                         mutation.position().x(), mutation.position().y(), mutation.position().z());
-                if (!BreakToolHelper.canBreakBlock(player, target)) {
+                org.bukkit.Material material = target.getType();
+                Boolean cached = canBreakCache.get(material);
+                if (cached == null) {
+                    cached = BreakToolHelper.canBreakBlock(player, target);
+                    canBreakCache.put(material, cached);
+                }
+                if (!cached) {
                     sendProtocol(player, "error", "maxfastbuild.error.wrong_tool",
                             Map.of("block", target.getType().getKey().toString(),
                                     "reason", "no_effective_tool"));
@@ -823,19 +892,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
             }
             // Durability budget: each solid replace wears a tool once (MIN_REMAINING floor already in helper).
-            if (operation == OperationKind.PLACE && replaceBreakCount > 0) {
+            if (operation == OperationKind.PLACE && pending.replaceBreakCount > 0) {
                 long usable = estimateUsableToolHits(player);
-                if (usable < replaceBreakCount) {
+                if (usable < pending.replaceBreakCount) {
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool_durability",
-                            Map.of("reason", "durability", "need", replaceBreakCount, "have", usable));
+                            Map.of("reason", "durability", "need", pending.replaceBreakCount, "have", usable));
                     return;
                 }
             }
         }
 
-        BuildPlan plan = new BuildPlan(player.getWorld().getName(), operation, new Bounds(selection.first(), selection.second()), mutations);
+        BuildPlan plan = new BuildPlan(selection.world(), operation,
+                new Bounds(selection.first(), selection.second()), mutations);
         // Place-over-solid: charge per-block for place + for each required break.
-        BillingPolicy.Charge charge = billing().quote(plan, operation == OperationKind.PLACE ? replaceBreakCount : 0);
+        BillingPolicy.Charge charge = billing().quote(plan, operation == OperationKind.PLACE ? pending.replaceBreakCount : 0);
         boolean requireMaterials = operation == OperationKind.PLACE
                 && player.getGameMode() != GameMode.CREATIVE
                 && !player.hasPermission("maxfastbuild.bypass.materials");
@@ -850,12 +920,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             org.bukkit.Material resolved = PaperInventoryHelper.resolveMaterial(itemKey);
             if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(selection.material())));
-                return;
-            }
-            long have = PaperInventoryHelper.count(player, itemKey, searchShulkers);
-            if (have < need) {
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                        Map.of("need", need, "have", have, "material", itemKey));
                 return;
             }
         }
@@ -1069,6 +1133,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void cancelPlayerTasks(Player player) {
         if (!active || tasks == null || executor == null) return;
         int cancelled = 0;
+        if (pendingBuilds.remove(player.getUniqueId()) != null) {
+            cancelled++;
+        }
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(player.getUniqueId())) continue;
             if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
@@ -1196,11 +1263,38 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private static BlockPos at(Player player) { Location p = player.getLocation(); return new BlockPos(p.getBlockX(), p.getBlockY(), p.getBlockZ()); }
 
     private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, boolean hollow, String material) {}
-    private record Selection(BuildMode mode, BlockPos first, BlockPos second, boolean hollow, String material) {
-        Selection withMode(BuildMode value) { return new Selection(value, first, second, hollow, material); }
-        Selection withFirst(BlockPos value) { return new Selection(mode, value, second, hollow, material); }
-        Selection withSecond(BlockPos value) { return new Selection(mode, first, value, hollow, material); }
-        Selection withHollow(boolean value) { return new Selection(mode, first, second, value, material); }
-        Selection withMaterial(String value) { return new Selection(mode, first, second, hollow, value); }
+    private record Selection(BuildMode mode, BlockPos first, BlockPos second, boolean hollow, String material, String world) {
+        Selection withMode(BuildMode value) { return new Selection(value, first, second, hollow, material, world); }
+        Selection withFirst(BlockPos value) { return new Selection(mode, value, second, hollow, material, world); }
+        Selection withSecond(BlockPos value) { return new Selection(mode, first, value, hollow, material, world); }
+        Selection withHollow(boolean value) { return new Selection(mode, first, second, value, material, world); }
+        Selection withMaterial(String value) { return new Selection(mode, first, second, hollow, value, world); }
+        Selection withWorld(String value) { return new Selection(mode, first, second, hollow, material, value); }
+    }
+
+    /** In-progress region planning for a player. Planning runs over multiple server ticks to avoid freezing the main thread. */
+    private static final class PendingBuild {
+        final Player player;
+        final OperationKind operation;
+        final Selection selection;
+        final int maxBlocks;
+        final long startedAt;
+        final List<BlockMutation> mutations = new ArrayList<>();
+        long replaceBreakCount = 0;
+        long totalPositions = -1;
+        long processed = 0;
+        boolean failed = false;
+        String failureReason = null;
+        Set<BlockPos> positions;
+        Iterator<BlockPos> iterator;
+        boolean notified = false;
+
+        PendingBuild(Player player, Selection selection, OperationKind operation, int maxBlocks) {
+            this.player = player;
+            this.selection = selection;
+            this.operation = operation;
+            this.maxBlocks = maxBlocks;
+            this.startedAt = System.currentTimeMillis();
+        }
     }
 }
