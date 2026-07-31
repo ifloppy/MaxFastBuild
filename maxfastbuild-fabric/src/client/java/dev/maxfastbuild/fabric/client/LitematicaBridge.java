@@ -1,6 +1,7 @@
 package dev.maxfastbuild.fabric.client;
 
 import com.mojang.logging.LogUtils;
+import dev.maxfastbuild.core.protocol.PasteTransfer;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.arguments.blocks.BlockStateParser;
 import net.minecraft.core.BlockPos;
@@ -33,8 +34,11 @@ import java.util.Map;
  * specific message instead of a generic "no placement".
  */
 public final class LitematicaBridge {
-    private static final int MAX_BLOCKS = 102_400;
+    private static final int PROTOCOL_CAP = PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART;
     private static final Logger LOGGER = LogUtils.getLogger();
+
+    /** Per-paste collection cap; refreshed from the server hello handshake. */
+    private static volatile int maxBlocks = PROTOCOL_CAP;
 
     public enum Reason {
         NOT_LOADED, NO_PLACEMENT, ALL_DISABLED, NO_CONTAINER, ZERO_BLOCKS, TOO_LARGE, API_ERROR
@@ -43,6 +47,15 @@ public final class LitematicaBridge {
     private static Reason lastReason = Reason.NOT_LOADED;
 
     private LitematicaBridge() {}
+
+    /** Server-advertised paste limit (clamped to what the transfer protocol can carry). */
+    public static void setMaxBlocks(int value) {
+        if (value > 0) maxBlocks = Math.min(value, PROTOCOL_CAP);
+    }
+
+    public static int maxBlocks() {
+        return maxBlocks;
+    }
 
     public static boolean available() {
         try {
@@ -113,7 +126,7 @@ public final class LitematicaBridge {
                     placementMirror, placementRotation);
         }
         if (result.isEmpty()) lastReason = Reason.ZERO_BLOCKS;
-        if (result.size() > MAX_BLOCKS) throw new TooLargeException();
+        if (result.size() > maxBlocks) throw new TooLargeException();
         return result;
     }
 
@@ -130,7 +143,7 @@ public final class LitematicaBridge {
         int h = Math.abs(size.getY());
         int l = Math.abs(size.getZ());
         if (w == 0 || h == 0 || l == 0) return;
-        if ((long) w * h * l > MAX_BLOCKS) throw new TooLargeException();
+        if ((long) w * h * l > maxBlocks) throw new TooLargeException();
 
         BlockPos end = subPos.offset(relativeEnd(size));
         BlockPos minCorner = minCorner(subPos, end);

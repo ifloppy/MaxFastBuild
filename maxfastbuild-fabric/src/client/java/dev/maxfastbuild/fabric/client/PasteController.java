@@ -76,8 +76,48 @@ final class PasteController {
             abort("maxfastbuild.paste.hello_failed");
             return;
         }
+        if (object.has("maxBlocks")) {
+            try {
+                LitematicaBridge.setMaxBlocks(object.get("maxBlocks").getAsInt());
+            } catch (IllegalStateException | NumberFormatException ignored) {
+            }
+        }
+        List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
+        if (blocks == null || blocks.isEmpty()) {
+            notify(Component.translatable(reasonKey(LitematicaBridge.lastReason())));
+            resetSession();
+            return;
+        }
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        for (PasteBlock block : blocks) {
+            minX = Math.min(minX, block.x());
+            minY = Math.min(minY, block.y());
+            minZ = Math.min(minZ, block.z());
+        }
+        Map<String, Integer> paletteIndex = new LinkedHashMap<>();
+        List<String> palette = new ArrayList<>();
+        List<PasteTransfer.Entry> entries = new ArrayList<>(blocks.size());
+        for (PasteBlock block : blocks) {
+            String clean = stripNbt(block.blockData());
+            int index = paletteIndex.computeIfAbsent(clean, ignored -> {
+                palette.add(clean);
+                return palette.size() - 1;
+            });
+            entries.add(new PasteTransfer.Entry(block.x() - minX, block.y() - minY, block.z() - minZ, index));
+        }
+        pasteSessionId = UUID.randomUUID().toString();
+        try {
+            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries);
+        } catch (IllegalArgumentException ex) {
+            resetSession();
+            notify(Component.translatable("maxfastbuild.paste.too_large"));
+            return;
+        }
+        currentPart = 0;
+        waitingAck = false;
         sequence = 0;
         state = State.SENDING;
+        notify(Component.translatable("maxfastbuild.paste.starting", blocks.size()));
         sendPart();
     }
 
@@ -109,44 +149,9 @@ final class PasteController {
             notify(Component.translatable("maxfastbuild.paste.in_progress"));
             return;
         }
-        List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
-        if (blocks == null || blocks.isEmpty()) {
-            notify(Component.translatable(reasonKey(LitematicaBridge.lastReason())));
-            return;
-        }
-        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
-        for (PasteBlock block : blocks) {
-            minX = Math.min(minX, block.x());
-            minY = Math.min(minY, block.y());
-            minZ = Math.min(minZ, block.z());
-        }
-        Map<String, Integer> paletteIndex = new LinkedHashMap<>();
-        List<String> palette = new ArrayList<>();
-        List<PasteTransfer.Entry> entries = new ArrayList<>(blocks.size());
-        for (PasteBlock block : blocks) {
-            String clean = stripNbt(block.blockData());
-            int index = paletteIndex.computeIfAbsent(clean, ignored -> {
-                palette.add(clean);
-                return palette.size() - 1;
-            });
-            entries.add(new PasteTransfer.Entry(block.x() - minX, block.y() - minY, block.z() - minZ, index));
-        }
-        pasteSessionId = UUID.randomUUID().toString();
-        try {
-            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries);
-        } catch (IllegalArgumentException ex) {
-            parts = null;
-            notify(Component.translatable("maxfastbuild.paste.too_large"));
-            return;
-        }
-        currentPart = 0;
-        waitingAck = false;
-        sessionId = null;
-        secret = null;
         state = State.PENDING_HELLO;
         pendingSince = now();
         send("__mfb hello");
-        notify(Component.translatable("maxfastbuild.paste.starting", blocks.size()));
     }
 
     private static void sendPart() {

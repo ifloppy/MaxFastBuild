@@ -1678,7 +1678,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 "type", "hello",
                 "sessionId", session.id(),
                 "secret", Base64.getUrlEncoder().withoutPadding().encodeToString(session.secret()),
-                "expiresAt", session.expiresAt().toString())));
+                "expiresAt", session.expiresAt().toString(),
+                "maxBlocks", getConfig().getInt("execution.max-region-blocks", 100000))));
     }
 
     /**
