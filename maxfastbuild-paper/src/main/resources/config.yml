@@ -7,6 +7,8 @@ execution:
   max-concurrent-tasks-per-player: 2
   # Documented for operators; offline pause is always applied in code today.
   pause-when-player-offline: true
+  # Maximum number of commands a single player may have waiting in the rate-limited queue.
+  max-queued-commands-per-player: 32
   planning:
     # How many blocks are scanned per server tick while planning a large region.
     # Higher values finish faster but use more time per tick; lower values spread the load.

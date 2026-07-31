@@ -32,6 +32,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, TokenBucket> limits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
+    private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     private SecureProtocol protocol;
     private SqliteDatabase database;
@@ -78,7 +79,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getPluginManager().registerEvents(this, this);
             resumeTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
-            getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickTasks(); }, period, period);
+            getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickTasks(); processCommandQueues(); }, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
             getLogger().info("CoreProtect mode: vanilla breakNaturally + one API logPlacement; no synthetic break events / no double logRemoval");
@@ -161,6 +162,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             limits.clear();
             sessions.clear();
             pendingBuilds.clear();
+            commandQueues.clear();
             try { chunks.clear(); } catch (RuntimeException ignored) { }
             if (tasks != null) {
                 try { tasks.closeQuietly(); } catch (RuntimeException ex) {
@@ -269,6 +271,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (!active || tasks == null || executor == null) return;
         UUID playerId = event.getPlayer().getUniqueId();
         pendingBuilds.remove(playerId);
+        commandQueues.remove(playerId);
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(playerId)) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
@@ -399,6 +402,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         current.material());
                 messages.send(player, "status-pos", p1, p2);
                 messages.send(player, "status-tasks", tasks.activeCount(player.getUniqueId()));
+                messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
             case "cancel" -> cancelPlayerTasks(player);
             case "about" -> messages.send(player, "about");
@@ -420,6 +424,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         messages.send(player, "help-line-about");
         messages.send(player, "help-modes");
         messages.send(player, "help-tip");
+    }
+
+    private int queueSize(UUID playerId) {
+        Queue<QueuedCommand> queue = commandQueues.get(playerId);
+        return queue == null ? 0 : queue.size();
     }
 
     private static String formatPos(BlockPos pos) {
@@ -761,17 +770,47 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
             return;
         }
-        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
-            sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
+        enqueueCommand(player, new QueuedCommand(selection, operation, filter, keepOnly));
+    }
+
+    private void enqueueCommand(Player player, QueuedCommand command) {
+        int maxQueue = getConfig().getInt("execution.max-queued-commands-per-player", 32);
+        Queue<QueuedCommand> queue = commandQueues.computeIfAbsent(player.getUniqueId(), ignored -> new ArrayDeque<>());
+        if (queue.size() >= maxQueue) {
+            sendProtocol(player, "error", "maxfastbuild.error.queue_full", Map.of("limit", maxQueue));
             return;
         }
-        if (pendingBuilds.containsKey(player.getUniqueId())) {
-            sendProtocol(player, "error", "maxfastbuild.error.planning_in_progress", Map.of());
-            return;
-        }
+        queue.add(command);
+        sendProtocol(player, "info", "maxfastbuild.task.queued", Map.of("position", queue.size()));
+        tryDrainQueue(player);
+    }
+
+    private void tryDrainQueue(Player player) {
+        UUID playerId = player.getUniqueId();
+        if (pendingBuilds.containsKey(playerId)) return;
+        if (tasks.activeCount(playerId) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) return;
+        Queue<QueuedCommand> queue = commandQueues.get(playerId);
+        if (queue == null || queue.isEmpty()) return;
+        if (!rateLimit(player)) return;
+        QueuedCommand next = queue.poll();
+        if (next == null) return;
         int max = getConfig().getInt("execution.max-region-blocks", 100000);
-        pendingBuilds.put(player.getUniqueId(), new PendingBuild(player, selection, operation, max, filter, keepOnly));
-        sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", currentWorld));
+        pendingBuilds.put(playerId, new PendingBuild(player, next.selection(), next.operation(), max, next.filter(), next.keepOnly()));
+        sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", player.getWorld().getName()));
+    }
+
+    private void processCommandQueues() {
+        if (!active) return;
+        Iterator<Map.Entry<UUID, Queue<QueuedCommand>>> it = commandQueues.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, Queue<QueuedCommand>> entry = it.next();
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null) {
+                it.remove();
+                continue;
+            }
+            tryDrainQueue(player);
+        }
     }
 
     /** Parse and submit an /mfbfill request (vanilla /fill compatible). */
@@ -838,10 +877,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         Selection selection = new Selection(BuildMode.CUBE, from, to, hollow, blockState, player.getWorld().getName());
-        if (!rateLimit(player)) {
-            sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
-            return;
-        }
         submit(player, selection, OperationKind.PLACE, filter, keepOnly);
     }
 
@@ -1220,6 +1255,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (pendingBuilds.remove(player.getUniqueId()) != null) {
             cancelled++;
         }
+        if (commandQueues.remove(player.getUniqueId()) != null) {
+            cancelled++;
+        }
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(player.getUniqueId())) continue;
             if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
@@ -1347,6 +1385,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private static BlockPos at(Player player) { Location p = player.getLocation(); return new BlockPos(p.getBlockX(), p.getBlockY(), p.getBlockZ()); }
 
     private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, boolean hollow, String material) {}
+    private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
     private record Selection(BuildMode mode, BlockPos first, BlockPos second, boolean hollow, String material, String world) {
         Selection withMode(BuildMode value) { return new Selection(value, first, second, hollow, material, world); }
         Selection withFirst(BlockPos value) { return new Selection(mode, value, second, hollow, material, world); }

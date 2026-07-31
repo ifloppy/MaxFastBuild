@@ -66,6 +66,7 @@ fill-invalid-mode: "<red>无效模式：{0}</red> <gray>可用：destroy|hollow|
 status-selection: "<aqua>选区</aqua> 形状=<yellow>{0}</yellow> 空心=<yellow>{1}</yellow> 材料=<yellow>{2}</yellow>"
 status-pos: "<aqua>坐标</aqua> 点1=<yellow>{0}</yellow> 点2=<yellow>{1}</yellow>"
 status-tasks: "<aqua>活动任务</aqua> <yellow>{0}</yellow>"
+status-queue: "<aqua>排队指令</aqua> <yellow>{0}</yellow>"
 status-pos-missing: "<gray>（未设置）</gray>"
 cancel-none: "<yellow>没有可取消的任务。</yellow>"
 cancel-done: "<green>已取消 {0} 个任务。</green>"
@@ -75,6 +76,8 @@ unknown-subcommand: "<red>未知子命令：{0}</red> <gray>输入 /mfb help 查
 admin-unknown: "<red>未知管理子命令。</red> <gray>可用：reload | recovery</gray>"
 
 task-accepted: "<green>任务已接受：{0} 个方块，费用 {1}。</green>"
+task-queued: "<yellow>指令已加入队列（位置 {0}）。</yellow>"
+queue-full: "<red>队列已满（上限 {0}），请稍后再试。</red>"
 task-completed: "<green>任务完成：已处理 {0}/{1}，退款 {2}。</green>"
 task-partial: "<yellow>任务部分完成：成功 {0}/{1}，已退款 {2}。</yellow>"
 insufficient-materials: "<red>材料不足：需要 {0}，仅有 {1}（{2}）。</red>"

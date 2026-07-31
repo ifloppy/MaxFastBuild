@@ -66,6 +66,7 @@ fill-invalid-mode: "<red>Invalid mode: {0}</red> <gray>Available: destroy|hollow
 status-selection: "<aqua>Selection</aqua> mode=<yellow>{0}</yellow> hollow=<yellow>{1}</yellow> material=<yellow>{2}</yellow>"
 status-pos: "<aqua>Corners</aqua> pos1=<yellow>{0}</yellow> pos2=<yellow>{1}</yellow>"
 status-tasks: "<aqua>Active tasks</aqua> <yellow>{0}</yellow>"
+status-queue: "<aqua>Queued commands</aqua> <yellow>{0}</yellow>"
 status-pos-missing: "<gray>(unset)</gray>"
 cancel-none: "<yellow>No cancellable tasks.</yellow>"
 cancel-done: "<green>Cancelled {0} task(s).</green>"
@@ -75,6 +76,8 @@ unknown-subcommand: "<red>Unknown subcommand: {0}</red> <gray>Try /mfb help</gra
 admin-unknown: "<red>Unknown admin subcommand.</red> <gray>reload | recovery</gray>"
 
 task-accepted: "<green>Task accepted: {0} blocks, cost {1}.</green>"
+task-queued: "<yellow>Command queued (position {0}).</yellow>"
+queue-full: "<red>Queue is full (limit {0}); try again later.</red>"
 task-completed: "<green>Task complete: {0}/{1} applied, refund {2}.</green>"
 task-partial: "<yellow>Task partial: {0}/{1} applied, refunded {2}.</yellow>"
 insufficient-materials: "<red>Not enough materials: need {0}, have {1} ({2}).</red>"

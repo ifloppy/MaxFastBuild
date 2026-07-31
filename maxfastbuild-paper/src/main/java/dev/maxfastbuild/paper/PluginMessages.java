@@ -132,6 +132,10 @@ final class PluginMessages {
                     component("planning-in-progress");
             case "maxfastbuild.task.planning_started" ->
                     component("planning-started", data.get("world"));
+            case "maxfastbuild.task.queued" ->
+                    component("task-queued", data.get("position"));
+            case "maxfastbuild.error.queue_full" ->
+                    component("queue-full", data.get("limit"));
             default -> component("protocol-rejected", messageKey);
         };
     }
