@@ -15,6 +15,10 @@ commands:
     description: 兼容 /setblock 的单方块放置指令
     usage: /mfbsetblock <x y z> <block> [replace|destroy|keep]
     permission: maxfastbuild.use
+  mfbfill:
+    description: 兼容 /fill 的大规模填充指令
+    usage: /mfbfill <x1> <y1> <z1> <x2> <y2> <z2> <block> [destroy|hollow|keep|outline|replace [filter]]
+    permission: maxfastbuild.use
   mfbadmin:
     description: MaxFastBuild 管理指令
     usage: /mfbadmin <reload|recovery>

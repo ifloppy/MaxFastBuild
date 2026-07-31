@@ -71,6 +71,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             mfb.setTabCompleter(publicCommand);
             PluginCommand mfbAdmin = Objects.requireNonNull(getCommand("mfbadmin"), "mfbadmin command missing from plugin.yml");
             mfbAdmin.setExecutor((sender, command, label, args) -> handleAdmin(sender, args));
+            FillCommand fillCommand = new FillCommand(this);
+            PluginCommand mfbFill = Objects.requireNonNull(getCommand("mfbfill"), "mfbfill command missing from plugin.yml");
+            mfbFill.setExecutor(fillCommand);
+            mfbFill.setTabCompleter(fillCommand);
             getServer().getPluginManager().registerEvents(this, this);
             resumeTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
@@ -732,6 +736,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void submit(Player player, Selection selection, OperationKind operation) {
+        submit(player, selection, operation, null, false);
+    }
+
+    private void submit(Player player, Selection selection, OperationKind operation, Material filter, boolean keepOnly) {
         if (!player.hasPermission("maxfastbuild.use")) {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
             return;
@@ -762,8 +770,79 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
         int max = getConfig().getInt("execution.max-region-blocks", 100000);
-        pendingBuilds.put(player.getUniqueId(), new PendingBuild(player, selection, operation, max));
+        pendingBuilds.put(player.getUniqueId(), new PendingBuild(player, selection, operation, max, filter, keepOnly));
         sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", currentWorld));
+    }
+
+    /** Parse and submit an /mfbfill request (vanilla /fill compatible). */
+    void handleFillCommand(Player player, String[] args) {
+        if (!active || tasks == null) {
+            if (messages != null) messages.send(player, "not-ready");
+            return;
+        }
+        if (args.length < 7) {
+            messages.send(player, "fill-usage");
+            return;
+        }
+        Location loc = player.getLocation();
+        BlockPos from;
+        BlockPos to;
+        try {
+            from = new BlockPos(
+                    parseCoordinate(args[0], loc.getBlockX()),
+                    parseCoordinate(args[1], loc.getBlockY()),
+                    parseCoordinate(args[2], loc.getBlockZ()));
+            to = new BlockPos(
+                    parseCoordinate(args[3], loc.getBlockX()),
+                    parseCoordinate(args[4], loc.getBlockY()),
+                    parseCoordinate(args[5], loc.getBlockZ()));
+        } catch (NumberFormatException ex) {
+            messages.send(player, "fill-invalid-pos", Arrays.toString(Arrays.copyOfRange(args, 0, 6)));
+            return;
+        }
+        String blockState = args[6];
+        if (!blockState.contains(":")) blockState = "minecraft:" + blockState;
+        // Validate block state early to give a clean error.
+        try {
+            Bukkit.createBlockData(blockState);
+        } catch (IllegalArgumentException ex) {
+            messages.send(player, "fill-invalid-block", blockState);
+            return;
+        }
+
+        Material filter = null;
+        boolean keepOnly = false;
+        boolean hollow = false;
+        if (args.length > 7) {
+            String mode = args[7].toLowerCase(Locale.ROOT);
+            switch (mode) {
+                case "destroy" -> { }
+                case "hollow", "outline" -> hollow = true;
+                case "keep" -> keepOnly = true;
+                case "replace" -> {
+                    if (args.length > 8) {
+                        String filterKey = args[8];
+                        if (!filterKey.contains(":")) filterKey = "minecraft:" + filterKey;
+                        filter = Material.matchMaterial(filterKey, false);
+                        if (filter == null) {
+                            messages.send(player, "fill-invalid-filter", args[8]);
+                            return;
+                        }
+                    }
+                }
+                default -> {
+                    messages.send(player, "fill-invalid-mode", mode);
+                    return;
+                }
+            }
+        }
+
+        Selection selection = new Selection(BuildMode.CUBE, from, to, hollow, blockState, player.getWorld().getName());
+        if (!rateLimit(player)) {
+            sendProtocol(player, "error", "maxfastbuild.error.rate_limited", Map.of());
+            return;
+        }
+        submit(player, selection, OperationKind.PLACE, filter, keepOnly);
     }
 
     private void tickPlanners() {
@@ -828,6 +907,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             String before = world.stateAt(worldName, pos);
             if (operation == OperationKind.BREAK && before.equals("minecraft:air")) continue;
+            if (pending.keepOnly && !before.equals("minecraft:air")) continue;
+            if (pending.filter != null) {
+                Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
+                if (beforeMaterial != pending.filter) continue;
+            }
             BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : pending.selection.material());
             WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
             if (!validation.allowed()) {
@@ -1279,6 +1363,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         final Selection selection;
         final int maxBlocks;
         final long startedAt;
+        final Material filter;
+        final boolean keepOnly;
         final List<BlockMutation> mutations = new ArrayList<>();
         long replaceBreakCount = 0;
         long totalPositions = -1;
@@ -1290,10 +1376,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         boolean notified = false;
 
         PendingBuild(Player player, Selection selection, OperationKind operation, int maxBlocks) {
+            this(player, selection, operation, maxBlocks, null, false);
+        }
+
+        PendingBuild(Player player, Selection selection, OperationKind operation, int maxBlocks, Material filter, boolean keepOnly) {
             this.player = player;
             this.selection = selection;
             this.operation = operation;
             this.maxBlocks = maxBlocks;
+            this.filter = filter;
+            this.keepOnly = keepOnly;
             this.startedAt = System.currentTimeMillis();
         }
     }
