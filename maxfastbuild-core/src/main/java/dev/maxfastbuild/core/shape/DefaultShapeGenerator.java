@@ -88,13 +88,20 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
             double scale = 1.0 - (double) layer / height;
             int rx = Math.max(0, (int) Math.floor((b.sizeX() - 1) * scale / 2));
             int rz = Math.max(0, (int) Math.floor((b.sizeZ() - 1) * scale / 2));
-            for (int x = (int) Math.ceil(cx - rx); x <= Math.floor(cx + rx); x++)
-                for (int z = (int) Math.ceil(cz - rz); z <= Math.floor(cz + rz); z++) {
-                    boolean edge = x == Math.ceil(cx - rx) || x == Math.floor(cx + rx) || z == Math.ceil(cz - rz) || z == Math.floor(cz + rz);
+            int xStart = (int) Math.ceil(cx - rx);
+            int xEnd = (int) Math.floor(cx + rx);
+            int zStart = (int) Math.ceil(cz - rz);
+            int zEnd = (int) Math.floor(cz + rz);
+            boolean topOrBottom = layer == 0 || layer == height - 1;
+            for (int x = xStart; x <= xEnd; x++) {
+                boolean xEdge = x == xStart || x == xEnd;
+                for (int z = zStart; z <= zEnd; z++) {
+                    boolean edge = xEdge || z == zStart || z == zEnd;
                     double normalized = rx == 0 || rz == 0 ? 0 : sq((x - cx) / rx) + sq((z - cz) / rz);
-                    if ((!round || normalized <= 1.0) && (!hollow || edge || layer == 0 || layer == height - 1))
+                    if ((!round || normalized <= 1.0) && (!hollow || edge || topOrBottom))
                         add(out, new BlockPos(x, b.min().y() + layer, z), limit);
                 }
+            }
         }
     }
 

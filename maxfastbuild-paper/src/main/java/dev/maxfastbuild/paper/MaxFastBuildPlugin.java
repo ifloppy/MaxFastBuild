@@ -74,7 +74,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             } else {
                 tasks = sqliteTasks;
             }
-            ledger = new EconomyLedger(database);
+            ledger = new EconomyLedger(database, true);
             ledger.initialize();
             audit = safeDiscoverAudit();
             economy = safeDiscoverEconomy();
@@ -219,6 +219,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
             }
             tasks = null;
+            if (ledger != null) {
+                try { ledger.close(); } catch (RuntimeException ex) {
+                    getLogger().warning("Ledger close failed: " + ex.getMessage());
+                }
+            }
             ledger = null;
             database = null;
             executor = null;
@@ -433,7 +438,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         current.hollow(),
                         current.material());
                 messages.send(player, "status-pos", p1, p2);
-                messages.send(player, "status-tasks", tasks.activeCount(player.getUniqueId()));
+                messages.send(player, "status-tasks", executor.activeCount(player.getUniqueId()));
                 messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
             case "cancel" -> cancelPlayerTasks(player);
@@ -587,7 +592,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         // Check task limit
-        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
+        if (executor.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
             sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
             return;
         }
@@ -828,7 +833,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void tryDrainQueue(Player player) {
         UUID playerId = player.getUniqueId();
         if (pendingBuilds.containsKey(playerId)) return;
-        if (tasks.activeCount(playerId) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) return;
+        if (executor.activeCount(playerId) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) return;
         Queue<QueuedCommand> queue = commandQueues.get(playerId);
         if (queue == null || queue.isEmpty()) return;
         if (!rateLimit(player)) return;
@@ -1201,7 +1206,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
             return;
         }
-        if (tasks.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
+        if (executor.activeCount(player.getUniqueId()) >= getConfig().getInt("execution.max-concurrent-tasks-per-player", 2)) {
             sendProtocol(player, "error", "maxfastbuild.error.task_limit", Map.of());
             return;
         }
@@ -1427,23 +1432,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void tickTasks() {
         if (!active || tasks == null || executor == null) return;
         int count = Math.max(1, getConfig().getInt("execution.blocks-per-step", 1));
-        for (BuildTask task : tasks.recoverable()) {
-            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING) continue;
-            if (Bukkit.getPlayer(task.playerId()) == null) continue;
-            if (!executor.isActive(task.id())) {
-                // DB says active but memory was detached (quit/shutdown) — reattach when player is online.
-                try {
-                    executor.enqueue(task.status() == TaskStatus.QUEUED ? task : task.transition(TaskStatus.QUEUED, Instant.now()));
-                } catch (RuntimeException ex) {
-                    getLogger().warning("Reattach task " + task.id() + " failed: " + ex.getMessage());
-                    continue;
-                }
-            }
+        for (UUID id : executor.activeIds()) {
             try {
-                TaskExecutor.TickResult result = executor.tick(task.id(), count);
+                TaskExecutor.TickResult result = executor.tick(id, count);
                 if (result.finished()) settlePartial(result);
             } catch (RuntimeException ex) {
-                getLogger().severe("Task " + task.id() + " failed: " + ex.getMessage());
+                getLogger().severe("Task " + id + " failed: " + ex.getMessage());
             }
         }
     }

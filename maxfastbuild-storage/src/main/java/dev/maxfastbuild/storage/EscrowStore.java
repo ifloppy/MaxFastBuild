@@ -46,13 +46,15 @@ public final class EscrowStore {
             try (PreparedStatement select = connection.prepareStatement("SELECT original_slot,reserved_count,consumed_count FROM inventory_escrow WHERE reservation_id=? AND item_key=? AND status='RESERVED' ORDER BY original_slot")) {
                 select.setString(1, reservationId); select.setString(2, itemKey);
                 try (ResultSet rows = select.executeQuery()) {
-                    while (rows.next() && remaining > 0) {
-                        long available = rows.getLong("reserved_count") - rows.getLong("consumed_count");
-                        long use = Math.min(available, remaining);
-                        try (PreparedStatement update = connection.prepareStatement("UPDATE inventory_escrow SET consumed_count=consumed_count+?,updated_at=? WHERE reservation_id=? AND item_key=? AND original_slot=?")) {
-                            update.setLong(1, use); update.setString(2, Instant.now().toString()); update.setString(3, reservationId); update.setString(4, itemKey); update.setInt(5, rows.getInt("original_slot")); update.executeUpdate();
+                    try (PreparedStatement update = connection.prepareStatement("UPDATE inventory_escrow SET consumed_count=consumed_count+?,updated_at=? WHERE reservation_id=? AND item_key=? AND original_slot=?")) {
+                        while (rows.next() && remaining > 0) {
+                            long available = rows.getLong("reserved_count") - rows.getLong("consumed_count");
+                            long use = Math.min(available, remaining);
+                            update.setLong(1, use); update.setString(2, Instant.now().toString()); update.setString(3, reservationId); update.setString(4, itemKey); update.setInt(5, rows.getInt("original_slot"));
+                            update.addBatch();
+                            remaining -= use;
                         }
-                        remaining -= use;
+                        update.executeBatch();
                     }
                 }
             }

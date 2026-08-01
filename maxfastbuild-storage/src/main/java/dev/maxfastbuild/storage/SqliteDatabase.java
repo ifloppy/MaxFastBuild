@@ -11,7 +11,7 @@ public final class SqliteDatabase implements AutoCloseable {
             connection = DriverManager.getConnection("jdbc:sqlite:" + file.toAbsolutePath());
             try (Statement statement = connection.createStatement()) {
                 statement.execute("PRAGMA journal_mode=WAL");
-                statement.execute("PRAGMA synchronous=FULL");
+                statement.execute("PRAGMA synchronous=NORMAL");
                 statement.execute("PRAGMA foreign_keys=ON");
                 statement.execute("PRAGMA busy_timeout=5000");
             }

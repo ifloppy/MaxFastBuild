@@ -6,7 +6,7 @@ import java.util.concurrent.*;
 
 public final class AsyncTaskRepository implements TaskRepository {
     private final TaskRepository delegate;
-    private final LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
+    private final LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<>(10_000);
     private final Thread worker;
     private final int batchSize;
     private final long maxDelayMs;

@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Reassembles multi-part paste payloads per (player, pasteSessionId).
@@ -26,6 +27,7 @@ public final class PasteAccumulator {
     private final Clock clock;
     private final Duration timeout;
     private final Map<Key, Session> sessions = new ConcurrentHashMap<>();
+    private final AtomicInteger totalBlocks = new AtomicInteger(0);
 
     public PasteAccumulator(Clock clock, Duration timeout) {
         this.clock = clock;
@@ -47,10 +49,11 @@ public final class PasteAccumulator {
                 || payload.palette().isEmpty()) {
             throw new IllegalArgumentException("invalid_paste_part");
         }
-        int inMemory = sessions.values().stream().mapToInt(session -> session.blockCount).sum();
+        int inMemory = totalBlocks.get();
         if (inMemory >= MAX_TOTAL_BLOCKS) throw new IllegalArgumentException("too_many_paste_blocks");
 
         Key key = new Key(playerId, payload.pasteSessionId());
+        int[] addedBlockCount = {0};
         Session session = sessions.compute(key, (ignored, current) -> {
             if (current == null) {
                 current = new Session(payload.parts(), payload.palette(), payload.origin(), clock.millis());
@@ -58,8 +61,10 @@ public final class PasteAccumulator {
                 throw new IllegalArgumentException("paste_part_mismatch");
             }
             if (current.put(payload.part(), payload.blocks())) throw new IllegalArgumentException("duplicate_paste_part");
+            addedBlockCount[0] = payload.blocks().size();
             return current;
         });
+        totalBlocks.addAndGet(addedBlockCount[0]);
         if (session.blocks.size() < session.parts) return Optional.empty();
 
         sessions.remove(key);
@@ -81,11 +86,18 @@ public final class PasteAccumulator {
     /** Drop all in-flight paste sessions (plugin disable / hot-reload). */
     public void clear() {
         sessions.clear();
+        totalBlocks.set(0);
     }
 
     private void purgeExpired() {
         long cutoff = clock.millis() - timeout.toMillis();
-        sessions.entrySet().removeIf(entry -> entry.getValue().createdAt < cutoff);
+        sessions.entrySet().removeIf(entry -> {
+            if (entry.getValue().createdAt < cutoff) {
+                totalBlocks.addAndGet(-entry.getValue().blockCount);
+                return true;
+            }
+            return false;
+        });
     }
 
     public record Assembled(String pasteSessionId, int[] origin, List<String> palette, List<PasteTransfer.Entry> entries) {

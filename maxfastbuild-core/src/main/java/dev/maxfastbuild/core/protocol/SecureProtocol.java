@@ -62,7 +62,6 @@ public final class SecureProtocol {
     }
 
     public record Session(String id, UUID playerId, byte[] secret, Instant expiresAt, long lastSequence) {
-        public Session { secret = secret.clone(); }
         @Override public byte[] secret() { return secret.clone(); }
         Session withLastSequence(long value) { return new Session(id, playerId, secret, expiresAt, value); }
     }

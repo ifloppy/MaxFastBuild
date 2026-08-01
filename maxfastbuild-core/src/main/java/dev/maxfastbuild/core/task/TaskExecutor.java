@@ -12,6 +12,7 @@ public final class TaskExecutor {
     private final Clock clock;
     private final int saveInterval;
     private final Map<UUID, BuildTask> running = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> playerActiveCounts = new ConcurrentHashMap<>();
     private int tickCounter;
 
     public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock, int saveInterval) {
@@ -27,11 +28,13 @@ public final class TaskExecutor {
         if (task.status() != TaskStatus.QUEUED) throw new IllegalArgumentException("Only queued tasks can be enqueued");
         repository.save(task);
         running.put(task.id(), task);
+        playerActiveCounts.merge(task.playerId(), 1, Integer::sum);
     }
 
     /** Drop memory entry without changing DB status (e.g. after persisting PAUSED_*). */
     public void detach(UUID id) {
-        running.remove(id);
+        BuildTask removed = running.remove(id);
+        if (removed != null) decrementPlayerCount(removed.playerId());
     }
 
     /** Snapshot of in-memory task ids (for safe shutdown / PlugMan unload). */
@@ -41,16 +44,22 @@ public final class TaskExecutor {
 
     public void clear() {
         running.clear();
+        playerActiveCounts.clear();
     }
 
     public boolean isActive(UUID id) {
         return running.containsKey(id);
     }
 
+    public int activeCount(UUID playerId) {
+        return playerActiveCounts.getOrDefault(playerId, 0);
+    }
+
     /** Remove a running/queued task and return final applied count for settlement. */
     public TickResult abort(UUID id) {
         BuildTask task = running.remove(id);
         if (task == null) throw new IllegalArgumentException("Unknown running task");
+        decrementPlayerCount(task.playerId());
         if (task.status() == TaskStatus.QUEUED || task.status() == TaskStatus.RUNNING) {
             task = task.transition(TaskStatus.CANCELLING, clock.instant());
         }
@@ -68,38 +77,45 @@ public final class TaskExecutor {
     public TickResult tick(UUID id, int blocksPerStep, boolean forceSave) {
         BuildTask task = Objects.requireNonNull(running.get(id), "Unknown running task");
         if (task.status() == TaskStatus.QUEUED) task = task.transition(TaskStatus.RUNNING, clock.instant());
+        BuildPlan plan = task.plan();
+        List<BlockMutation> mutations = plan.mutations();
+        int size = mutations.size();
+        String worldName = plan.world();
+        OperationKind operation = plan.operation();
+        UUID playerId = task.playerId();
+        String playerName = task.playerName();
         int changed = 0, skipped = 0;
         int applied = task.appliedCount();
-        while (changed + skipped < blocksPerStep && task.cursor() < task.plan().mutations().size()) {
-            BlockMutation mutation = task.plan().mutations().get(task.cursor());
-            String current = world.stateAt(task.plan().world(), mutation.position());
+        int cursor = task.cursor();
+        while (changed + skipped < blocksPerStep && cursor < size) {
+            BlockMutation mutation = mutations.get(cursor);
+            String current = world.stateAt(worldName, mutation.position());
             if (!current.equals(mutation.expectedState())) {
                 skipped++;
             } else {
-                WorldAccess.ValidationResult validation = world.mayMutate(task.playerId(), task.plan().world(), mutation, task.plan().operation());
+                WorldAccess.ValidationResult validation = world.mayMutate(playerId, worldName, mutation, operation);
                 if (!validation.allowed()) skipped++;
                 else {
-                    WorldAccess.MutationResult result = world.mutate(task.playerId(), task.plan().world(), mutation, task.plan().operation());
+                    WorldAccess.MutationResult result = world.mutate(playerId, worldName, mutation, operation);
                     if (result.changed()) {
                         changed++;
                         applied++;
-                        audit.record(
-                                task.playerId(),
-                                task.playerName(),
-                                task.plan().world(),
-                                mutation,
-                                task.plan().operation(),
-                                result.breakAlreadyLogged());
+                        audit.record(playerId, playerName, worldName, mutation, operation, result.breakAlreadyLogged());
                     } else skipped++;
                 }
             }
-            task = task.advance(task.cursor() + 1, applied, clock.instant());
+            cursor++;
         }
-        boolean finished = task.cursor() == task.plan().mutations().size();
+        if (cursor != task.cursor()) {
+            task = task.advance(cursor, applied, clock.instant());
+        }
+        boolean finished = cursor == size;
         if (finished) {
             task = task.transition(TaskStatus.COMPLETED, clock.instant());
             running.remove(id);
+            decrementPlayerCount(playerId);
             repository.save(task);
+            repository.flush();
         } else {
             running.put(id, task);
             tickCounter++;
@@ -108,6 +124,10 @@ public final class TaskExecutor {
             }
         }
         return new TickResult(task, changed, skipped, task.appliedCount(), finished);
+    }
+
+    private void decrementPlayerCount(UUID playerId) {
+        playerActiveCounts.computeIfPresent(playerId, (k, v) -> v <= 1 ? null : v - 1);
     }
 
     public record TickResult(BuildTask task, int changed, int skipped, int totalApplied, boolean finished) {}

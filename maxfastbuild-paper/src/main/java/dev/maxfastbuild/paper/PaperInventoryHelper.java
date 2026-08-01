@@ -11,27 +11,32 @@ import org.bukkit.inventory.meta.BlockStateMeta;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Counts and removes placeable block items from a player's inventory by material key
  * (e.g. {@code minecraft:oak_planks}), optionally including contents of carried shulker boxes.
  */
 final class PaperInventoryHelper {
+    private static final Map<String, Material> MATERIAL_CACHE = new ConcurrentHashMap<>();
+
     private PaperInventoryHelper() {}
 
     static Material resolveMaterial(String materialKey) {
         if (materialKey == null || materialKey.isBlank()) return null;
-        String key = materialKey.contains(":") ? materialKey.substring(materialKey.indexOf(':') + 1) : materialKey;
-        Material matched = Material.matchMaterial(materialKey, false);
-        if (matched == null) matched = Material.matchMaterial(key, false);
-        if (matched == null) {
-            try {
-                matched = Material.valueOf(key.toUpperCase(java.util.Locale.ROOT));
-            } catch (IllegalArgumentException ignored) {
-                return null;
+        return MATERIAL_CACHE.computeIfAbsent(materialKey, key -> {
+            String stripped = key.contains(":") ? key.substring(key.indexOf(':') + 1) : key;
+            Material matched = Material.matchMaterial(key, false);
+            if (matched == null) matched = Material.matchMaterial(stripped, false);
+            if (matched == null) {
+                try {
+                    matched = Material.valueOf(stripped.toUpperCase(java.util.Locale.ROOT));
+                } catch (IllegalArgumentException ignored) {
+                    return null;
+                }
             }
-        }
-        return matched.isAir() ? null : matched;
+            return matched.isAir() ? null : matched;
+        });
     }
 
     static long count(Player player, String materialKey, boolean searchShulkers) {

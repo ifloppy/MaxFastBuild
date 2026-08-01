@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** Reassembles command-safe chunks before the authenticated envelope is parsed. */
 public final class CommandChunkAssembler {
@@ -17,6 +18,8 @@ public final class CommandChunkAssembler {
     private final Clock clock;
     private final Duration timeout;
     private final Map<Key, Transfer> transfers = new ConcurrentHashMap<>();
+    private final Map<UUID, Integer> playerTransferCounts = new ConcurrentHashMap<>();
+    private final AtomicInteger totalChunksInMemory = new AtomicInteger(0);
 
     public CommandChunkAssembler(Clock clock, Duration timeout) {
         this.clock = clock;
@@ -41,21 +44,28 @@ public final class CommandChunkAssembler {
         purgeExpired();
         if (!transferId.matches("[0-9a-f]{8}") || total < 1 || total > MAX_CHUNKS || index < 0 || index >= total || chunk.length() > CHUNK_SIZE)
             throw new IllegalArgumentException("invalid_chunk");
-        long playerTransfers = transfers.keySet().stream().filter(k -> k.playerId().equals(playerId)).count();
-        if (playerTransfers >= MAX_TRANSFERS_PER_PLAYER) {
+        int currentPlayerTransfers = playerTransferCounts.getOrDefault(playerId, 0);
+        if (currentPlayerTransfers >= MAX_TRANSFERS_PER_PLAYER) {
             throw new IllegalArgumentException("too_many_transfers");
         }
-        int totalChunksInMemory = transfers.values().stream().mapToInt(t -> t.parts.size()).sum();
-        if (totalChunksInMemory >= MAX_TOTAL_CHUNKS) {
+        if (totalChunksInMemory.get() >= MAX_TOTAL_CHUNKS) {
             throw new IllegalArgumentException("too_many_chunks");
         }
         Key key = new Key(playerId, transferId);
+        boolean[] isNew = {false};
         Transfer transfer = transfers.compute(key, (ignored, current) -> {
-            if (current == null) current = new Transfer(total, clock.millis());
+            if (current == null) {
+                current = new Transfer(total, clock.millis());
+                isNew[0] = true;
+            }
             if (current.total != total) throw new IllegalArgumentException("chunk_total_changed");
             current.parts.putIfAbsent(index, chunk);
             return current;
         });
+        if (isNew[0]) {
+            playerTransferCounts.merge(playerId, 1, Integer::sum);
+            totalChunksInMemory.addAndGet(total);
+        }
         if (transfer.parts.size() != total) return Optional.empty();
         StringBuilder result = new StringBuilder(total * CHUNK_SIZE);
         for (int i = 0; i < total; i++) {
@@ -64,17 +74,28 @@ public final class CommandChunkAssembler {
             result.append(part);
         }
         transfers.remove(key);
+        playerTransferCounts.merge(playerId, -1, (old, ignore) -> old <= 1 ? null : old - 1);
+        totalChunksInMemory.addAndGet(-total);
         return Optional.of(result.toString());
     }
 
     private void purgeExpired() {
         long cutoff = clock.millis() - timeout.toMillis();
-        transfers.entrySet().removeIf(entry -> entry.getValue().createdAt < cutoff);
+        transfers.entrySet().removeIf(entry -> {
+            if (entry.getValue().createdAt < cutoff) {
+                playerTransferCounts.merge(entry.getKey().playerId(), -1, (old, ignore) -> old <= 1 ? null : old - 1);
+                totalChunksInMemory.addAndGet(-entry.getValue().total);
+                return true;
+            }
+            return false;
+        });
     }
 
     /** Drop all in-flight transfers (plugin disable / hot-reload). */
     public void clear() {
         transfers.clear();
+        playerTransferCounts.clear();
+        totalChunksInMemory.set(0);
     }
 
     private record Key(UUID playerId, String transferId) {}
