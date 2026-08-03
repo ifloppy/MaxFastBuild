@@ -3,6 +3,10 @@ default-language: zh_cn
 execution:
   ticks-per-block: 1
   blocks-per-step: 1
+  # Maximum total block mutations performed per server tick across ALL running tasks.
+  # Bounds worst-case main-thread work when many players build simultaneously; protects TPS.
+  # 0 = unlimited (old behavior).
+  global-blocks-per-tick: 4
   max-region-blocks: 100000
   max-concurrent-tasks-per-player: 2
   # How many server ticks between progress writes to SQLite (higher = less disk I/O, more progress lost on crash).
@@ -15,6 +19,9 @@ execution:
     # How many blocks are scanned per server tick while planning a large region.
     # Higher values finish faster but use more time per tick; lower values spread the load.
     blocks-per-tick: 2000
+    # Maximum total blocks scanned per tick across ALL players planning simultaneously.
+    # 0 = unlimited (old behavior).
+    global-blocks-per-tick: 2000
   async-queue:
     # Offload SQLite writes to a background thread so the main server thread never blocks on I/O.
     enabled: true

@@ -49,6 +49,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private EconomyService economy;
     private AuditService audit;
     private PluginMessages messages;
+    private int globalBudgetPerTick;
+    private int planningGlobalBudgetPerTick;
     /** Guards handlers and ticks during PlugMan unload / failed enable. */
     private volatile boolean active;
 
@@ -80,6 +82,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             economy = safeDiscoverEconomy();
             int saveInterval = Math.max(1, getConfig().getInt("execution.save-interval-ticks", 20));
             executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC(), saveInterval);
+            globalBudgetPerTick = Math.max(0, getConfig().getInt("execution.global-blocks-per-tick", 4));
+            planningGlobalBudgetPerTick = Math.max(0, getConfig().getInt("execution.planning.global-blocks-per-tick", 2000));
             validateIntegrations();
 
             PublicCommand publicCommand = new PublicCommand(this);
@@ -928,8 +932,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void tickPlanners() {
         if (!active || pendingBuilds.isEmpty()) return;
         int batch = Math.max(1, getConfig().getInt("execution.planning.blocks-per-tick", 2000));
+        int globalRemaining = globalBudgetCap(planningGlobalBudgetPerTick);
         Iterator<Map.Entry<UUID, PendingBuild>> it = pendingBuilds.entrySet().iterator();
-        while (it.hasNext()) {
+        while (it.hasNext() && globalRemaining > 0) {
             Map.Entry<UUID, PendingBuild> entry = it.next();
             PendingBuild pending = entry.getValue();
             Player player = Bukkit.getPlayer(entry.getKey());
@@ -953,7 +958,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     continue;
                 }
             }
-            PlanningError error = advancePlanning(pending, batch);
+            int perPlayer = Math.min(batch, globalRemaining);
+            int before = (int) pending.processed;
+            PlanningError error = advancePlanning(pending, perPlayer);
+            globalRemaining -= (int) (pending.processed - before);
             if (error != null) {
                 sendProtocol(player, "error", error.key(), error.data());
                 it.remove();
@@ -1220,8 +1228,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void tickPastePlanners() {
         if (!active || pendingPastes.isEmpty()) return;
         int batch = Math.max(1, getConfig().getInt("execution.planning.blocks-per-tick", 2000));
+        int globalRemaining = globalBudgetCap(planningGlobalBudgetPerTick);
         Iterator<Map.Entry<UUID, PendingPaste>> it = pendingPastes.entrySet().iterator();
-        while (it.hasNext()) {
+        while (it.hasNext() && globalRemaining > 0) {
             Map.Entry<UUID, PendingPaste> entry = it.next();
             PendingPaste pending = entry.getValue();
             Player player = Bukkit.getPlayer(entry.getKey());
@@ -1229,7 +1238,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 it.remove();
                 continue;
             }
-            PlanningError error = advancePastePlanning(pending, batch);
+            int perPlayer = Math.min(batch, globalRemaining);
+            int before = (int) pending.processed;
+            PlanningError error = advancePastePlanning(pending, perPlayer);
+            globalRemaining -= (int) (pending.processed - before);
             if (error != null) {
                 sendProtocol(player, "error", error.key(), error.data());
                 it.remove();
@@ -1432,9 +1444,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void tickTasks() {
         if (!active || tasks == null || executor == null) return;
         int count = Math.max(1, getConfig().getInt("execution.blocks-per-step", 1));
+        int globalRemaining = globalBudgetCap(globalBudgetPerTick);
         for (UUID id : executor.activeIds()) {
+            if (globalRemaining <= 0) break;
             try {
-                TaskExecutor.TickResult result = executor.tick(id, count);
+                int perTask = Math.min(count, globalRemaining);
+                TaskExecutor.TickResult result = executor.tick(id, perTask);
+                globalRemaining -= result.changed() + result.skipped();
                 if (result.finished()) settlePartial(result);
             } catch (RuntimeException ex) {
                 getLogger().severe("Task " + id + " failed: " + ex.getMessage());
@@ -1705,6 +1721,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         player.sendMessage(Component.text(ProtocolEnvelope.MESSAGE_MARKER + json));
     }
     private static BlockPos at(Player player) { Location p = player.getLocation(); return new BlockPos(p.getBlockX(), p.getBlockY(), p.getBlockZ()); }
+
+    /** 0 in config = unlimited (Integer.MAX_VALUE); otherwise the configured value. */
+    private static int globalBudgetCap(int budget) {
+        return budget <= 0 ? Integer.MAX_VALUE : budget;
+    }
 
     private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, boolean hollow, String material) {}
     private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
