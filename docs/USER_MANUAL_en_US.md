@@ -40,6 +40,7 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 ### Costs and materials (server-defined)
 
 - **Place** (survival): consumes matching blocks from the inventory; may charge economy if enabled. Insufficient items or balance rejects the request.
+- **Water/lava** (survival): never consumed. With the configured number of buckets (default **2** water buckets / **2** lava buckets) in the inventory, unlimited water/lava can be placed; the buckets themselves are not spent.
 - **Break**: normal drops and tool wear; a tool is never worn below **4** remaining durability—other inventory tools are used next.
 - **Partial completion**: unfinished mutations refund variable per-block/per-area fees and unused place materials. A fixed per-operation fee (if enabled) is generally kept once execution has started.
 

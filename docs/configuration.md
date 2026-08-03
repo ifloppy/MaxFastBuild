@@ -15,6 +15,7 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `rate-limit.requests` / `interval-seconds` / `burst` | Token-bucket request limits | yes |
 | `inventory.search-shulker-boxes` | Count/take place materials from carried shulker boxes | yes |
 | `inventory.require-shulker-permission` | If true, also require `maxfastbuild.material.shulker` | yes |
+| `inventory.fluid-bucket-requirement` | Buckets needed to place unlimited water/lava (default 2, never consumed) | yes |
 | `economy.enabled` | Master switch for Vault charges | yes |
 | `economy.per-operation.enabled` / `.price` | Fixed fee per accepted task | yes |
 | `economy.per-area.enabled` / `.price` | Fee from max bounding plane area | yes |

@@ -37,6 +37,9 @@ inventory:
   search-shulker-boxes: false
   # If true, search-shulker-boxes also requires permission maxfastbuild.material.shulker
   require-shulker-permission: false
+  # Water/lava buckets in inventory (main + shulkers when enabled) required to place an
+  # unlimited amount of that fluid. Buckets are never consumed; fewer than this count rejects.
+  fluid-bucket-requirement: 2
 economy:
   enabled: false
   per-operation:

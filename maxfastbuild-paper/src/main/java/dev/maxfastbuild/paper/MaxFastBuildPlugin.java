@@ -684,7 +684,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", blockState));
                 return;
             }
-            long have = PaperInventoryHelper.count(player, itemKey, searchShulkers);
+            long have = PaperInventoryHelper.count(player, itemKey, searchShulkers, fluidBucketRequirement());
             if (have < need) {
                 sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                         Map.of("need", need, "have", have, "material", itemKey));
@@ -719,7 +719,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         if (requireMaterials && !destroy) {
-            long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers);
+            long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers, fluidBucketRequirement());
             if (removed < need) {
                 if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
@@ -1115,7 +1115,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             tookMoney = true;
         }
         if (requireMaterials) {
-            long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers);
+            long removed = PaperInventoryHelper.take(player, itemKey, need, searchShulkers, fluidBucketRequirement());
             if (removed < need) {
                 if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
@@ -1363,7 +1363,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", entry.getKey()));
                     return;
                 }
-                long have = PaperInventoryHelper.count(player, entry.getKey(), searchShulkers);
+                long have = PaperInventoryHelper.count(player, entry.getKey(), searchShulkers, fluidBucketRequirement());
                 if (have < entry.getValue()) {
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                             Map.of("need", entry.getValue(), "have", have, "material", entry.getKey()));
@@ -1393,7 +1393,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         Map<String, Long> takenByMaterial = new LinkedHashMap<>();
         if (requireMaterials) {
             for (Map.Entry<String, Long> entry : needByMaterial.entrySet()) {
-                long removed = PaperInventoryHelper.take(player, entry.getKey(), entry.getValue(), searchShulkers);
+                long removed = PaperInventoryHelper.take(player, entry.getKey(), entry.getValue(), searchShulkers, fluidBucketRequirement());
                 if (removed < entry.getValue()) {
                     for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
                         PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
@@ -1640,6 +1640,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private BigDecimal decimal(String path) { return new BigDecimal(String.valueOf(getConfig().get(path, "0"))); }
+
+    /** Water/lava buckets required in inventory to place an unlimited amount of that fluid. */
+    private int fluidBucketRequirement() {
+        return Math.max(1, getConfig().getInt("inventory.fluid-bucket-requirement", 2));
+    }
     private EconomyService discoverEconomy() {
         RegisteredServiceProvider<Economy> registration = getServer().getServicesManager().getRegistration(Economy.class);
         if (registration != null) return new VaultEconomyService(registration.getProvider());

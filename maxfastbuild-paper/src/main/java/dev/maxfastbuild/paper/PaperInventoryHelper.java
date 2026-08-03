@@ -16,6 +16,10 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Counts and removes placeable block items from a player's inventory by material key
  * (e.g. {@code minecraft:oak_planks}), optionally including contents of carried shulker boxes.
+ * <p>
+ * Fluids ({@code minecraft:water}, {@code minecraft:lava}) are placed without consuming an item:
+ * when the player holds at least {@code requiredBuckets} matching buckets the available count is
+ * treated as unlimited and {@code take} removes nothing.
  */
 final class PaperInventoryHelper {
     private static final Map<String, Material> MATERIAL_CACHE = new ConcurrentHashMap<>();
@@ -39,9 +43,13 @@ final class PaperInventoryHelper {
         });
     }
 
-    static long count(Player player, String materialKey, boolean searchShulkers) {
+    static long count(Player player, String materialKey, boolean searchShulkers, int requiredBuckets) {
         Material material = resolveMaterial(materialKey);
-        if (material == null || !material.isItem()) return 0;
+        if (material == null) return 0;
+        if (isFluid(material)) {
+            return countBuckets(player, material, searchShulkers) >= requiredBuckets ? Long.MAX_VALUE : 0;
+        }
+        if (!material.isItem()) return 0;
         long total = 0;
         PlayerInventory inv = player.getInventory();
         ItemStack[] contents = inv.getContents();
@@ -57,10 +65,15 @@ final class PaperInventoryHelper {
      * Removes up to {@code amount} items. Main inventory first, then shulker contents when enabled.
      * @return number actually removed
      */
-    static long take(Player player, String materialKey, long amount, boolean searchShulkers) {
+    static long take(Player player, String materialKey, long amount, boolean searchShulkers, int requiredBuckets) {
         if (amount <= 0) return 0;
         Material material = resolveMaterial(materialKey);
-        if (material == null || !material.isItem()) return 0;
+        if (material == null) return 0;
+        if (isFluid(material)) {
+            // Fluids are placed from buckets without consuming them.
+            return countBuckets(player, material, searchShulkers) >= requiredBuckets ? amount : 0;
+        }
+        if (!material.isItem()) return 0;
         long remaining = amount;
         PlayerInventory inv = player.getInventory();
         ItemStack[] contents = inv.getContents();
@@ -123,6 +136,30 @@ final class PaperInventoryHelper {
         if (blockState == null) return null;
         int bracket = blockState.indexOf('[');
         return bracket > 0 ? blockState.substring(0, bracket) : blockState;
+    }
+
+    static boolean isFluid(Material material) {
+        return material == Material.WATER || material == Material.LAVA;
+    }
+
+    /** Bucket item that carries the given fluid block material, or null when not a fluid. */
+    private static Material fluidBucket(Material fluid) {
+        if (fluid == Material.WATER) return Material.WATER_BUCKET;
+        if (fluid == Material.LAVA) return Material.LAVA_BUCKET;
+        return null;
+    }
+
+    /** Buckets available to place a fluid: main inventory (incl. offhand) plus shulker contents when enabled. */
+    private static long countBuckets(Player player, Material fluid, boolean searchShulkers) {
+        Material bucket = fluidBucket(fluid);
+        if (bucket == null) return 0;
+        long total = 0;
+        for (ItemStack stack : player.getInventory().getContents()) {
+            if (stack == null) continue;
+            if (stack.getType() == bucket) total += stack.getAmount();
+            else if (searchShulkers) total += countInShulker(stack, bucket);
+        }
+        return total;
     }
 
     static boolean isShulkerBox(Material type) {
