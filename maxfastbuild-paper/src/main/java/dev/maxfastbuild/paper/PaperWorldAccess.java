@@ -7,6 +7,7 @@ import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -22,6 +23,29 @@ import java.util.UUID;
  * No synthetic BlockBreak/Place events are fired during planning.
  */
 final class PaperWorldAccess implements WorldAccess {
+    /**
+     * Litematica-exact bulk placement: when true, {@link #mutate} places blocks with physics off
+     * ({@code setBlockData(data, false)}); the caller then runs one {@link #settlePlacements} pass
+     * so redstone computes against the final layout (see {@link #beginDeferredPhysics()}).
+     */
+    private boolean deferPhysics;
+
+    @Override public void beginDeferredPhysics() {
+        this.deferPhysics = true;
+    }
+
+    @Override public void endDeferredPhysics() {
+        this.deferPhysics = false;
+    }
+
+    @Override public void settlePlacements(String world, List<BlockPos> positions) {
+        World resolved = Bukkit.getWorld(world);
+        if (resolved == null) return;
+        for (BlockPos position : positions) {
+            settlePlaced(resolved, position);
+        }
+    }
+
     @Override public String stateAt(String world, BlockPos position) {
         return block(world, position).getBlockData().getAsString();
     }
@@ -39,6 +63,24 @@ final class PaperWorldAccess implements WorldAccess {
         if (kind == OperationKind.BREAK) {
             return mayBreakLocal(player, target, material);
         }
+        BlockData targetData;
+        try {
+            targetData = Bukkit.createBlockData(mutation.targetState());
+        } catch (IllegalArgumentException ex) {
+            return new ValidationResult(false, "invalid_block_state");
+        }
+        Material targetMaterial = targetData.getMaterial();
+        if (RestrictedMaterials.isForbiddenPlace(targetMaterial) || !targetMaterial.isBlock()) {
+            return new ValidationResult(false, "forbidden_material");
+        }
+        // Reject invalid or unsafe block-entity NBT before anything in the world is touched.
+        if (mutation.targetNbt() != null) {
+            PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(
+                    mutation.targetNbt(), targetMaterial, PaperNbtHelper.registryAccess(resolved));
+            if (check instanceof PaperNbtHelper.NbtCheck.Rejected rejected) {
+                return new ValidationResult(false, "invalid_nbt:" + rejected.reason());
+            }
+        }
         if (!isReplaceableOccupant(material)) {
             ValidationResult breakCheck = mayBreakLocal(player, target, material);
             if (!breakCheck.allowed()) {
@@ -47,14 +89,6 @@ final class PaperWorldAccess implements WorldAccess {
                 }
                 return breakCheck;
             }
-        }
-        try {
-            BlockData targetData = Bukkit.createBlockData(mutation.targetState());
-            if (RestrictedMaterials.isForbiddenPlace(targetData.getMaterial()) || !targetData.getMaterial().isBlock()) {
-                return new ValidationResult(false, "forbidden_material");
-            }
-        } catch (IllegalArgumentException ex) {
-            return new ValidationResult(false, "invalid_block_state");
         }
         // No synthetic BlockBreak/Place events here — they multi-logged in CoreProtect.
         return new ValidationResult(true, "");
@@ -73,18 +107,36 @@ final class PaperWorldAccess implements WorldAccess {
             return breakVanilla(player, block);
         }
 
-        Material occupant = block.getType();
-        boolean replacedSolid = !isReplaceableOccupant(occupant);
-        BlockData placedData;
+        BlockData targetData;
         try {
-            placedData = Bukkit.createBlockData(mutation.targetState());
+            targetData = Bukkit.createBlockData(mutation.targetState());
         } catch (IllegalArgumentException ex) {
             return new MutationResult(false, "invalid_block_state");
         }
-        if (RestrictedMaterials.isForbiddenPlace(placedData.getMaterial())) {
+        Material targetMaterial = targetData.getMaterial();
+        if (RestrictedMaterials.isForbiddenPlace(targetMaterial)) {
             return new MutationResult(false, "forbidden_material");
         }
 
+        // Validate NBT before any world change. If it fails we must not have broken or replaced anything.
+        Object validatedNbt = null;
+        if (mutation.targetNbt() != null) {
+            PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(
+                    mutation.targetNbt(), targetMaterial, PaperNbtHelper.registryAccess(resolved));
+            if (check instanceof PaperNbtHelper.NbtCheck.Rejected rejected) {
+                return new MutationResult(false, "invalid_nbt:" + rejected.reason());
+            }
+            validatedNbt = ((PaperNbtHelper.NbtCheck.Ok) check).compound();
+        }
+
+        BlockData currentData = block.getBlockData();
+        boolean stateAlreadyMatches = currentData.matches(targetData);
+        if (stateAlreadyMatches && validatedNbt == null) {
+            return new MutationResult(false, "already_target_state");
+        }
+
+        Material occupant = block.getType();
+        boolean replacedSolid = !stateAlreadyMatches && !isReplaceableOccupant(occupant);
         boolean naturalBreakLogged = false;
         if (replacedSolid) {
             MutationResult broken = breakVanilla(player, block);
@@ -94,8 +146,16 @@ final class PaperWorldAccess implements WorldAccess {
             naturalBreakLogged = broken.breakAlreadyLogged();
         }
 
-        // Vanilla-style place: set block data in world (physics on for normal updates).
-        block.setBlockData(placedData, true);
+        // If the state already matches we only need to update the block-entity data.
+        if (!stateAlreadyMatches) {
+            block.setBlockData(targetData, !deferPhysics);
+        }
+        if (validatedNbt != null && !PaperNbtHelper.applyNbt(block, validatedNbt)) {
+            // NBT failed to apply. Revert the block data to what it was before we touched it.
+            // This may leave CoreProtect break logs for the replaced block, but it prevents dupes.
+            block.setBlockData(currentData, false);
+            return new MutationResult(false, "nbt_apply_failed");
+        }
         String flags = replacedSolid ? "replaced" : "";
         if (naturalBreakLogged) {
             flags = flags.isEmpty() ? "break_logged" : flags + ",break_logged";
@@ -170,6 +230,17 @@ final class PaperWorldAccess implements WorldAccess {
 
     static boolean isForbiddenPlaceMaterial(Material material) {
         return RestrictedMaterials.isForbiddenPlace(material);
+    }
+
+    /**
+     * Re-fire the physics update on a placed block so redstone components recompute their signals
+     * with every neighbour already in place. Bulk pasting sets all blocks in one tick, which makes
+     * redstone compute against a partially-built circuit; this settle pass is the same nudge
+     * WorldEdit's {@code fixAfterFastMode} applies.
+     */
+    static void settlePlaced(World world, BlockPos position) {
+        Block block = world.getBlockAt(position.x(), position.y(), position.z());
+        block.getState().update(true, true);
     }
 
     private static boolean inWorldHeight(World world, int y) {

@@ -10,11 +10,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class CommandChunkAssembler {
     public static final int MAX_COMMAND_LENGTH = 240;
     public static final int CHUNK_SIZE = 128;
-    public static final int MAX_CHUNKS = 128;
+    /** Max chunks per transfer; each chunk is CHUNK_SIZE chars, so one envelope may carry up to 128 KiB. */
+    public static final int MAX_CHUNKS = 1024;
     /** Maximum number of in-flight transfers a single player may have at once. */
     public static final int MAX_TRANSFERS_PER_PLAYER = 3;
     /** Maximum number of chunk parts kept in memory across all players. */
-    public static final int MAX_TOTAL_CHUNKS = 512;
+    public static final int MAX_TOTAL_CHUNKS = 4096;
     private final Clock clock;
     private final Duration timeout;
     private final Map<Key, Transfer> transfers = new ConcurrentHashMap<>();

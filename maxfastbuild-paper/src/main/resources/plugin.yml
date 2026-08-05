@@ -5,7 +5,7 @@ main: dev.maxfastbuild.paper.MaxFastBuildPlugin
 api-version: '1.21'
 description: Secure server-authoritative mass building
 authors: [MaxFastBuild]
-softdepend: [Vault, CoreProtect]
+softdepend: [Vault, CoreProtect, Prism]
 commands:
   mfb:
     description: MaxFastBuild 建造指令（/mfb help）

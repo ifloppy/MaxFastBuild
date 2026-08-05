@@ -5,7 +5,9 @@ import dev.maxfastbuild.fabric.client.PasteBlock;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.level.block.Block;
 
 import java.util.List;
 
@@ -39,10 +41,16 @@ public abstract class ClientPlatform {
     /** Create the Litematica bulk-paste key binding (default unbound, rebindable in Controls). */
     public abstract KeyMapping createPasteKey();
 
+    /** Create the instant-paste toggle key binding (default unbound). */
+    public abstract KeyMapping createInstantKey();
+
     /** True when a screen is currently open (radial must not re-open). */
     public abstract boolean isScreenOpen(Minecraft client);
 
     public abstract void setScreen(Screen screen);
+
+    /** Open the paste-settings screen (filters + instant toggle). */
+    public abstract void openPasteSettings();
 
     /** Register the selection HUD element (graphics receiver type differs per version). */
     public abstract void registerHud();
@@ -64,4 +72,17 @@ public abstract class ClientPlatform {
 
     /** Absolute block list of the player's active Litematica placement, empty when unavailable. */
     public abstract List<PasteBlock> collectLitematicaPlacement();
+
+    /** Serialize a Minecraft NBT tag (e.g. a block-entity compound) to SNBT, or null when unsupported. */
+    public abstract String nbtToSnbt(Object nbtTag);
+
+    /** True when a compound NBT tag holds the given key (Litematica schematic tile data). */
+    public abstract boolean nbtHasKey(Object nbt, String key);
+
+    /**
+     * Serialize the client world's block entity at {@code pos} to SNBT, but only when the block
+     * there is exactly {@code expectedBlock} (a lectern-with-book fallback source). Returns null
+     * when the block or tile is absent or the save fails.
+     */
+    public abstract String blockEntityNbtAt(BlockPos pos, Block expectedBlock);
 }

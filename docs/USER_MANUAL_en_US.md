@@ -75,7 +75,8 @@ With the client mod and **Litematica** both installed, the current active placem
 
 Notes:
 
-- Block entities (chests, signs, lecterns, …) paste **empty** — contents/text are not preserved.
+- Block entities (chests, signs, lecterns, …) keep their **contents/text**: a container paste deducts **one plain container block item** plus **every item inside its stored contents** (exact match) from the inventory.
+- Optional **instant paste**: bind the "**Toggle instant paste**" key (default unbound), press it to arm the mode (HUD indicator), then paste. Instant pastes are charged at the server's `instant-paste.multiplier` (default 2×) and execute immediately instead of waiting in the queue; they are capped by `instant-paste.max-blocks` (default 5000). Materials and tool durability are still required.
 - A single paste is bounded by the server's `execution.max-region-blocks` limit (default 100000); split larger schematics.
 - As with normal placement, survival deducts **per block type** from the inventory and applies world-protection, tool-durability and economy checks.
 - Without Litematica the key does nothing; creative mode still goes through the same validation.

@@ -107,6 +107,72 @@ final class PaperInventoryHelper {
         return amount - remaining;
     }
 
+    /**
+     * Count items that exactly match {@code template} ({@link ItemStack#isSimilar}: same type and
+     * meta), across the main inventory and — when enabled — carried shulker contents. Used for the
+     * contents of a pasted container, which must be paid for item-for-item to stay dupe-safe.
+     */
+    static long countExact(Player player, ItemStack template, boolean searchShulkers) {
+        if (template == null || template.getType().isAir()) return 0;
+        long total = 0;
+        for (ItemStack stack : player.getInventory().getContents()) {
+            if (stack == null) continue;
+            if (stack.isSimilar(template)) total += stack.getAmount();
+            else if (searchShulkers) total += countInShulkerExact(stack, template);
+        }
+        return total;
+    }
+
+    /**
+     * Remove up to {@code amount} exact matches of {@code template}. Main inventory first, then
+     * shulker contents when enabled.
+     * @return number actually removed
+     */
+    static long takeExact(Player player, ItemStack template, long amount, boolean searchShulkers) {
+        if (amount <= 0 || template == null || template.getType().isAir()) return 0;
+        long remaining = amount;
+        PlayerInventory inv = player.getInventory();
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length && remaining > 0; i++) {
+            ItemStack stack = contents[i];
+            if (stack == null || !stack.isSimilar(template)) continue;
+            int use = (int) Math.min(stack.getAmount(), remaining);
+            int left = stack.getAmount() - use;
+            if (left <= 0) inv.setItem(i, null);
+            else {
+                stack.setAmount(left);
+                inv.setItem(i, stack);
+            }
+            remaining -= use;
+        }
+        if (searchShulkers && remaining > 0) {
+            contents = inv.getContents();
+            for (int i = 0; i < contents.length && remaining > 0; i++) {
+                ItemStack boxStack = contents[i];
+                if (boxStack == null || !isShulkerBox(boxStack.getType())) continue;
+                long taken = takeFromShulkerExact(boxStack, template, remaining);
+                if (taken > 0) {
+                    inv.setItem(i, boxStack);
+                    remaining -= taken;
+                }
+            }
+        }
+        return amount - remaining;
+    }
+
+    /** Give exact copies of {@code template} back; overflow drops at the player location. */
+    static void giveExact(Player player, ItemStack template, long count) {
+        if (count <= 0 || template == null || template.getType().isAir()) return;
+        long left = count;
+        while (left > 0) {
+            int stack = (int) Math.min(left, template.getMaxStackSize());
+            ItemStack item = template.clone();
+            item.setAmount(stack);
+            dropLeftover(player, player.getInventory().addItem(item));
+            left -= stack;
+        }
+    }
+
     /** Give items back; overflow drops at the player location. */
     static void giveOrDrop(Player player, String materialKey, long count) {
         if (count <= 0) return;
@@ -175,6 +241,44 @@ final class PaperInventoryHelper {
             if (inner != null && inner.getType() == material) total += inner.getAmount();
         }
         return total;
+    }
+
+    private static long countInShulkerExact(ItemStack boxStack, ItemStack template) {
+        if (!isShulkerBox(boxStack.getType())) return 0;
+        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;
+        if (!(meta.getBlockState() instanceof ShulkerBox box)) return 0;
+        long total = 0;
+        for (ItemStack inner : box.getInventory().getContents()) {
+            if (inner != null && inner.isSimilar(template)) total += inner.getAmount();
+        }
+        return total;
+    }
+
+    private static long takeFromShulkerExact(ItemStack boxStack, ItemStack template, long amount) {
+        if (amount <= 0 || !isShulkerBox(boxStack.getType())) return 0;
+        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;
+        if (!(meta.getBlockState() instanceof ShulkerBox box)) return 0;
+
+        long remaining = amount;
+        ItemStack[] inner = box.getInventory().getContents();
+        for (int i = 0; i < inner.length && remaining > 0; i++) {
+            ItemStack stack = inner[i];
+            if (stack == null || !stack.isSimilar(template)) continue;
+            int use = (int) Math.min(stack.getAmount(), remaining);
+            int left = stack.getAmount() - use;
+            if (left <= 0) box.getInventory().setItem(i, null);
+            else {
+                stack.setAmount(left);
+                box.getInventory().setItem(i, stack);
+            }
+            remaining -= use;
+        }
+        long taken = amount - remaining;
+        if (taken > 0) {
+            meta.setBlockState(box);
+            boxStack.setItemMeta(meta);
+        }
+        return taken;
     }
 
     private static long takeFromShulker(ItemStack boxStack, Material material, long amount) {

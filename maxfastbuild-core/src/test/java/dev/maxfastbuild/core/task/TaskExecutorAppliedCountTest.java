@@ -28,7 +28,7 @@ class TaskExecutorAppliedCountTest {
                 new BlockMutation(new BlockPos(2, 64, 0), "minecraft:air", "minecraft:stone"));
         BuildPlan plan = new BuildPlan("world", OperationKind.PLACE, new Bounds(new BlockPos(0, 64, 0), new BlockPos(2, 64, 0)), mutations);
         Instant now = clock.instant();
-        BuildTask task = new BuildTask(id, player, "Builder", plan, TaskStatus.QUEUED, 0, 0, null, BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
+        BuildTask task = new BuildTask(id, player, "Builder", plan, TaskStatus.QUEUED, 0, 0, Set.of(), null, BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
         executor.enqueue(task);
 
         TaskExecutor.TickResult mid = executor.tick(id, 2);

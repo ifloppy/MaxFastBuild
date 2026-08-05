@@ -94,6 +94,7 @@ coreprotect-required: "<red>服务器要求 CoreProtect，但当前不可用。<
 economy-required: "<red>已启用计费，但 Vault 没有可用的经济实现。</red>"
 task-limit: "<red>并行任务数已达上限。</red>"
 no-changes: "<yellow>没有需要改变的方块。</yellow>"
+nbt-unavailable: "<red>服务器不支持方块实体 NBT。</red>"
 rate-limited: "<red>操作过于频繁，请稍后再试。</red>"
 persistence-failed: "<red>任务保存失败：{0}</red>"
 protocol-rejected: "<red>请求被拒绝：{0}</red>"

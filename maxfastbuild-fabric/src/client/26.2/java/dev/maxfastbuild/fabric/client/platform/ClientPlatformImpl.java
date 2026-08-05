@@ -4,6 +4,7 @@ import com.mojang.blaze3d.platform.InputConstants;
 import dev.maxfastbuild.fabric.client.BuildSelectionController;
 import dev.maxfastbuild.fabric.client.LitematicaBridge;
 import dev.maxfastbuild.fabric.client.PasteBlock;
+import dev.maxfastbuild.fabric.client.PasteSettingsScreen;
 import dev.maxfastbuild.fabric.client.RadialBuildScreen;
 import net.fabricmc.fabric.api.client.keymapping.v1.KeyMappingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
@@ -13,8 +14,11 @@ import net.fabricmc.fabric.api.event.client.player.ClientHotbarScrollEvents;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.List;
@@ -35,6 +39,11 @@ public final class ClientPlatformImpl extends ClientPlatform {
     }
 
     @Override
+    public KeyMapping createInstantKey() {
+        return KeyMappingHelper.registerKeyMapping(new KeyMapping("key.maxfastbuild.instant", GLFW.GLFW_KEY_UNKNOWN, CATEGORY));
+    }
+
+    @Override
     public boolean isScreenOpen(Minecraft client) {
         return client.gui.screen() != null;
     }
@@ -42,6 +51,11 @@ public final class ClientPlatformImpl extends ClientPlatform {
     @Override
     public void setScreen(Screen screen) {
         Minecraft.getInstance().gui.setScreen(screen);
+    }
+
+    @Override
+    public void openPasteSettings() {
+        setScreen(new PasteSettingsScreen());
     }
 
     @Override
@@ -93,5 +107,40 @@ public final class ClientPlatformImpl extends ClientPlatform {
     @Override
     public List<PasteBlock> collectLitematicaPlacement() {
         return LitematicaBridge.collect();
+    }
+
+    @Override
+    public String nbtToSnbt(Object nbtTag) {
+        if (nbtTag instanceof net.minecraft.nbt.CompoundTag compound) {
+            // Strip structural keys (id/x/y/z) that the server re-derives: identical tile contents
+            // then deduplicate in the paste palette instead of blowing it up per position.
+            net.minecraft.nbt.CompoundTag copy = compound.copy();
+            copy.remove("id");
+            copy.remove("x");
+            copy.remove("y");
+            copy.remove("z");
+            return copy.toString();
+        }
+        if (nbtTag instanceof net.minecraft.nbt.Tag tag) return tag.toString();
+        return null;
+    }
+
+    @Override
+    public boolean nbtHasKey(Object nbt, String key) {
+        return nbt instanceof net.minecraft.nbt.CompoundTag compound && compound.contains(key);
+    }
+
+    @Override
+    public String blockEntityNbtAt(BlockPos pos, Block expectedBlock) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) return null;
+        if (mc.level.getBlockState(pos).getBlock() != expectedBlock) return null;
+        BlockEntity tile = mc.level.getBlockEntity(pos);
+        if (tile == null) return null;
+        try {
+            return nbtToSnbt(tile.saveWithFullMetadata(mc.level.registryAccess()));
+        } catch (RuntimeException ex) {
+            return null;
+        }
     }
 }

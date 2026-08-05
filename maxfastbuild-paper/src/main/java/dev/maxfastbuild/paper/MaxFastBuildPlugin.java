@@ -62,6 +62,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         active = false;
         saveDefaultConfig();
         mergeConfigDefaults();
+        refreshDebugFlags();
         messages = new PluginMessages(this);
         messages.reload();
         try {
@@ -81,7 +82,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             audit = safeDiscoverAudit();
             economy = safeDiscoverEconomy();
             int saveInterval = Math.max(1, getConfig().getInt("execution.save-interval-ticks", 20));
-            executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC(), saveInterval);
+            executor = new TaskExecutor(tasks, new PaperWorldAccess(), audit, Clock.systemUTC(), saveInterval,
+                    getConfig().getBoolean("paste.replace-mismatched", true));
             globalBudgetPerTick = Math.max(0, getConfig().getInt("execution.global-blocks-per-tick", 4));
             planningGlobalBudgetPerTick = Math.max(0, getConfig().getInt("execution.planning.global-blocks-per-tick", 2000));
             validateIntegrations();
@@ -151,6 +153,23 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         } catch (Exception ex) {
             getLogger().warning("Failed to merge config defaults: " + ex.getMessage());
         }
+    }
+
+    /** Apply config switches that gate internal diagnostics (no runtime allocation). */
+    private void refreshDebugFlags() {
+        boolean readback = debugEnabled() && getConfig().getBoolean("debug.tile-readback", false);
+        PaperNbtHelper.setTileReadbackEnabled(readback);
+        getLogger().info("tile-readback diagnostics " + (readback ? "ENABLED" : "disabled"));
+    }
+
+    /** Master switch for all MaxFastBuild diagnostic logging ({@code debug.enabled}). */
+    private boolean debugEnabled() {
+        return getConfig().getBoolean("debug.enabled", false);
+    }
+
+    /** Debug-only server log line (suppressed unless {@code debug.enabled}). */
+    private void debugLog(String message) {
+        if (debugEnabled()) getLogger().info("[MaxFastBuild] " + message);
     }
 
     @Override public void onDisable() {
@@ -732,7 +751,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         Instant now = Instant.now();
         BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
-                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+                0, 0, Set.of(), null, tookMoney ? charge.total() : BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
         try {
             executor.enqueue(task);
         } catch (RuntimeException ex) {
@@ -1128,7 +1147,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         Instant now = Instant.now();
         BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
-                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+                0, 0, Set.of(), null, tookMoney ? charge.total() : BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
         try {
             executor.enqueue(task);
         } catch (RuntimeException ex) {
@@ -1171,21 +1190,28 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void submitPaste(Player player, PasteAccumulator.Assembled assembled) {
         String worldName = player.getWorld().getName();
         int maxBlocks = getConfig().getInt("execution.max-region-blocks", 100000);
+        boolean instant = assembled.instant();
+        int instantMax = instantMaxBlocks();
         int[] origin = assembled.origin();
         List<String> palette = assembled.palette();
-        // Defensive: strip any block-entity NBT ({...}) so states stay parseable. Block entities paste empty.
-        List<String> normalized = new ArrayList<>(palette.size());
-        for (String state : palette) {
-            int brace = state.indexOf('{');
-            normalized.add(brace >= 0 ? state.substring(0, brace) : state);
-        }
         List<PastePos> positions = new ArrayList<>(assembled.entries().size());
         for (PasteTransfer.Entry entry : assembled.entries()) {
-            if (entry.paletteIndex() >= normalized.size()) {
+            if (entry.paletteIndex() >= palette.size()) {
+                debugLog("paste rejected player=" + player.getName() + " reason=palette_index_out_of_range");
                 sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "palette_index_out_of_range"));
                 return;
             }
-            String target = normalized.get(entry.paletteIndex());
+            String raw = palette.get(entry.paletteIndex());
+            // Palette entries carry block-entity SNBT appended after the state: "minecraft:chest{...}".
+            int brace = raw.indexOf('{');
+            String target = brace >= 0 ? raw.substring(0, brace) : raw;
+            String targetNbt = brace >= 0 ? raw.substring(brace) : null;
+            if (targetNbt != null && PaperNbtHelper.parseCompound(targetNbt) == null) {
+                debugLog("paste rejected player=" + player.getName()
+                        + " reason=unparseable_nbt raw=\"" + raw + "\"");
+                sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "unparseable_nbt"));
+                return;
+            }
             Material material;
             try {
                 material = Bukkit.createBlockData(target).getMaterial();
@@ -1196,13 +1222,22 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (material.isAir() || !material.isBlock() || RestrictedMaterials.isForbiddenPlace(material)) {
                 continue;
             }
-            positions.add(new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target));
+            positions.add(new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target, targetNbt));
         }
         if (positions.isEmpty()) {
+            debugLog("paste rejected player=" + player.getName() + " reason=no_placeable_blocks");
             sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
             return;
         }
+        if (instant && positions.size() > instantMax) {
+            debugLog("paste rejected player=" + player.getName()
+                    + " reason=instant_too_large blocks=" + positions.size() + " limit=" + instantMax);
+            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", instantMax));
+            return;
+        }
         if (positions.size() > maxBlocks) {
+            debugLog("paste rejected player=" + player.getName()
+                    + " reason=too_large blocks=" + positions.size() + " limit=" + maxBlocks);
             sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", maxBlocks));
             return;
         }
@@ -1222,7 +1257,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", "paste_in_progress"));
             return;
         }
-        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, positions));
+        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, instant, positions));
+        debugLog("paste assembled player=" + player.getName()
+                + " blocks=" + positions.size() + " instant=" + instant);
     }
 
     private void tickPastePlanners() {
@@ -1243,6 +1280,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             PlanningError error = advancePastePlanning(pending, perPlayer);
             globalRemaining -= (int) (pending.processed - before);
             if (error != null) {
+                debugLog("paste planning rejected player=" + player.getName()
+                        + " reason=" + error.key());
                 sendProtocol(player, "error", error.key(), error.data());
                 it.remove();
                 continue;
@@ -1267,25 +1306,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             PastePos pp = pending.iterator.next();
             pending.processed++;
             BlockPos pos = pp.position();
+            // Replace-by-default: an unplaceable position (unsafe height, unbreakable occupant,
+            // no effective tool, forbidden target) is skipped, never allowed to abort the paste.
             if (pos.y() < minHeight || pos.y() >= maxHeight) {
-                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
+                pending.planningSkipped++;
+                continue;
             }
             String before = world.stateAt(pending.world, pos);
-            if (before.equals(pp.targetState())) continue;
-            BlockMutation mutation = new BlockMutation(pos, before, pp.targetState());
+            if (before.equals(pp.targetState()) && pp.targetNbt() == null) continue;
+            BlockMutation mutation = new BlockMutation(pos, before, pp.targetState(), pp.targetNbt());
             WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
             if (!validation.allowed()) {
-                if ("insufficient_tool".equals(validation.reason())) {
-                    return new PlanningError("maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
-                }
-                if ("unbreakable_block".equals(validation.reason()) || "unbreakable_replace".equals(validation.reason())) {
-                    return new PlanningError("maxfastbuild.error.unbreakable_block",
-                            Map.of("position", pos.toString(), "block", before, "reason", validation.reason()));
-                }
-                if ("forbidden_material".equals(validation.reason())) {
-                    return new PlanningError("maxfastbuild.error.invalid_material", Map.of("material", pp.targetState()));
-                }
-                return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", validation.reason()));
+                pending.planningSkipped++;
+                continue;
             }
             pending.mutations.add(mutation);
             if (PaperWorldAccess.requiresBreakToReplace(before)) {
@@ -1299,38 +1332,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         Player player = pending.player;
         List<BlockMutation> mutations = pending.mutations;
         if (mutations.isEmpty()) {
+            debugLog("paste finalized player=" + player.getName()
+                    + " reason=no_changes plannedSkipped=" + pending.planningSkipped);
             sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
             return;
         }
 
-        // Place-over-solid survival paste needs effective tools for every solid replace target.
-        if (pending.replaceBreakCount > 0 && player.getGameMode() != GameMode.CREATIVE) {
-            if (!BreakToolHelper.hasAnyMiningTool(player)) {
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
-                return;
-            }
-            Map<Material, Boolean> canBreakCache = new HashMap<>();
-            for (BlockMutation mutation : mutations) {
-                if (!PaperWorldAccess.requiresBreakToReplace(mutation.expectedState())) continue;
-                Block target = player.getWorld().getBlockAt(mutation.position().x(), mutation.position().y(), mutation.position().z());
-                Material material = target.getType();
-                Boolean cached = canBreakCache.get(material);
-                if (cached == null) {
-                    cached = BreakToolHelper.canBreakBlock(player, target);
-                    canBreakCache.put(material, cached);
-                }
-                if (!cached) {
-                    sendProtocol(player, "error", "maxfastbuild.error.wrong_tool",
-                            Map.of("block", target.getType().getKey().toString(), "reason", "no_effective_tool"));
-                    return;
-                }
-            }
-            long usable = estimateUsableToolHits(player);
-            if (usable < pending.replaceBreakCount) {
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool_durability",
-                        Map.of("reason", "durability", "need", pending.replaceBreakCount, "have", usable));
-                return;
-            }
+        // Place-over-solid survival paste needs at least one mining tool; per-position replace
+        // feasibility is enforced during execution (unbreakable / wrong tool / durability exhaustion
+        // skip that position instead of aborting the whole paste).
+        if (pending.replaceBreakCount > 0 && player.getGameMode() != GameMode.CREATIVE
+                && !BreakToolHelper.hasAnyMiningTool(player)) {
+            sendProtocol(player, "error", "maxfastbuild.error.insufficient_tool", Map.of("reason", "no_tool"));
+            return;
         }
 
         BlockPos first = mutations.getFirst().position();
@@ -1342,7 +1356,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             max = new BlockPos(Math.max(max.x(), pos.x()), Math.max(max.y(), pos.y()), Math.max(max.z(), pos.z()));
         }
         BuildPlan plan = new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max), mutations);
-        BillingPolicy.Charge charge = billing().quote(plan, pending.replaceBreakCount);
+        BillingPolicy policy = billing();
+        BillingPolicy.Charge charge = policy.quote(plan, pending.replaceBreakCount);
+        if (pending.instant) {
+            BigDecimal mult = instantMultiplier();
+            java.util.function.Function<BigDecimal, BigDecimal> scaled = v -> v.multiply(mult).setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
+            charge = new BillingPolicy.Charge(scaled.apply(charge.operation()), scaled.apply(charge.area()), scaled.apply(charge.blocks()), scaled.apply(charge.total()));
+        }
         boolean requireMaterials = player.getGameMode() != GameMode.CREATIVE
                 && !player.hasPermission("maxfastbuild.bypass.materials");
         boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
@@ -1351,13 +1371,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             searchShulkers = false;
         }
 
-        // A paste uses many block types: count and deduct per unique material.
-        Map<String, Long> needByMaterial = new LinkedHashMap<>();
+        // A paste uses many block types plus (for containers) every item inside their NBT.
+        PasteMaterials needs;
+        try {
+            needs = collectPasteMaterials(player.getWorld(), mutations);
+        } catch (PasteRejectException reject) {
+            debugLog("paste rejected player=" + player.getName() + " reason=" + reject.key);
+            sendProtocol(player, "error", reject.key, reject.data);
+            return;
+        }
         if (requireMaterials) {
-            for (BlockMutation mutation : mutations) {
-                needByMaterial.merge(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1L, Long::sum);
-            }
-            for (Map.Entry<String, Long> entry : needByMaterial.entrySet()) {
+            for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 Material resolved = PaperInventoryHelper.resolveMaterial(entry.getKey());
                 if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
                     sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", entry.getKey()));
@@ -1367,6 +1391,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 if (have < entry.getValue()) {
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                             Map.of("need", entry.getValue(), "have", have, "material", entry.getKey()));
+                    return;
+                }
+            }
+            for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
+                if (RestrictedMaterials.isForbiddenItem(entry.getKey().getType())) {
+                    sendProtocol(player, "error", "maxfastbuild.error.invalid_material",
+                            Map.of("material", entry.getKey().getType().getKey().toString()));
+                    return;
+                }
+                long have = PaperInventoryHelper.countExact(player, entry.getKey(), searchShulkers);
+                if (have < entry.getValue()) {
+                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                            Map.of("need", entry.getValue(), "have", have, "material", entry.getKey().getType().getKey().toString()));
                     return;
                 }
             }
@@ -1391,12 +1428,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             tookMoney = true;
         }
         Map<String, Long> takenByMaterial = new LinkedHashMap<>();
+        Map<org.bukkit.inventory.ItemStack, Long> takenByContents = new LinkedHashMap<>();
         if (requireMaterials) {
-            for (Map.Entry<String, Long> entry : needByMaterial.entrySet()) {
+            for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 long removed = PaperInventoryHelper.take(player, entry.getKey(), entry.getValue(), searchShulkers, fluidBucketRequirement());
                 if (removed < entry.getValue()) {
                     for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
                         PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
+                    }
+                    for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
+                        PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
                     }
                     if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
@@ -1405,18 +1446,43 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
                 takenByMaterial.put(entry.getKey(), removed);
             }
+            for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
+                long removed = PaperInventoryHelper.takeExact(player, entry.getKey(), entry.getValue(), searchShulkers);
+                if (removed < entry.getValue()) {
+                    for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
+                        PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
+                    }
+                    for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
+                        PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
+                    }
+                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
+                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                            Map.of("need", entry.getValue(), "have", removed, "material", entry.getKey().getType().getKey().toString()));
+                    return;
+                }
+                takenByContents.put(entry.getKey(), removed);
+            }
             tookItems = true;
+        }
+
+        // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
+        if (pending.instant) {
+            settleInstant(player, pending, plan, charge, transactionId, tookMoney);
+            return;
         }
 
         Instant now = Instant.now();
         BuildTask task = new BuildTask(taskId, player.getUniqueId(), player.getName(), plan, TaskStatus.QUEUED,
-                0, 0, null, charge.total(), BigDecimal.ZERO, now, now, null);
+                0, 0, Set.of(), null, tookMoney ? charge.total() : BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
         try {
             executor.enqueue(task);
         } catch (RuntimeException ex) {
             if (tookItems) {
                 for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
                     PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
+                }
+                for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
+                    PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
                 }
             }
             compensate(player, taskId, tookMoney ? charge.total() : BigDecimal.ZERO, transactionId, ex);
@@ -1492,9 +1558,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (appliedCount == 0 && operationPart.signum() > 0) {
             refund = refund.add(operationPart).setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
         }
+        // Refund only money the player actually paid (bypass.cost / disabled economy => charged == 0),
+        // and never more than what was charged.
+        if (refund.signum() > 0 && task.charged().signum() > 0 && refund.compareTo(task.charged()) > 0) {
+            refund = task.charged();
+        }
 
         Player player = Bukkit.getPlayer(task.playerId());
-        if (refund.signum() > 0) {
+        if (refund.signum() > 0 && task.charged().signum() > 0) {
             String tx = task.id() + ":partial-refund";
             if (player != null) {
                 refundMoney(player, task.id(), refund, tx);
@@ -1507,36 +1578,33 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         if (task.plan().operation() == OperationKind.PLACE && missed > 0) {
-            returnPlaceMaterials(player, task, missed);
+            // Unapplied mutations are exactly the skipped ones plus any never-reached tail, NOT a
+            // contiguous prefix: TaskExecutor skips failures and continues, so the first `applied`
+            // mutations may not be the ones that applied.
+            Set<Integer> unapplied = new HashSet<>(task.skipped());
+            for (int i = task.cursor(); i < task.plan().mutations().size(); i++) unapplied.add(i);
+            returnUnusedMaterials(player, task.plan(), unapplied);
+        }
+
+        // Cross-tick redstone convergence for a completed place task: the last batch's settle
+        // happens this tick, but tick-dependent components need a few more ticks to settle.
+        if (task.status() == TaskStatus.COMPLETED && task.plan().operation() == OperationKind.PLACE) {
+            Set<Integer> skipped = task.skipped();
+            List<BlockMutation> all = task.plan().mutations();
+            List<BlockPos> appliedPositions = new ArrayList<>(all.size() - skipped.size());
+            for (int i = 0; i < all.size(); i++) {
+                if (!skipped.contains(i)) appliedPositions.add(all.get(i).position());
+            }
+            scheduleRedstoneTail(task.plan().world(), appliedPositions);
         }
 
         if (player != null) {
+            debugLog("task settled player=" + player.getName() + " taskId=" + task.id()
+                    + " applied=" + appliedCount + " planned=" + planned + " refund=" + refund.toPlainString());
             String key = missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed";
             sendProtocol(player, "completed", key,
-                    Map.of("applied", appliedCount, "planned", planned, "refund", refund.toPlainString()));
-        }
-    }
-
-    private void returnPlaceMaterials(Player player, BuildTask task, long count) {
-        if (task.plan().mutations().isEmpty() || count <= 0) return;
-        if (player != null && player.getGameMode() == GameMode.CREATIVE) return;
-        String itemKey = PaperInventoryHelper.itemKeyFromBlockState(task.plan().mutations().getFirst().targetState());
-        if (player != null) {
-            PaperInventoryHelper.giveOrDrop(player, itemKey, count);
-            return;
-        }
-        // Offline: drop near first mutation so materials are not silently lost.
-        org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(itemKey);
-        if (mat == null || !mat.isItem()) return;
-        World world = Bukkit.getWorld(task.plan().world());
-        if (world == null) return;
-        BlockPos pos = task.plan().mutations().getFirst().position();
-        Location loc = new Location(world, pos.x() + 0.5, pos.y() + 0.5, pos.z() + 0.5);
-        long left = count;
-        while (left > 0) {
-            int stack = (int) Math.min(left, mat.getMaxStackSize());
-            world.dropItemNaturally(loc, new org.bukkit.inventory.ItemStack(mat, stack));
-            left -= stack;
+                    Map.of("applied", appliedCount, "planned", planned, "cost", task.charged().toPlainString(),
+                            "refund", refund.toPlainString()));
         }
     }
 
@@ -1572,15 +1640,58 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             reloadConfig();
             mergeConfigDefaults();
             reloadConfig();
+            refreshDebugFlags();
             messages.reload();
             sender.sendMessage(messages.component("reloaded"));
             getLogger().info("Reloaded config; CLI language=" + messages.language());
         } else if (args[0].equalsIgnoreCase("recovery")) {
             messages.send(sender, "recovery", tasks.recoverable().size(), ledger.pending().size());
+        } else if (args[0].equalsIgnoreCase("torches") && args.length >= 7) {
+            dumpTorches(sender, args);
         } else {
             messages.send(sender, "admin-unknown");
         }
         return true;
+    }
+
+    /**
+     * Debug: log every redstone torch in the given axis-aligned box with its lit state, so a pasted
+     * redstone machine can be diffed against the schematic (which stores torch lit states).
+     * Usage: {@code /mfbadmin torches <x1> <y1> <z1> <x2> <y2> <z2>}.
+     */
+    private void dumpTorches(org.bukkit.command.CommandSender sender, String[] args) {
+        if (!debugEnabled()) {
+            sender.sendMessage("Torch dump requires debug.enabled=true");
+            return;
+        }
+        try {
+            World world = sender instanceof Player player ? player.getWorld() : Bukkit.getWorlds().get(0);
+            int x1 = Integer.parseInt(args[1]), y1 = Integer.parseInt(args[2]), z1 = Integer.parseInt(args[3]);
+            int x2 = Integer.parseInt(args[4]), y2 = Integer.parseInt(args[5]), z2 = Integer.parseInt(args[6]);
+            int minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+            int minY = Math.max(world.getMinHeight(), Math.min(y1, y2));
+            int maxY = Math.min(world.getMaxHeight() - 1, Math.max(y1, y2));
+            int minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+            int count = 0, lit = 0;
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    for (int x = minX; x <= maxX; x++) {
+                        Block block = world.getBlockAt(x, y, z);
+                        String name = block.getType().name();
+                        if (!name.equals("REDSTONE_TORCH") && !name.equals("REDSTONE_WALL_TORCH")) continue;
+                        boolean isLit = block.getBlockData() instanceof org.bukkit.block.data.Lightable lightable
+                                && lightable.isLit();
+                        count++;
+                        if (isLit) lit++;
+                        getLogger().info("TORCH " + x + "," + y + "," + z + " " + (isLit ? "LIT" : "OFF") + " " + name);
+                    }
+                }
+            }
+            getLogger().info("TORCHES total=" + count + " lit=" + lit + " box=" + minX + "," + minY + "," + minZ + ".." + maxX + "," + maxY + "," + maxZ);
+            sender.sendMessage("Dumped " + count + " torches (lit=" + lit + ") to the server log");
+        } catch (NumberFormatException | IndexOutOfBoundsException ex) {
+            messages.send(sender, "admin-unknown");
+        }
     }
 
     private void cancelPlayerTasks(Player player) {
@@ -1645,6 +1756,268 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private int fluidBucketRequirement() {
         return Math.max(1, getConfig().getInt("inventory.fluid-bucket-requirement", 2));
     }
+
+    /** Instant-paste economy multiplier (0 = free aside from materials; never negative). */
+    private BigDecimal instantMultiplier() {
+        return new BigDecimal(String.valueOf(getConfig().get("instant-paste.multiplier", 2))).max(BigDecimal.ZERO);
+    }
+
+    /**
+     * Instant-paste block cap. {@code 0} = unlimited (still bounded by
+     * {@code execution.max-region-blocks} and the transfer protocol ceiling).
+     */
+    private int instantMaxBlocks() {
+        int configured = getConfig().getInt("instant-paste.max-blocks", 0);
+        return configured <= 0 ? Integer.MAX_VALUE : configured;
+    }
+
+    /** Hard instant-paste entity cap (whole paste). */
+    private int instantMaxEntities() {
+        int configured = Math.max(0, getConfig().getInt("instant-paste.max-entities", 64));
+        return Math.min(configured, PasteTransfer.MAX_INSTANT_ENTITIES);
+    }
+
+    /** Hard instant-paste entity cap per chunk. */
+    private int instantMaxEntitiesPerChunk() {
+        int configured = Math.max(0, getConfig().getInt("instant-paste.max-entities-per-chunk", 32));
+        return Math.min(configured, PasteTransfer.MAX_INSTANT_ENTITIES_PER_CHUNK);
+    }
+
+    /**
+     * Per-block materials and exact container contents a paste consumes. The container block itself
+     * is billed as one plain block item (its material key); every item inside its {@code Items} NBT
+     * is billed as an exact-match item (same type + meta). Throws {@link PasteRejectException} when
+     * block-entity NBT cannot be parsed or contains a forbidden/undecodable item — a paste carrying
+     * NBT is rejected outright rather than placed empty.
+     */
+    private static PasteMaterials collectPasteMaterials(World world, List<BlockMutation> mutations) {
+        Map<String, Long> blocks = new LinkedHashMap<>();
+        Map<org.bukkit.inventory.ItemStack, Long> contents = new LinkedHashMap<>();
+        Object registry = world == null ? null : PaperNbtHelper.registryAccess(world);
+        for (BlockMutation mutation : mutations) {
+            blocks.merge(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1L, Long::sum);
+            if (mutation.targetNbt() == null) continue;
+            if (registry == null) throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
+            Material tileMaterial;
+            try {
+                tileMaterial = Bukkit.createBlockData(mutation.targetState()).getMaterial();
+            } catch (IllegalArgumentException ex) {
+                throw new PasteRejectException("maxfastbuild.error.invalid_material",
+                        Map.of("material", PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState())));
+            }
+            PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(mutation.targetNbt(), tileMaterial, registry);
+            if (check instanceof PaperNbtHelper.NbtCheck.Rejected rejected) {
+                String reason = rejected.reason();
+                if (reason.startsWith("forbidden_item_in_nbt")) {
+                    throw new PasteRejectException("maxfastbuild.error.invalid_material",
+                            Map.of("material", reason.substring("forbidden_item_in_nbt".length())));
+                }
+                throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
+            }
+            for (PaperNbtHelper.ItemInstance item : ((PaperNbtHelper.NbtCheck.Ok) check).items()) {
+                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
+                org.bukkit.inventory.ItemStack template = item.bukkit().clone();
+                template.setAmount(1);
+                contents.merge(template, item.count(), Long::sum);
+            }
+        }
+        return new PasteMaterials(blocks, contents);
+    }
+
+    private record PasteMaterials(Map<String, Long> blocks, Map<org.bukkit.inventory.ItemStack, Long> contents) {}
+
+    /** Validation error carrying a protocol message key + data (aborts the whole paste). */
+    private static final class PasteRejectException extends RuntimeException {
+        final String key;
+        final Map<String, ?> data;
+
+        PasteRejectException(String key, Map<String, ?> data) {
+            super(key);
+            this.key = key;
+            this.data = data;
+        }
+    }
+
+    /** Refund for work never applied, mirroring {@link BillingPolicy#refund} but with scaled instant prices. */
+    private static BigDecimal instantRefund(BillingPolicy policy, long planned, long applied,
+                                            long replaceBreaks, BigDecimal operationPart, BigDecimal areaPart, BigDecimal blockPart) {
+        long unfinished = Math.max(0, planned - applied);
+        if (unfinished <= 0) return BigDecimal.ZERO.setScale(policy.fractionalDigits());
+        BigDecimal placeShare = BigDecimal.ZERO;
+        BigDecimal replaceShare = BigDecimal.ZERO;
+        if (policy.perBlockEnabled()) {
+            placeShare = blockPart.multiply(BigDecimal.valueOf(unfinished));
+            long replaceUnfinished = Math.min(replaceBreaks, unfinished);
+            replaceShare = blockPart.multiply(BigDecimal.valueOf(replaceUnfinished));
+        }
+        BigDecimal areaRefund = BigDecimal.ZERO;
+        if (areaPart.signum() > 0 && planned > 0) {
+            BigDecimal ratio = BigDecimal.valueOf(unfinished).divide(BigDecimal.valueOf(planned), 12, java.math.RoundingMode.HALF_UP);
+            areaRefund = areaPart.multiply(ratio);
+        }
+        BigDecimal refund = placeShare.add(replaceShare).add(areaRefund).setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
+        if (applied == 0 && operationPart.signum() > 0) {
+            refund = refund.add(operationPart).setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
+        }
+        return refund;
+    }
+
+    /** Return materials (block items + exact container contents) for mutations never applied. */
+    private void returnUnusedMaterials(Player player, BuildPlan plan, Set<Integer> unappliedIndices) {
+        List<BlockMutation> all = plan.mutations();
+        if (all.isEmpty()) return;
+        if (player != null && player.getGameMode() == GameMode.CREATIVE) return;
+        List<BlockMutation> unused = new ArrayList<>();
+        for (int index : unappliedIndices) {
+            if (index >= 0 && index < all.size()) unused.add(all.get(index));
+        }
+        if (unused.isEmpty()) return;
+        World world = Bukkit.getWorld(plan.world());
+        Object registry = world == null ? null : PaperNbtHelper.registryAccess(world);
+        if (player != null) {
+            for (BlockMutation mutation : unused) {
+                PaperInventoryHelper.giveOrDrop(player, PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1);
+                for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
+                    PaperInventoryHelper.giveExact(player, item.bukkit(), item.count());
+                }
+            }
+            return;
+        }
+        // Offline: drop near the first unused mutation so nothing is silently lost.
+        if (world == null) return;
+        Location loc = new Location(world, unused.getFirst().position().x() + 0.5, unused.getFirst().position().y() + 0.5, unused.getFirst().position().z() + 0.5);
+        for (BlockMutation mutation : unused) {
+            org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()));
+            if (mat != null && mat.isItem()) {
+                world.dropItemNaturally(loc, new org.bukkit.inventory.ItemStack(mat, 1));
+            }
+            for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
+                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
+                long left = item.count();
+                while (left > 0) {
+                    int stack = (int) Math.min(left, item.bukkit().getMaxStackSize());
+                    org.bukkit.inventory.ItemStack drop = item.bukkit().clone();
+                    drop.setAmount(stack);
+                    world.dropItemNaturally(loc, drop);
+                    left -= stack;
+                }
+            }
+        }
+    }
+
+    /** Billable items a mutation's NBT would carry, or empty when none/undecodable (for refunds). */
+    private static List<PaperNbtHelper.ItemInstance> billableItems(String targetState, String targetNbt, Object registry) {
+        if (targetNbt == null || registry == null) return List.of();
+        Material material;
+        try {
+            material = Bukkit.createBlockData(targetState).getMaterial();
+        } catch (IllegalArgumentException ex) {
+            return List.of();
+        }
+        PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(targetNbt, material, registry);
+        return check instanceof PaperNbtHelper.NbtCheck.Ok ok ? ok.items() : List.of();
+    }
+
+    /**
+     * Instant paste: run the full mayMutate + mutate loop synchronously (this server tick, paid
+     * multiplier). Stops at the first failure, then settles like {@link #settlePartial}: refunds
+     * variable fees for unapplied work and returns unused materials. CoreProtect is recorded by the
+     * {@code mutate} call path exactly as for queued tasks.
+     */
+    private void settleInstant(Player player, PendingPaste pending, BuildPlan plan, BillingPolicy.Charge charge,
+                               String transactionId, boolean tookMoney) {
+        PaperWorldAccess world = new PaperWorldAccess();
+        List<BlockMutation> mutations = plan.mutations();
+        long applied = 0;
+        Set<Integer> unapplied = new HashSet<>();
+        // Litematica-exact physics: place every block with NO_UPDATE, then one notification pass so
+        // redstone computes against the final layout (see WorldAccess#beginDeferredPhysics).
+        world.beginDeferredPhysics();
+        try {
+            for (int i = 0; i < mutations.size(); i++) {
+                BlockMutation mutation = mutations.get(i);
+                BlockPos pos = mutation.position();
+                // Replace-by-default: a position whose current state no longer matches what the
+                // schematic expects is placed over (mayMutate/mutate handle the break), never a stop.
+                WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+                if (!validation.allowed()) {
+                    unapplied.add(i);
+                    continue;
+                }
+                WorldAccess.MutationResult result = world.mutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+                if (!result.changed()) {
+                    unapplied.add(i);
+                    continue;
+                }
+                applied++;
+                audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE, result.breakAlreadyLogged());
+            }
+        } finally {
+            world.endDeferredPhysics();
+        }
+        // Redstone settle: force re-place redstone components so onPlace fires against the final
+        // layout (plain update(true,true) on unchanged blocks skips onPlace and leaves torches at
+        // their partial-build state), then a cross-tick convergence tail for scheduled ticks.
+        List<BlockPos> settled = null;
+        if (applied > 0) {
+            settled = new ArrayList<>((int) applied);
+            for (int i = 0; i < mutations.size(); i++) {
+                if (!unapplied.contains(i)) settled.add(mutations.get(i).position());
+            }
+            world.settlePlacements(pending.world, settled);
+            scheduleRedstoneTail(pending.world, settled);
+        }
+        long planned = mutations.size();
+        long missed = unapplied.size();
+
+        BillingPolicy policy = billing();
+        BigDecimal mult = instantMultiplier();
+        BigDecimal operationPart = policy.perOperationEnabled() ? policy.perOperation().multiply(mult) : BigDecimal.ZERO;
+        // Same area basis as the quote in finalizePastePlanning: perArea * maximumPlaneArea * multiplier.
+        BigDecimal areaPart = policy.perAreaEnabled()
+                ? policy.perArea().multiply(BigDecimal.valueOf(plan.bounds().maximumPlaneArea())).multiply(mult)
+                : BigDecimal.ZERO;
+        BigDecimal blockPart = policy.perBlockEnabled() ? policy.perBlock().multiply(mult) : BigDecimal.ZERO;
+        BigDecimal refund = instantRefund(policy, planned, applied, pending.replaceBreakCount, operationPart, areaPart, blockPart);
+        if (refund.signum() > 0 && charge.total().signum() > 0 && refund.compareTo(charge.total()) > 0) {
+            refund = charge.total();
+        }
+        if (tookMoney && refund.signum() > 0) {
+            String tx = transactionId + ":partial-refund";
+            ledger.intent(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund);
+            EconomyService.TransactionResult result = economy.deposit(player.getUniqueId(), refund, tx);
+            ledger.complete(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund, result.successful(), result.message());
+        }
+        if (missed > 0) {
+            returnUnusedMaterials(player, plan, unapplied);
+        }
+        debugLog("paste executed player=" + player.getName()
+                + " applied=" + applied + " planned=" + planned + " skipped=" + missed
+                + " planningSkipped=" + pending.planningSkipped);
+        sendProtocol(player, "completed", missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed",
+                Map.of("applied", applied, "planned", planned, "cost", charge.total().toPlainString(),
+                        "refund", refund.toPlainString(), "skippedPlanning", pending.planningSkipped));
+    }
+
+    /**
+     * After a paste places all blocks, run {@code paste.redstone-convergence} additional
+     * notification passes over the placed positions, one per server tick, so tick-dependent
+     * redstone (repeaters, pistons, observers) settles against the final layout.
+     */
+    private void scheduleRedstoneTail(String worldName, List<BlockPos> positions) {
+        int ticks = getConfig().getInt("paste.redstone-convergence", 2);
+        if (ticks <= 0 || positions == null || positions.isEmpty()) return;
+        List<BlockPos> copy = new ArrayList<>(positions);
+        debugLog("redstone convergence tail scheduled ticks=" + ticks + " positions=" + copy.size());
+        for (int i = 1; i <= ticks; i++) {
+            final int delay = i;
+            getServer().getScheduler().runTaskLater(this, () -> {
+                if (!active || Bukkit.getWorld(worldName) == null) return;
+                new PaperWorldAccess().settlePlacements(worldName, copy);
+            }, delay);
+        }
+    }
+
     private EconomyService discoverEconomy() {
         RegisteredServiceProvider<Economy> registration = getServer().getServicesManager().getRegistration(Economy.class);
         if (registration != null) return new VaultEconomyService(registration.getProvider());
@@ -1668,15 +2041,29 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private AuditService safeDiscoverAudit() {
-        try { return CoreProtectAuditService.discover(); }
-        catch (LinkageError error) {
-            getLogger().info("CoreProtect API is not installed; audit integration is disabled");
-            return new AuditService() {
-                public boolean available() { return false; }
-                public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind) {}
-                public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind, boolean breakAlreadyLogged) {}
-            };
+        AuditService coreProtect;
+        try {
+            coreProtect = CoreProtectAuditService.discover();
+        } catch (LinkageError error) {
+            getLogger().info("CoreProtect API is not installed; CoreProtect audit disabled");
+            coreProtect = unavailableAudit();
         }
+        AuditService prism;
+        try {
+            prism = PrismAuditService.discover();
+        } catch (LinkageError error) {
+            getLogger().info("Prism API is not installed; Prism audit disabled");
+            prism = unavailableAudit();
+        }
+        return new CompositeAuditService(List.of(coreProtect, prism));
+    }
+
+    private AuditService unavailableAudit() {
+        return new AuditService() {
+            public boolean available() { return false; }
+            public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind) {}
+            public void record(UUID playerId, String playerName, String world, BlockMutation mutation, OperationKind kind, boolean breakAlreadyLogged) {}
+        };
     }
 
     private void validateIntegrations() {
@@ -1702,7 +2089,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 "sessionId", session.id(),
                 "secret", Base64.getUrlEncoder().withoutPadding().encodeToString(session.secret()),
                 "expiresAt", session.expiresAt().toString(),
-                "maxBlocks", getConfig().getInt("execution.max-region-blocks", 100000))));
+                "maxBlocks", getConfig().getInt("execution.max-region-blocks", 100000),
+                "maxRegionVolume", getConfig().getInt("execution.max-region-volume", 8000000),
+                "instantMultiplier", instantMultiplier().stripTrailingZeros().toPlainString(),
+                "instantMaxBlocks", instantMaxBlocks())));
     }
 
     /**
@@ -1777,20 +2167,23 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     /** Absolute position and its palette target state (client-supplied, re-validated per tick). */
-    private record PastePos(BlockPos position, String targetState) {}
+    private record PastePos(BlockPos position, String targetState, String targetNbt) {}
 
     /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
     private static final class PendingPaste {
         final Player player;
         final String world;
+        final boolean instant;
         final Iterator<PastePos> iterator;
         final List<BlockMutation> mutations = new ArrayList<>();
         long replaceBreakCount = 0;
         long processed = 0;
+        long planningSkipped = 0;
 
-        PendingPaste(Player player, String world, List<PastePos> positions) {
+        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions) {
             this.player = player;
             this.world = world;
+            this.instant = instant;
             this.iterator = positions.iterator();
         }
     }

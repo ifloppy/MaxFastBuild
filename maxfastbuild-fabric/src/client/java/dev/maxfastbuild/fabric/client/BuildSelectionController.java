@@ -154,6 +154,7 @@ public final class BuildSelectionController {
     }
 
     public static void renderHud(HudCanvas canvas) {
+        PasteController.renderHud(canvas);
         if (!active) return;
         Minecraft client = Minecraft.getInstance();
         boolean breaking = client.player != null && isBreakIntent(client.player);

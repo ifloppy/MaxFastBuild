@@ -8,6 +8,11 @@ execution:
   # 0 = unlimited (old behavior).
   global-blocks-per-tick: 4
   max-region-blocks: 100000
+  # Client-side guard on the bounding-box volume of a single Litematica sub-region being read.
+  # Separate from max-region-blocks: large builds (e.g. furnace arrays) have a box far bigger than
+  # their block count because of the air in between. Only stops pathologically huge boxes that
+  # would freeze the client. The real block cap is max-region-blocks.
+  max-region-volume: 8000000
   max-concurrent-tasks-per-player: 2
   # How many server ticks between progress writes to SQLite (higher = less disk I/O, more progress lost on crash).
   save-interval-ticks: 20
@@ -51,8 +56,38 @@ economy:
   per-block:
     enabled: false
     price: 0.0
+# Paid instant paste: executes synchronously (no queue wait) at a fixed economy multiplier.
+# max-blocks 0 = unlimited (still bounded by execution.max-region-blocks and the protocol cap).
+# WARNING: instant pastes run all blocks on the server main thread in one burst — very large
+# pastes (e.g. tens of thousands of blocks) will briefly pause the server, like Litematica
+# creative paste. Entity caps below are always enforced.
+instant-paste:
+  multiplier: 2
+  max-blocks: 0
+  max-entities: 64
+  max-entities-per-chunk: 32
 coreprotect:
   required: true
+# Paste placement semantics.
+paste:
+  # Replace blocks that are already in the pasted region instead of skipping or stopping: a
+  # position whose current state differs from the schematic is placed over (survival requires a
+  # mining tool for solid occupants). Unbreakable / forbidden positions are skipped, never fatal.
+  replace-mismatched: true
+  # Extra redstone convergence passes after a paste finishes placing blocks, one per server tick.
+  # Instant pastes place everything in a single tick; components that rely on scheduled ticks
+  # (repeaters, pistons, observers) need a few ticks to settle against the final layout, like
+  # Litematica's per-tick paste. 0 disables the tail.
+  redstone-convergence: 2
+debug:
+  # Master switch for all MaxFastBuild diagnostic logging (paste lifecycle, tile readback,
+  # /mfbadmin torches). Off by default; turn on only when debugging.
+  enabled: false
+  # When true, log every block-entity NBT apply (input SNBT, loadData result, and the tile read
+  # back from the server) so sign/lectern/container text issues can be diagnosed live.
+  # Only active while debug.enabled is also true.
+  tile-readback: false
 protocol:
   session-minutes: 30
-  max-payload-bytes: 16384
+  # Max bytes of a single gzipped paste payload part (NBT-heavy schematics need headroom).
+  max-payload-bytes: 131072

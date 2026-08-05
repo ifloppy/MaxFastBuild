@@ -118,6 +118,8 @@ final class PluginMessages {
                     component("task-limit");
             case "maxfastbuild.error.no_changes" ->
                     component("no-changes");
+            case "maxfastbuild.error.nbt_unavailable" ->
+                    component("nbt-unavailable");
             case "maxfastbuild.error.rate_limited" ->
                     component("rate-limited");
             case "maxfastbuild.error.hold_block_or_tool" ->

@@ -39,6 +39,11 @@ final class RestrictedMaterials {
         return material != null && FORBIDDEN_BREAK.contains(material);
     }
 
+    /** A material that may never appear inside a pasted container's contents. */
+    static boolean isForbiddenItem(Material material) {
+        return material == null || material.isAir() || FORBIDDEN_PLACE.contains(material);
+    }
+
     private static void addBoth(String name) {
         addPlace(name);
         addBreak(name);

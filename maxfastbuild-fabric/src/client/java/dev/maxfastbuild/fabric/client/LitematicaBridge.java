@@ -2,6 +2,7 @@ package dev.maxfastbuild.fabric.client;
 
 import com.mojang.logging.LogUtils;
 import dev.maxfastbuild.core.protocol.PasteTransfer;
+import dev.maxfastbuild.fabric.client.platform.ClientPlatform;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.commands.arguments.blocks.BlockStateParser;
 import net.minecraft.core.BlockPos;
@@ -15,6 +16,7 @@ import org.slf4j.Logger;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -35,10 +37,19 @@ import java.util.Map;
  */
 public final class LitematicaBridge {
     private static final int PROTOCOL_CAP = PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART;
+    /** Default guard on the per-sub-region bounding-box volume we will iterate (anti client freeze). */
+    private static final int DEFAULT_MAX_REGION_VOLUME = 8_000_000;
     private static final Logger LOGGER = LogUtils.getLogger();
 
     /** Per-paste collection cap; refreshed from the server hello handshake. */
     private static volatile int maxBlocks = PROTOCOL_CAP;
+    /**
+     * Bounding-box volume a single sub-region may span while being collected. This is separate from
+     * {@link #maxBlocks}: a large build (e.g. a furnace array) occupies a box whose volume far
+     * exceeds its block count because of the air in between, so the box is allowed as long as it is
+     * not pathologically huge. Refreshed from the server hello handshake.
+     */
+    private static volatile int maxRegionVolume = DEFAULT_MAX_REGION_VOLUME;
 
     public enum Reason {
         NOT_LOADED, NO_PLACEMENT, ALL_DISABLED, NO_CONTAINER, ZERO_BLOCKS, TOO_LARGE, API_ERROR
@@ -51,6 +62,11 @@ public final class LitematicaBridge {
     /** Server-advertised paste limit (clamped to what the transfer protocol can carry). */
     public static void setMaxBlocks(int value) {
         if (value > 0) maxBlocks = Math.min(value, PROTOCOL_CAP);
+    }
+
+    /** Server-advertised per-region bounding-volume guard. */
+    public static void setMaxRegionVolume(int value) {
+        if (value > 0) maxRegionVolume = value;
     }
 
     public static int maxBlocks() {
@@ -143,13 +159,18 @@ public final class LitematicaBridge {
         int h = Math.abs(size.getY());
         int l = Math.abs(size.getZ());
         if (w == 0 || h == 0 || l == 0) return;
-        if ((long) w * h * l > maxBlocks) throw new TooLargeException();
+        // Bounding-box volume guard is independent of the block cap: large builds occupy a box far
+        // bigger than their block count (air in between). Only stop truly pathological boxes that
+        // would freeze the client; the real block cap is enforced while iterating below.
+        if ((long) w * h * l > maxRegionVolume) throw new TooLargeException();
 
         BlockPos end = subPos.offset(relativeEnd(size));
         BlockPos minCorner = minCorner(subPos, end);
         BlockPos boxT = getTransformedBlockPos(subPos, placementMirror, placementRotation);
         Rotation combined = placementRotation.getRotated(subRotation);
         Mirror subMirrorAdj = adjustedSubMirror(subMirror, placementRotation);
+
+        Map<String, Object> tileNbt = indexBlockEntityNbt(schematic, name);
 
         for (int y = 0; y < h; y++) {
             for (int z = 0; z < l; z++) {
@@ -173,10 +194,19 @@ public final class LitematicaBridge {
 
                     String blockData = BlockStateParser.serialize(out);
                     if (blockData == null || blockData.isBlank()) continue;
+                    // Tile-entity lookup uses the RAW container coordinates (x, y, z), the same space
+                    // the schematic's TileEntities are keyed by — NOT the minCorner-shifted `relative`
+                    // (which is only the world-transform basis). For negative signed sizes the two
+                    // differ and the old lookup missed every tile.
+                    String nbtSnbt = readBlockEntityNbt(tileNbt, new BlockPos(x, y, z), worldPos, out);
+                    if (nbtSnbt != null) {
+                        blockData += nbtSnbt;
+                    }
                     try {
                         result.add(new PasteBlock(worldPos.getX(), worldPos.getY(), worldPos.getZ(), blockData));
                     } catch (IllegalArgumentException ignored) {
                     }
+                    if (result.size() > maxBlocks) throw new TooLargeException();
                 }
             }
         }
@@ -192,6 +222,76 @@ public final class LitematicaBridge {
                 size.getX() < 0 ? size.getX() + 1 : size.getX() - 1,
                 size.getY() < 0 ? size.getY() + 1 : size.getY() - 1,
                 size.getZ() < 0 ? size.getZ() + 1 : size.getZ() - 1);
+    }
+
+    /**
+     * Indexes the sub-region's block-entity NBT via Litematica's
+     * {@code LitematicaSchematic.getBlockEntityMapForRegion(String)} (present in released
+     * {@code fi.dy.masa.litematica.schematic.LitematicaSchematic}), keyed by the region's
+     * container-local coordinates — the exact keys Litematica's own {@code placeBlocksToWorld}
+     * uses. Returns an empty map when the installed version exposes no such method; block-entity
+     * NBT is then simply not captured.
+     */
+    private static Map<String, Object> indexBlockEntityNbt(Object schematic, Object regionName) {
+        Map<String, Object> index = new HashMap<>();
+        Object map;
+        try {
+            map = invoke(schematic, "getBlockEntityMapForRegion", new Class<?>[]{String.class}, regionName);
+        } catch (ReflectiveOperationException ignored) {
+            return index;
+        }
+        if (!(map instanceof Map<?, ?> tileMap)) return index;
+        for (Map.Entry<?, ?> entry : tileMap.entrySet()) {
+            Object key = entry.getKey();
+            Object nbt = entry.getValue();
+            if (key == null || nbt == null) continue;
+            Integer tx = intOrNull(invokeQuiet(key, "getX"));
+            Integer ty = intOrNull(invokeQuiet(key, "getY"));
+            Integer tz = intOrNull(invokeQuiet(key, "getZ"));
+            if (tx == null || ty == null || tz == null) continue;
+            index.put(tx + "," + ty + "," + tz, nbt);
+        }
+        return index;
+    }
+
+    /**
+     * Block-entity NBT for the block at {@code relative} (container-local coords, the same value
+     * Litematica computes as its {@code posMutable}), serialized to SNBT, or {@code null} when the
+     * block has none. The server applies the NBT to the correct absolute position itself.
+     * <p>
+     * Lectern fallback: Litematica 26.2 can save a lectern with {@code has_book=true} but without
+     * its {@code Book} content (or no tile at all). When the schematic supplies no {@code Book},
+     * the block's tile data is re-read from the client world at the absolute placement position —
+     * the common build-then-paste-in-place workflow — so a pasted lectern keeps its readable book.
+     */
+    private static String readBlockEntityNbt(Map<String, Object> tileNbt, BlockPos relative, BlockPos worldPos, BlockState out) {
+        boolean lectern = out.getBlock() == Blocks.LECTERN;
+        Object nbt = (tileNbt == null) ? null : tileNbt.get(relative.getX() + "," + relative.getY() + "," + relative.getZ());
+        String snbt = nbt == null ? null : ClientPlatform.instance().nbtToSnbt(nbt);
+        boolean usable = snbt != null && !snbt.isBlank() && !"{}".equals(snbt);
+        // A lectern's schematic NBT counts as usable only when it actually carries a Book;
+        // Litematica 26.2 can save has_book=true with no book content ({components:{}}).
+        if (usable && (!lectern || ClientPlatform.instance().nbtHasKey(nbt, "Book"))) {
+            return snbt;
+        }
+        if (lectern) {
+            String worldSnbt = ClientPlatform.instance().blockEntityNbtAt(worldPos, Blocks.LECTERN);
+            LOGGER.info("[MaxFastBuild] lectern fallback {} usable={} world={}", worldPos, usable, worldSnbt);
+            if (worldSnbt != null && !worldSnbt.isBlank() && !"{}".equals(worldSnbt)) return worldSnbt;
+        }
+        return usable ? snbt : null;
+    }
+
+    private static Object invokeQuiet(Object target, String name) {
+        try {
+            return invoke(target, name);
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+    }
+
+    private static Integer intOrNull(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
     }
 
     private static BlockPos minCorner(BlockPos a, BlockPos b) {

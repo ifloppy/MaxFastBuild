@@ -71,4 +71,19 @@ class PasteTransferTest {
         assertThatThrownBy(() -> PasteTransfer.split("session", ORIGIN, palette, entries(overLimit + 1)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test void gunzipRejectsOversizedOutput() {
+        byte[] raw = "x".repeat(PasteTransfer.MAX_GUNZIP_BYTES + 1).getBytes(StandardCharsets.UTF_8);
+        byte[] zipped = PasteTransfer.gzip(raw);
+        assertThatThrownBy(() -> PasteTransfer.gunzip(zipped))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("gunzip_too_large");
+    }
+
+    @Test void instantPasteEntityCapsAreExposed() {
+        assertThat(PasteTransfer.MAX_INSTANT_ENTITIES).isEqualTo(64);
+        assertThat(PasteTransfer.MAX_INSTANT_ENTITIES_PER_CHUNK).isEqualTo(32);
+        assertThat(PasteTransfer.MAX_NORMAL_ENTITIES).isEqualTo(500);
+        assertThat(PasteTransfer.MAX_NORMAL_ENTITIES_PER_CHUNK).isEqualTo(64);
+    }
 }

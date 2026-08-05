@@ -20,6 +20,8 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `economy.per-operation.enabled` / `.price` | Fixed fee per accepted task | yes |
 | `economy.per-area.enabled` / `.price` | Fee from max bounding plane area | yes |
 | `economy.per-block.enabled` / `.price` | Fee per planned mutation | yes |
+| `instant-paste.multiplier` | Instant paste charge multiplier (default 2; 0 = free aside from materials) | yes |
+| `instant-paste.max-blocks` | Instant paste block cap (default 5000; 0 = protocol cap) | yes |
 | `coreprotect.required` | Reject builds if CoreProtect is missing | yes |
 | `protocol.session-minutes` | Lifetime for optional legacy HMAC sessions | yes |
 | `protocol.max-payload-bytes` | Max decoded legacy payload size | yes |
@@ -52,3 +54,5 @@ Prefer a full server restart after upgrading the jar when possible. Soft-depend 
 - **Per-operation** fee is refunded only if **zero** mutations were applied; once any block applied it is kept.
 - `applied_count` is persisted so restarts do not over-refund.
 - Creative mode does not consume place materials.
+- Container pastes deduct **one plain block item per container** plus **every item inside its NBT contents** (exact match: same type + meta). Container contents are validated for forbidden/undecodable items before any charge; a paste whose NBT cannot be parsed/read is rejected outright rather than placed empty.
+- Instant paste runs the mutations synchronously (no queue wait) at `instant-paste.multiplier` × the normal quote; it still requires materials, tool durability, CoreProtect, and economy unless bypassed. Partial failure refunds proportional fees and returns unused materials like a normal task.

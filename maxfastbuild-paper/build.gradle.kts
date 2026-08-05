@@ -11,6 +11,13 @@ dependencies {
         exclude(group = "org.bukkit", module = "bukkit")
     }
     compileOnly("net.coreprotect:coreprotect:24.0")
+    // Prism logging API (see https://docs.prism-mc.org/api/); softdepend in plugin.yml, no-op at runtime without it.
+    compileOnly("org.prism_mc.prism:prism-paper-api:4.4")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.13.4")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher:1.13.4")
+    testImplementation("org.assertj:assertj-core:3.27.3")
+    testImplementation("org.mockito:mockito-core:5.17.0")
+    testImplementation("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
 }
 
 tasks.jar {

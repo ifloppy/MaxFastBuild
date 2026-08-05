@@ -11,17 +11,28 @@ public final class TaskExecutor {
     private final AuditService audit;
     private final Clock clock;
     private final int saveInterval;
+    /**
+     * When true (default), a mutation whose current world state no longer matches its expected
+     * state is still applied over whatever is there (replace-by-default). When false the old
+     * strict behavior is kept: such mutations are skipped. Both modes continue past failures.
+     */
+    private final boolean replaceMismatched;
     private final Map<UUID, BuildTask> running = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> playerActiveCounts = new ConcurrentHashMap<>();
     private int tickCounter;
 
     public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock, int saveInterval) {
-        this.repository = repository; this.world = world; this.audit = audit; this.clock = clock;
-        this.saveInterval = Math.max(1, saveInterval);
+        this(repository, world, audit, clock, saveInterval, true);
     }
 
     public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock) {
-        this(repository, world, audit, clock, 1);
+        this(repository, world, audit, clock, 1, true);
+    }
+
+    public TaskExecutor(TaskRepository repository, WorldAccess world, AuditService audit, Clock clock, int saveInterval, boolean replaceMismatched) {
+        this.repository = repository; this.world = world; this.audit = audit; this.clock = clock;
+        this.saveInterval = Math.max(1, saveInterval);
+        this.replaceMismatched = replaceMismatched;
     }
 
     public void enqueue(BuildTask task) {
@@ -87,27 +98,50 @@ public final class TaskExecutor {
         int changed = 0, skipped = 0;
         int applied = task.appliedCount();
         int cursor = task.cursor();
-        while (changed + skipped < blocksPerStep && cursor < size) {
-            BlockMutation mutation = mutations.get(cursor);
-            String current = world.stateAt(worldName, mutation.position());
-            if (!current.equals(mutation.expectedState())) {
-                skipped++;
-            } else {
+        Set<Integer> skippedIndices = new HashSet<>();
+        List<BlockPos> changedPositions = new ArrayList<>();
+        // Litematica-style batch physics: place every block in this step with NO_UPDATE, then run
+        // one notification pass over the placed positions so redstone computes against the final
+        // layout of the batch instead of a partially-built circuit.
+        world.beginDeferredPhysics();
+        try {
+            while (changed + skipped < blocksPerStep && cursor < size) {
+                BlockMutation mutation = mutations.get(cursor);
+                if (!replaceMismatched) {
+                    String current = world.stateAt(worldName, mutation.position());
+                    if (!current.equals(mutation.expectedState())) {
+                        skipped++;
+                        skippedIndices.add(cursor);
+                        cursor++;
+                        continue;
+                    }
+                }
                 WorldAccess.ValidationResult validation = world.mayMutate(playerId, worldName, mutation, operation);
-                if (!validation.allowed()) skipped++;
-                else {
+                if (!validation.allowed()) {
+                    skipped++;
+                    skippedIndices.add(cursor);
+                } else {
                     WorldAccess.MutationResult result = world.mutate(playerId, worldName, mutation, operation);
                     if (result.changed()) {
                         changed++;
                         applied++;
+                        changedPositions.add(mutation.position());
                         audit.record(playerId, playerName, worldName, mutation, operation, result.breakAlreadyLogged());
-                    } else skipped++;
+                    } else {
+                        skipped++;
+                        skippedIndices.add(cursor);
+                    }
                 }
+                cursor++;
             }
-            cursor++;
+        } finally {
+            world.endDeferredPhysics();
+        }
+        if (!changedPositions.isEmpty()) {
+            world.settlePlacements(worldName, changedPositions);
         }
         if (cursor != task.cursor()) {
-            task = task.advance(cursor, applied, clock.instant());
+            task = task.advance(cursor, applied, skippedIndices, clock.instant());
         }
         boolean finished = cursor == size;
         if (finished) {

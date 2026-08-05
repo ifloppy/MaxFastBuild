@@ -21,6 +21,7 @@ allprojects {
         maven("https://repo.papermc.io/repository/maven-public/")
         maven("https://jitpack.io")
         maven("https://maven.playpro.com")
+        maven("https://nexus.prism-mc.org/repository/maven-releases/")
     }
 }
 

@@ -23,12 +23,14 @@ public final class SqliteTaskRepository implements TaskRepository {
                       world TEXT NOT NULL, operation TEXT NOT NULL, bounds_json TEXT NOT NULL,
                       mutations_json TEXT NOT NULL, status TEXT NOT NULL, cursor INTEGER NOT NULL,
                       applied_count INTEGER NOT NULL DEFAULT 0,
+                      skipped_json TEXT NOT NULL DEFAULT '[]',
                       escrow_id TEXT, charged TEXT NOT NULL, refunded TEXT NOT NULL,
                       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, failure TEXT
                     )
                     """);
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_tasks_player_status ON build_tasks(player_id,status)");
                 ensureAppliedColumn(connection);
+                ensureSkippedColumn(connection);
             }
             return null;
         });
@@ -46,12 +48,24 @@ public final class SqliteTaskRepository implements TaskRepository {
         }
     }
 
+    private static void ensureSkippedColumn(Connection connection) throws SQLException {
+        boolean hasSkipped = false;
+        try (ResultSet columns = connection.getMetaData().getColumns(null, null, "build_tasks", "skipped_json")) {
+            hasSkipped = columns.next();
+        }
+        if (!hasSkipped) {
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE build_tasks ADD COLUMN skipped_json TEXT NOT NULL DEFAULT '[]'");
+            }
+        }
+    }
+
     @Override public void save(BuildTask task) {
         database.transaction(connection -> {
             try (PreparedStatement s = connection.prepareStatement("""
-                INSERT INTO build_tasks(id,player_id,player_name,world,operation,bounds_json,mutations_json,status,cursor,applied_count,escrow_id,charged,refunded,created_at,updated_at,failure)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(id) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,applied_count=excluded.applied_count,escrow_id=excluded.escrow_id,
+                INSERT INTO build_tasks(id,player_id,player_name,world,operation,bounds_json,mutations_json,status,cursor,applied_count,skipped_json,escrow_id,charged,refunded,created_at,updated_at,failure)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET status=excluded.status,cursor=excluded.cursor,applied_count=excluded.applied_count,skipped_json=excluded.skipped_json,escrow_id=excluded.escrow_id,
                   charged=excluded.charged,refunded=excluded.refunded,updated_at=excluded.updated_at,failure=excluded.failure
                 """)) {
                 int i = 1;
@@ -59,6 +73,7 @@ public final class SqliteTaskRepository implements TaskRepository {
                 s.setString(i++, task.plan().world()); s.setString(i++, task.plan().operation().name());
                 s.setString(i++, GSON.toJson(task.plan().bounds())); s.setString(i++, GSON.toJson(task.plan().mutations()));
                 s.setString(i++, task.status().name()); s.setInt(i++, task.cursor()); s.setInt(i++, task.appliedCount());
+                s.setString(i++, GSON.toJson(task.skipped()));
                 s.setString(i++, task.escrowId());
                 s.setString(i++, task.charged().toPlainString()); s.setString(i++, task.refunded().toPlainString());
                 s.setString(i++, task.createdAt().toString()); s.setString(i++, task.updatedAt().toString()); s.setString(i, task.failure());
@@ -71,10 +86,11 @@ public final class SqliteTaskRepository implements TaskRepository {
     @Override public void saveProgress(BuildTask task) {
         database.transaction(connection -> {
             try (PreparedStatement s = connection.prepareStatement("""
-                UPDATE build_tasks SET status=?,cursor=?,applied_count=?,escrow_id=?,charged=?,refunded=?,updated_at=?,failure=? WHERE id=?
+                UPDATE build_tasks SET status=?,cursor=?,applied_count=?,skipped_json=?,escrow_id=?,charged=?,refunded=?,updated_at=?,failure=? WHERE id=?
                 """)) {
                 int i = 1;
                 s.setString(i++, task.status().name()); s.setInt(i++, task.cursor()); s.setInt(i++, task.appliedCount());
+                s.setString(i++, GSON.toJson(task.skipped()));
                 s.setString(i++, task.escrowId());
                 s.setString(i++, task.charged().toPlainString()); s.setString(i++, task.refunded().toPlainString());
                 s.setString(i++, task.updatedAt().toString()); s.setString(i, task.failure());
@@ -123,9 +139,25 @@ public final class SqliteTaskRepository implements TaskRepository {
         BuildPlan plan = new BuildPlan(r.getString("world"), OperationKind.valueOf(r.getString("operation")), bounds, List.of(mutations));
         int applied = 0;
         try { applied = r.getInt("applied_count"); } catch (SQLException ignored) { applied = 0; }
+        Set<Integer> skipped = readSkipped(r);
         return new BuildTask(UUID.fromString(r.getString("id")), UUID.fromString(r.getString("player_id")), r.getString("player_name"), plan,
-                TaskStatus.valueOf(r.getString("status")), r.getInt("cursor"), applied, r.getString("escrow_id"), new BigDecimal(r.getString("charged")),
+                TaskStatus.valueOf(r.getString("status")), r.getInt("cursor"), applied, skipped, r.getString("escrow_id"), new BigDecimal(r.getString("charged")),
                 new BigDecimal(r.getString("refunded")), Instant.parse(r.getString("created_at")), Instant.parse(r.getString("updated_at")), r.getString("failure"));
+    }
+
+    private static Set<Integer> readSkipped(ResultSet r) throws SQLException {
+        String json;
+        try { json = r.getString("skipped_json"); } catch (SQLException ex) { return Set.of(); }
+        if (json == null || json.isBlank()) return Set.of();
+        try {
+            int[] indices = GSON.fromJson(json, int[].class);
+            if (indices == null) return Set.of();
+            Set<Integer> set = new HashSet<>();
+            for (int index : indices) set.add(index);
+            return set;
+        } catch (RuntimeException ex) {
+            return Set.of();
+        }
     }
 
     @Override public void close() { database.close(); }

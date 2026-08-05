@@ -56,8 +56,9 @@ public final class PasteAccumulator {
         int[] addedBlockCount = {0};
         Session session = sessions.compute(key, (ignored, current) -> {
             if (current == null) {
-                current = new Session(payload.parts(), payload.palette(), payload.origin(), clock.millis());
-            } else if (!current.palette.equals(payload.palette()) || !Arrays.equals(current.origin, payload.origin())) {
+                current = new Session(payload.parts(), payload.palette(), payload.origin(), payload.instant(), clock.millis());
+            } else if (!current.palette.equals(payload.palette()) || !Arrays.equals(current.origin, payload.origin())
+                    || current.instant != payload.instant()) {
                 throw new IllegalArgumentException("paste_part_mismatch");
             }
             if (current.put(payload.part(), payload.blocks())) throw new IllegalArgumentException("duplicate_paste_part");
@@ -68,6 +69,7 @@ public final class PasteAccumulator {
         if (session.blocks.size() < session.parts) return Optional.empty();
 
         sessions.remove(key);
+        totalBlocks.addAndGet(-session.blockCount);
         List<PasteTransfer.Entry> entries = new ArrayList<>();
         for (int part = 0; part < session.parts; part++) {
             List<String> partBlocks = session.blocks.get(part);
@@ -80,7 +82,7 @@ public final class PasteAccumulator {
                 entries.add(entry);
             }
         }
-        return Optional.of(new Assembled(payload.pasteSessionId(), session.origin, session.palette, entries));
+        return Optional.of(new Assembled(payload.pasteSessionId(), session.origin, session.palette, entries, session.instant));
     }
 
     /** Drop all in-flight paste sessions (plugin disable / hot-reload). */
@@ -100,7 +102,7 @@ public final class PasteAccumulator {
         });
     }
 
-    public record Assembled(String pasteSessionId, int[] origin, List<String> palette, List<PasteTransfer.Entry> entries) {
+    public record Assembled(String pasteSessionId, int[] origin, List<String> palette, List<PasteTransfer.Entry> entries, boolean instant) {
         public Assembled {
             Objects.requireNonNull(pasteSessionId);
             Objects.requireNonNull(palette);
@@ -122,14 +124,16 @@ public final class PasteAccumulator {
         private final int parts;
         private final List<String> palette;
         private final int[] origin;
+        private final boolean instant;
         private final long createdAt;
         private final Map<Integer, List<String>> blocks = new HashMap<>();
         private int blockCount;
 
-        private Session(int parts, List<String> palette, int[] origin, long createdAt) {
+        private Session(int parts, List<String> palette, int[] origin, boolean instant, long createdAt) {
             this.parts = parts;
             this.palette = List.copyOf(palette);
             this.origin = origin.clone();
+            this.instant = instant;
             this.createdAt = createdAt;
         }
 

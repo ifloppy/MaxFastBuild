@@ -56,7 +56,8 @@ The Fabric client can stream a Litematica placement as a single bulk build reque
 2. The paste is encoded as a palette (unique block-state strings) plus entries `dx,dy,dz:paletteIndex` (schematic-relative), gzipped, wrapped in the authenticated envelope, and split into `p` transfers via the chunk assembler. Each envelope therefore arrives as `version sessionId sequence <base64(gzip)> mac`.
 3. Server detects gzip magic bytes on the verified payload and reassembles parts per `(player, pasteSessionId)`. Part count is capped at `MAX_PARTS` (64) and block entries per part at `MAX_BLOCKS_PER_PART` (1600).
 4. After each part the server replies a protocol-only `paste_ack` (`type: paste_ack`, data `pasteSessionId`, `part`, `parts`). The client sends one part at a time, waiting for the ack.
-5. When the final part arrives the whole paste is planned as **one build task**: every mutation is validated against world height, protection, tool rules, materials (per unique block type), economy, then enqueued like any other task. NBT block-entity data is stripped — block entities paste empty.
+5. When the final part arrives the whole paste is planned as **one build task**: every mutation is validated against world height, protection, tool rules, materials (per unique block type), economy, then enqueued like any other task. Block-entity NBT is preserved: palette entries may be `state{...}` (SNBT appended to the state), the server splits at the first `{` and applies the NBT to the placed block. Container contents are billed item-for-item (exact match) in addition to the container block item.
+6. Each payload carries an `instant` flag. Instant pastes are capped (`instant-paste.max-blocks`), charged at `instant-paste.multiplier` × the normal quote, and executed synchronously on the server instead of being enqueued. The hello handshake advertises `instantMultiplier` and `instantMaxBlocks`.
 
 The ack is sent over the marked system-message channel only (no chat line) and is consumed by the client before rendering.
 
@@ -72,3 +73,4 @@ Common `messageKey` values:
 - `maxfastbuild.error.payment_failed` — data: `reason`
 - `maxfastbuild.error.no_permission` — data: `permission`
 - `maxfastbuild.error.shape_too_large` — data: `limit`
+- `maxfastbuild.error.nbt_unavailable` — data: `{}` (block-entity NBT present but the NMS API could not parse/apply it)

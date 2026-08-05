@@ -20,11 +20,14 @@ public final class MaxFastBuildClient implements ClientModInitializer {
     public static KeyMapping radialKey;
     /** Paste the active Litematica placement (default unbound; requires Litematica + server support). */
     public static KeyMapping pasteKey;
+    /** Toggle instant paste mode (paid synchronous server execution). */
+    public static KeyMapping instantKey;
 
     @Override
     public void onInitializeClient() {
         radialKey = ClientPlatform.instance().createRadialKey();
         pasteKey = ClientPlatform.instance().createPasteKey();
+        instantKey = ClientPlatform.instance().createInstantKey();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             // Hold-to-open: use physical key (Screen opens → KeyMapping.releaseAll clears isDown).
@@ -120,11 +123,11 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.error.protected".equals(key) && args.length >= 1) {
             return "MaxFastBuild: protected " + args[0];
         }
-        if ("maxfastbuild.task.partial".equals(key) && args.length >= 3) {
-            return "MaxFastBuild: partial " + args[0] + "/" + args[1] + ", refund " + args[2];
+        if ("maxfastbuild.task.partial".equals(key) && args.length >= 4) {
+            return "MaxFastBuild: partial " + args[0] + "/" + args[1] + ", cost " + args[2] + ", refund " + args[3];
         }
-        if ("maxfastbuild.task.completed".equals(key) && args.length >= 3) {
-            return "MaxFastBuild: complete " + args[0] + "/" + args[1] + ", refund " + args[2];
+        if ("maxfastbuild.task.completed".equals(key) && args.length >= 4) {
+            return "MaxFastBuild: complete " + args[0] + "/" + args[1] + ", cost " + args[2] + ", refund " + args[3];
         }
         if ("maxfastbuild.task.accepted".equals(key) && args.length >= 2) {
             return "MaxFastBuild: accepted " + args[0] + " blocks, cost " + args[1];
@@ -146,7 +149,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             case "maxfastbuild.task.accepted" ->
                     new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
             case "maxfastbuild.task.completed", "maxfastbuild.task.partial" ->
-                    new Object[]{jsonString(data, "applied"), jsonString(data, "planned"), jsonString(data, "refund")};
+                    new Object[]{jsonString(data, "applied"), jsonString(data, "planned"),
+                            jsonString(data, "cost"), jsonString(data, "refund")};
             case "maxfastbuild.error.insufficient_materials" ->
                     new Object[]{jsonString(data, "need"), jsonString(data, "have"), jsonString(data, "material")};
             case "maxfastbuild.error.unbreakable_block" ->

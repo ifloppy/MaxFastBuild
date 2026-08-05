@@ -5,6 +5,7 @@ import dev.maxfastbuild.core.protocol.CommandChunkAssembler;
 import dev.maxfastbuild.core.protocol.PasteTransfer;
 import dev.maxfastbuild.core.protocol.ProtocolEnvelope;
 import dev.maxfastbuild.fabric.client.platform.ClientPlatform;
+import dev.maxfastbuild.fabric.client.platform.HudCanvas;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
 
@@ -28,6 +29,8 @@ import java.util.UUID;
  * session → send the palette + block list as gzipped envelope parts over {@code /__mfb p}
  * transfers, one part at a time, waiting for the server's {@code paste_ack} before the next.
  * The server validates every mutation, deducts materials, charges, and enqueues a single task.
+ * Block-entity NBT is preserved in the palette; the instant-paste toggle switches to the paid
+ * synchronous server path.
  */
 final class PasteController {
     private static final long HELLO_TIMEOUT_MS = 6_000;
@@ -37,6 +40,23 @@ final class PasteController {
 
     private static State state = State.IDLE;
     private static boolean prevKeyDown;
+    private static boolean prevInstantKeyDown;
+    /** Instant-paste mode: paid synchronous server execution (Litematica creative-style placement). */
+    private static boolean instant;
+    /** Client-side paste filters selected in the settings screen; applied before sending. */
+    private static PasteSettings settings = PasteSettings.DEFAULT;
+
+    static PasteSettings settings() {
+        return settings;
+    }
+
+    static boolean instant() {
+        return instant;
+    }
+    /** Server-advertised instant-paste price multiplier, formatted for the toggle message. */
+    private static String instantMultiplier = "2";
+    /** Server-advertised instant-paste block cap (clamped to the transfer protocol cap). */
+    private static int instantMaxBlocks = PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART;
     private static final CommandChunkAssembler CHUNKS = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     private static List<PasteTransfer.Payload> parts;
     private static String pasteSessionId;
@@ -49,7 +69,7 @@ final class PasteController {
 
     private PasteController() {}
 
-    /** Called from the client tick; also tracks the paste key press edge. */
+    /** Called from the client tick; also tracks the paste/instant key press edges. */
     static void tick(Minecraft client) {
         boolean down = client.player != null
                 && !ClientPlatform.instance().isScreenOpen(client)
@@ -58,11 +78,29 @@ final class PasteController {
             startPaste();
         }
         prevKeyDown = down;
+        boolean instantDown = client.player != null
+                && !ClientPlatform.instance().isScreenOpen(client)
+                && MaxFastBuildClient.isKeyPhysicallyDown(MaxFastBuildClient.instantKey);
+        if (instantDown && !prevInstantKeyDown) {
+            toggleInstant();
+        }
+        prevInstantKeyDown = instantDown;
         if (state == State.PENDING_HELLO && now() - pendingSince > HELLO_TIMEOUT_MS) {
             abort("maxfastbuild.paste.hello_timeout");
         } else if (state == State.SENDING && waitingAck && now() - pendingSince > ACK_TIMEOUT_MS) {
             abort("maxfastbuild.paste.ack_timeout");
         }
+    }
+
+    /**
+     * HUD indicator shown only while an instant paste is actively streaming to the server, so it
+     * never persists on screen; the redstone warning lives in the paste-settings screen and the
+     * toggle notification instead.
+     */
+    static void renderHud(HudCanvas canvas) {
+        if (state != State.SENDING || !instant || clientPlayer() == null) return;
+        Component text = Component.translatable("maxfastbuild.paste.instant_hud");
+        canvas.centeredText(Minecraft.getInstance().font, text, canvas.guiWidth() / 2, canvas.guiHeight() - 64, 0xFFFFC44D);
     }
 
     static void onHello(JsonObject object) {
@@ -84,10 +122,40 @@ final class PasteController {
             } catch (IllegalStateException | NumberFormatException ignored) {
             }
         }
+        if (object.has("maxRegionVolume")) {
+            try {
+                LitematicaBridge.setMaxRegionVolume(object.get("maxRegionVolume").getAsInt());
+            } catch (IllegalStateException | NumberFormatException ignored) {
+            }
+        }
+        if (object.has("instantMultiplier")) {
+            try {
+                instantMultiplier = object.get("instantMultiplier").getAsBigDecimal().stripTrailingZeros().toPlainString();
+            } catch (RuntimeException ignored) {
+            }
+        }
+        if (object.has("instantMaxBlocks")) {
+            try {
+                int value = object.get("instantMaxBlocks").getAsInt();
+                if (value > 0) instantMaxBlocks = Math.min(value, PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART);
+            } catch (IllegalStateException | NumberFormatException ignored) {
+            }
+        }
         List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
         if (blocks == null || blocks.isEmpty()) {
             notify(Component.translatable(reasonKey(LitematicaBridge.lastReason())));
             resetSession();
+            return;
+        }
+        blocks = applySkip(blocks, settings);
+        if (blocks.isEmpty()) {
+            resetSession();
+            notify(Component.translatable("maxfastbuild.paste.no_blocks_after_filters"));
+            return;
+        }
+        if (instant && blocks.size() > instantMaxBlocks) {
+            resetSession();
+            notify(Component.translatable("maxfastbuild.paste.instant_too_large", instantMaxBlocks));
             return;
         }
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
@@ -100,7 +168,7 @@ final class PasteController {
         List<String> palette = new ArrayList<>();
         List<PasteTransfer.Entry> entries = new ArrayList<>(blocks.size());
         for (PasteBlock block : blocks) {
-            String clean = stripNbt(block.blockData());
+            String clean = block.blockData();
             int index = paletteIndex.computeIfAbsent(clean, ignored -> {
                 palette.add(clean);
                 return palette.size() - 1;
@@ -109,7 +177,7 @@ final class PasteController {
         }
         pasteSessionId = UUID.randomUUID().toString();
         try {
-            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries);
+            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, instant);
         } catch (IllegalArgumentException ex) {
             resetSession();
             notify(Component.translatable("maxfastbuild.paste.too_large"));
@@ -119,7 +187,7 @@ final class PasteController {
         waitingAck = false;
         sequence = 0;
         state = State.SENDING;
-        notify(Component.translatable("maxfastbuild.paste.starting", blocks.size()));
+        notify(Component.translatable(instant ? "maxfastbuild.paste.starting_instant" : "maxfastbuild.paste.starting", blocks.size()));
         sendPart();
     }
 
@@ -151,9 +219,62 @@ final class PasteController {
             notify(Component.translatable("maxfastbuild.paste.in_progress"));
             return;
         }
+        // Open the settings screen only when a paste is actually available, so the popup is
+        // never shown for an empty/disabled placement.
+        List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
+        if (blocks == null || blocks.isEmpty()) {
+            notify(Component.translatable(reasonKey(LitematicaBridge.lastReason())));
+            return;
+        }
+        ClientPlatform.instance().openPasteSettings();
+    }
+
+    /** Called by the settings screen when the player confirms. */
+    static void confirmStart(PasteSettings newSettings, boolean newInstant) {
+        if (state != State.IDLE) {
+            notify(Component.translatable("maxfastbuild.paste.in_progress"));
+            return;
+        }
+        settings = newSettings;
+        instant = newInstant;
         state = State.PENDING_HELLO;
         pendingSince = now();
         send("__mfb hello");
+    }
+
+    /**
+     * Apply the settings screen filters to a collected placement. Fluids are dropped, block-entity
+     * NBT is stripped from the palette (server then places a plain block), and entities are dropped
+     * once entity paste is collected.
+     */
+    private static List<PasteBlock> applySkip(List<PasteBlock> blocks, PasteSettings skip) {
+        if (!skip.skipFluids() && !skip.skipEntities() && !skip.skipNbt()) return blocks;
+        List<PasteBlock> out = new ArrayList<>(blocks.size());
+        for (PasteBlock block : blocks) {
+            if (skip.skipFluids() && isFluidBlock(block.blockData())) continue;
+            if (skip.skipEntities() && isEntityBlock(block.blockData())) continue;
+            String data = block.blockData();
+            if (skip.skipNbt()) {
+                int brace = data.indexOf('{');
+                if (brace >= 0) data = data.substring(0, brace);
+            }
+            out.add(new PasteBlock(block.x(), block.y(), block.z(), data));
+        }
+        return out;
+    }
+
+    private static boolean isFluidBlock(String blockData) {
+        if (blockData == null) return false;
+        int brace = blockData.indexOf('{');
+        String state = brace >= 0 ? blockData.substring(0, brace) : blockData;
+        int bracket = state.indexOf('[');
+        String base = bracket >= 0 ? state.substring(0, bracket) : state;
+        return "minecraft:water".equals(base) || "minecraft:lava".equals(base);
+    }
+
+    private static boolean isEntityBlock(String blockData) {
+        // Entity paste is collected separately (not as PasteBlock); reserved for that feature.
+        return false;
     }
 
     private static void sendPart() {
@@ -200,10 +321,14 @@ final class PasteController {
         secret = null;
     }
 
-    /** Drop any block-entity NBT ({@code {...}}) so the server can parse the state. */
-    private static String stripNbt(String blockData) {
-        int brace = blockData.indexOf('{');
-        return brace >= 0 ? blockData.substring(0, brace) : blockData;
+    private static void toggleInstant() {
+        instant = !instant;
+        notify(Component.translatable(instant ? "maxfastbuild.paste.instant_on" : "maxfastbuild.paste.instant_off", instantMultiplier));
+    }
+
+    private static Minecraft clientPlayer() {
+        Minecraft client = Minecraft.getInstance();
+        return client.player != null ? client : null;
     }
 
     private static String reasonKey(LitematicaBridge.Reason reason) {
