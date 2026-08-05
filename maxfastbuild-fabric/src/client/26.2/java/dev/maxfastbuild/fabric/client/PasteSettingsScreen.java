@@ -14,6 +14,9 @@ public final class PasteSettingsScreen extends Screen {
     private static final Component[] LABELS = {
             Component.translatable("maxfastbuild.paste.option.skip_fluids"),
             Component.translatable("maxfastbuild.paste.option.skip_entities"),
+            Component.translatable("maxfastbuild.paste.option.skip_mobs"),
+            Component.translatable("maxfastbuild.paste.option.skip_drops"),
+            Component.translatable("maxfastbuild.paste.option.skip_contents"),
             Component.translatable("maxfastbuild.paste.option.skip_nbt"),
             Component.translatable("maxfastbuild.paste.option.instant"),
     };
@@ -26,8 +29,11 @@ public final class PasteSettingsScreen extends Screen {
         PasteSettings current = PasteController.settings();
         checked[0] = current.skipFluids();
         checked[1] = current.skipEntities();
-        checked[2] = current.skipNbt();
-        checked[3] = PasteController.instant();
+        checked[2] = current.skipMobs();
+        checked[3] = current.skipDrops();
+        checked[4] = current.skipContents();
+        checked[5] = current.skipNbt();
+        checked[6] = PasteController.instant();
     }
 
     @Override
@@ -90,7 +96,7 @@ public final class PasteSettingsScreen extends Screen {
     }
 
     private void confirm() {
-        PasteController.confirmStart(new PasteSettings(checked[0], checked[1], checked[2]), checked[3]);
+        PasteController.confirmStart(new PasteSettings(checked[0], checked[1], checked[2], checked[3], checked[4], checked[5]), checked[6]);
         onClose();
     }
 }

@@ -37,6 +37,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
     private final Map<UUID, PendingPaste> pendingPastes = new ConcurrentHashMap<>();
+    private final Map<UUID, List<PendingEntity>> taskEntities = new ConcurrentHashMap<>();
+    private final Map<UUID, PaperInventoryHelper.RemovalLedger> taskRemovals = new ConcurrentHashMap<>();
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     /** Reassembles multi-part Litematica paste payloads (session per player+id, 120s window). */
@@ -705,8 +707,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             long have = PaperInventoryHelper.count(player, itemKey, searchShulkers, fluidBucketRequirement());
             if (have < need) {
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                        Map.of("need", need, "have", have, "material", itemKey));
+                sendMaterialError(player, itemKey, need, have, true, fluidBucketRequirement());
                 return;
             }
         }
@@ -742,8 +743,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (removed < need) {
                 if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                        Map.of("need", need, "have", removed, "material", itemKey));
+                sendMaterialError(player, itemKey, need, removed, true, fluidBucketRequirement());
                 return;
             }
             tookItems = true;
@@ -1138,8 +1138,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (removed < need) {
                 if (removed > 0) PaperInventoryHelper.giveOrDrop(player, itemKey, removed);
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                        Map.of("need", need, "have", removed, "material", itemKey));
+                sendMaterialError(player, itemKey, need, removed, true, fluidBucketRequirement());
                 return;
             }
             tookItems = true;
@@ -1257,9 +1256,24 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", "paste_in_progress"));
             return;
         }
-        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, instant, positions));
+        // Validate pasted entities (minecarts/boats/armor stands/mobs). Invalid entities are skipped
+        // individually, never allowed to abort the whole paste.
+        List<PendingEntity> entities = new ArrayList<>();
+        if (assembled.entities() != null) {
+            Object registry = PaperNbtHelper.registryAccess(player.getWorld());
+            for (PasteTransfer.EntityEntry entity : assembled.entities()) {
+                try {
+                    PaperEntityHelper.EntityData data = PaperEntityHelper.validate(entity.type(), entity.nbt(), registry);
+                    entities.add(new PendingEntity(data, entity.x(), entity.y(), entity.z()));
+                } catch (PaperEntityHelper.EntityRejectException ex) {
+                    debugLog("paste entity rejected player=" + player.getName()
+                            + " type=" + entity.type() + " reason=" + ex.reason);
+                }
+            }
+        }
+        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, instant, positions, entities));
         debugLog("paste assembled player=" + player.getName()
-                + " blocks=" + positions.size() + " instant=" + instant);
+                + " blocks=" + positions.size() + " entities=" + entities.size() + " instant=" + instant);
     }
 
     private void tickPastePlanners() {
@@ -1317,6 +1331,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             BlockMutation mutation = new BlockMutation(pos, before, pp.targetState(), pp.targetNbt());
             WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
             if (!validation.allowed()) {
+                debugLog("paste planning skipped player=" + player.getName()
+                        + " pos=" + pos + " target=" + pp.targetState()
+                        + " before=" + before + " reason=" + validation.reason());
                 pending.planningSkipped++;
                 continue;
             }
@@ -1370,11 +1387,22 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 && !player.hasPermission("maxfastbuild.material.shulker")) {
             searchShulkers = false;
         }
+        PaperInventoryHelper.SearchOptions search = new PaperInventoryHelper.SearchOptions(
+                searchShulkers,
+                getConfig().getBoolean("inventory.search-containers", true),
+                getConfig().getInt("inventory.container-search-radius", 5),
+                fluidBucketRequirement(),
+                getConfig().getBoolean("inventory.fire-requires-flint-and-steel", true));
+        List<PaperInventoryHelper.ItemSource> sources = search.sources(player);
+        PaperInventoryHelper.RemovalLedger removals = new PaperInventoryHelper.RemovalLedger();
+        pending.removals = removals;
 
-        // A paste uses many block types plus (for containers) every item inside their NBT.
+        // A paste uses many block types plus (for containers) every item inside their NBT,
+        // and (for entities) the minecart/boat/armor-stand item plus its container contents.
         PasteMaterials needs;
         try {
             needs = collectPasteMaterials(player.getWorld(), mutations);
+            addEntityMaterials(needs, pending.entities);
         } catch (PasteRejectException reject) {
             debugLog("paste rejected player=" + player.getName() + " reason=" + reject.key);
             sendProtocol(player, "error", reject.key, reject.data);
@@ -1383,14 +1411,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (requireMaterials) {
             for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 Material resolved = PaperInventoryHelper.resolveMaterial(entry.getKey());
-                if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
+                // needs.blocks mixes block items and entity billable items (minecarts, boats, armor
+                // stands are items but not blocks), so forbid only genuinely banned materials, not
+                // non-block items.
+                if (resolved == null || RestrictedMaterials.isForbiddenItem(resolved)) {
                     sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", entry.getKey()));
                     return;
                 }
-                long have = PaperInventoryHelper.count(player, entry.getKey(), searchShulkers, fluidBucketRequirement());
+                long have = PaperInventoryHelper.count(sources, entry.getKey(),
+                        search.requiredBuckets, search.fireRequiresFlint);
                 if (have < entry.getValue()) {
-                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                            Map.of("need", entry.getValue(), "have", have, "material", entry.getKey()));
+                    debugLog("paste materials insufficient player=" + player.getName()
+                            + " material=" + entry.getKey() + " need=" + entry.getValue() + " have=" + have);
+                    sendMaterialError(player, entry.getKey(), entry.getValue(), have,
+                            search.fireRequiresFlint, search.requiredBuckets);
                     return;
                 }
             }
@@ -1400,7 +1434,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                             Map.of("material", entry.getKey().getType().getKey().toString()));
                     return;
                 }
-                long have = PaperInventoryHelper.countExact(player, entry.getKey(), searchShulkers);
+                long have = PaperInventoryHelper.countExact(sources, entry.getKey());
                 if (have < entry.getValue()) {
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                             Map.of("need", entry.getValue(), "have", have, "material", entry.getKey().getType().getKey().toString()));
@@ -1427,42 +1461,37 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             tookMoney = true;
         }
-        Map<String, Long> takenByMaterial = new LinkedHashMap<>();
-        Map<org.bukkit.inventory.ItemStack, Long> takenByContents = new LinkedHashMap<>();
         if (requireMaterials) {
             for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
-                long removed = PaperInventoryHelper.take(player, entry.getKey(), entry.getValue(), searchShulkers, fluidBucketRequirement());
+                long removed = PaperInventoryHelper.take(sources, entry.getKey(), entry.getValue(),
+                        search.requiredBuckets, search.fireRequiresFlint, removals);
                 if (removed < entry.getValue()) {
-                    for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
-                        PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
-                    }
-                    for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
-                        PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
-                    }
+                    removals.restoreAll();
                     if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                            Map.of("need", entry.getValue(), "have", removed, "material", entry.getKey()));
+                    sendMaterialError(player, entry.getKey(), entry.getValue(), removed,
+                            search.fireRequiresFlint, search.requiredBuckets);
                     return;
                 }
-                takenByMaterial.put(entry.getKey(), removed);
             }
             for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
-                long removed = PaperInventoryHelper.takeExact(player, entry.getKey(), entry.getValue(), searchShulkers);
+                long removed = PaperInventoryHelper.takeExact(sources, entry.getKey(), entry.getValue(), removals);
                 if (removed < entry.getValue()) {
-                    for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
-                        PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
-                    }
-                    for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
-                        PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
-                    }
+                    removals.restoreAll();
                     if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
                     sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                             Map.of("need", entry.getValue(), "have", removed, "material", entry.getKey().getType().getKey().toString()));
                     return;
                 }
-                takenByContents.put(entry.getKey(), removed);
             }
             tookItems = true;
+        }
+
+        // Notify the player when some blocks were skipped during planning (protected, unbreakable
+        // occupant, unsupported NBT, etc.) so they know the paste is incomplete.
+        if (pending.planningSkipped > 0) {
+            debugLog("paste planning skipped total player=" + player.getName() + " count=" + pending.planningSkipped);
+            sendProtocol(player, "warning", "maxfastbuild.paste.blocks_skipped",
+                    Map.of("skipped", pending.planningSkipped, "planned", mutations.size()));
         }
 
         // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
@@ -1477,21 +1506,39 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         try {
             executor.enqueue(task);
         } catch (RuntimeException ex) {
-            if (tookItems) {
-                for (Map.Entry<String, Long> taken : takenByMaterial.entrySet()) {
-                    PaperInventoryHelper.giveOrDrop(player, taken.getKey(), taken.getValue());
-                }
-                for (Map.Entry<org.bukkit.inventory.ItemStack, Long> taken : takenByContents.entrySet()) {
-                    PaperInventoryHelper.giveExact(player, taken.getKey(), taken.getValue());
-                }
-            }
+            if (tookItems) removals.restoreAll();
             compensate(player, taskId, tookMoney ? charge.total() : BigDecimal.ZERO, transactionId, ex);
             return;
+        }
+        // Queued paste entities spawn when the block task completes (spawn/refund handled in settlePartial).
+        if (!pending.entities.isEmpty()) {
+            taskEntities.put(taskId, pending.entities);
+        }
+        if (tookItems) {
+            taskRemovals.put(taskId, removals);
         }
         sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
                 "taskId", taskId.toString(),
                 "blocks", mutations.size(),
+                "entities", pending.entities.size(),
                 "charge", charge.total().toPlainString()));
+    }
+
+    /** Pick the clearest message for a failed material check: fluids tell the player to bring buckets,
+     *  fire tells them to bring a flint and steel, everything else uses the generic insufficient list. */
+    private void sendMaterialError(Player player, String materialKey, long need, long have,
+                                   boolean fireRequiresFlint, int requiredBuckets) {
+        Material resolved = PaperInventoryHelper.resolveMaterial(materialKey);
+        if (resolved != null && PaperInventoryHelper.isFluid(resolved)) {
+            sendProtocol(player, "error", "maxfastbuild.error.requires_buckets",
+                    Map.of("material", materialKey, "buckets", requiredBuckets));
+        } else if (fireRequiresFlint && resolved != null && PaperInventoryHelper.isFire(resolved)) {
+            sendProtocol(player, "error", "maxfastbuild.error.requires_flint_and_steel",
+                    Map.of("material", materialKey));
+        } else {
+            sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                    Map.of("need", need, "have", have, "material", materialKey));
+        }
     }
 
     private void refundMoney(Player player, UUID taskId, BigDecimal amount, String transactionId) {
@@ -1583,7 +1630,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             // mutations may not be the ones that applied.
             Set<Integer> unapplied = new HashSet<>(task.skipped());
             for (int i = task.cursor(); i < task.plan().mutations().size(); i++) unapplied.add(i);
-            returnUnusedMaterials(player, task.plan(), unapplied);
+            returnUnusedMaterials(player, task.plan(), unapplied, taskRemovals.remove(task.id()));
         }
 
         // Cross-tick redstone convergence for a completed place task: the last batch's settle
@@ -1596,6 +1643,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 if (!skipped.contains(i)) appliedPositions.add(all.get(i).position());
             }
             scheduleRedstoneTail(task.plan().world(), appliedPositions);
+        }
+
+        // Queued paste entities: spawn once the block task completed; refund their materials if the
+        // task was cancelled/aborted before finishing.
+        List<PendingEntity> entities = taskEntities.remove(task.id());
+        if (entities != null && !entities.isEmpty()) {
+            if (task.status() == TaskStatus.COMPLETED && task.plan().operation() == OperationKind.PLACE) {
+                spawnEntities(player, task.plan().world(), entities, taskRemovals.remove(task.id()));
+            } else {
+                returnEntityMaterials(player, entities, taskRemovals.remove(task.id()));
+            }
         }
 
         if (player != null) {
@@ -1795,7 +1853,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         Map<org.bukkit.inventory.ItemStack, Long> contents = new LinkedHashMap<>();
         Object registry = world == null ? null : PaperNbtHelper.registryAccess(world);
         for (BlockMutation mutation : mutations) {
-            blocks.merge(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1L, Long::sum);
+            String blockKey = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
+            Material blockMaterial = PaperInventoryHelper.resolveMaterial(blockKey);
+            // Derived/transient blocks without an inventory item (piston heads, stems, frosted ice)
+            // are placed free; fluids and fire are billed as tokens below.
+            if (blockMaterial != null && PaperInventoryHelper.isFreeBlock(blockMaterial)) {
+                if (mutation.targetNbt() != null) {
+                    throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
+                }
+                continue;
+            }
+            blocks.merge(blockKey, 1L, Long::sum);
             if (mutation.targetNbt() == null) continue;
             if (registry == null) throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
             Material tileMaterial;
@@ -1825,6 +1893,21 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private record PasteMaterials(Map<String, Long> blocks, Map<org.bukkit.inventory.ItemStack, Long> contents) {}
+
+    /** Add the items a paste's entities consume: the entity item (minecart/boat/armor stand/…) plus any container contents. */
+    private static void addEntityMaterials(PasteMaterials needs, List<PendingEntity> entities) {
+        if (entities == null || entities.isEmpty()) return;
+        for (PendingEntity pe : entities) {
+            if (pe.data().billableItem() == null) continue;
+            needs.blocks.merge(pe.data().billableItem().getKey().toString(), 1L, Long::sum);
+            for (PaperNbtHelper.ItemInstance item : pe.data().contents()) {
+                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
+                org.bukkit.inventory.ItemStack template = item.bukkit().clone();
+                template.setAmount(1);
+                needs.contents.merge(template, item.count(), Long::sum);
+            }
+        }
+    }
 
     /** Validation error carrying a protocol message key + data (aborts the whole paste). */
     private static final class PasteRejectException extends RuntimeException {
@@ -1863,7 +1946,118 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     /** Return materials (block items + exact container contents) for mutations never applied. */
-    private void returnUnusedMaterials(Player player, BuildPlan plan, Set<Integer> unappliedIndices) {
+    /**
+     * Spawn the paste's entities after its blocks are placed. Item/vehicle entities are spawned and
+     * their (already-taken) materials consumed; living mobs are spawned only in creative or with
+     * {@code maxfastbuild.bypass.entities}, otherwise skipped. Entities that fail to spawn have their
+     * materials returned.
+     */
+    private void spawnEntities(Player player, String world, List<PendingEntity> entities,
+                               PaperInventoryHelper.RemovalLedger removals) {
+        if (entities == null || entities.isEmpty()) return;
+        World bukkitWorld = Bukkit.getWorld(world);
+        if (bukkitWorld == null) return;
+        boolean allowMobs = player != null
+                && (player.getGameMode() == GameMode.CREATIVE || player.hasPermission("maxfastbuild.bypass.entities"));
+        int spawned = 0, skippedMobs = 0, cancelled = 0;
+        List<PendingEntity> notSpawned = new ArrayList<>();
+        for (PendingEntity pe : entities) {
+            if (pe.data().mob() && !allowMobs) {
+                skippedMobs++;
+                notSpawned.add(pe);
+                continue;
+            }
+            PaperEntityHelper.SpawnResult result = PaperEntityHelper.spawn(bukkitWorld, pe.data(), pe.x(), pe.y(), pe.z());
+            if (result.added() && fireEntitySpawnEvent(player, result.entity(), pe.data())) {
+                spawned++;
+            } else {
+                // A cancelled event (protection plugin) removes the entity so it does not linger
+                // while its materials are refunded.
+                if (result.added() && result.entity() != null) {
+                    result.entity().remove();
+                    cancelled++;
+                }
+                notSpawned.add(pe);
+            }
+        }
+        if (!notSpawned.isEmpty()) {
+            returnEntityMaterials(player, notSpawned, removals);
+        }
+        debugLog("entities spawned=" + spawned + " skippedMobs=" + skippedMobs
+                + " notSpawned=" + notSpawned.size() + " cancelled=" + cancelled);
+    }
+
+    /**
+     * Fire the Bukkit event that audit plugins (CoreProtect/Prism) listen to so a pasted entity is
+     * recorded as the player's action, exactly like placing it by hand. Hanging entities (item     * frames, paintings, leash knots) fire {@code HangingPlaceEvent} — the only placement event     * CoreProtect handles; minecarts/boats/armor stands fire {@code EntityPlaceEvent} (Prism     * {@code entity-place}; CoreProtect does not track those even for vanilla players); everything     * else fires {@code EntitySpawnEvent}. A cancellation removes the entity. Returns false when an     * event was fired and cancelled; true when it should count as spawned.     */
+    private static boolean fireEntitySpawnEvent(Player player, org.bukkit.entity.Entity entity,
+                                                PaperEntityHelper.EntityData data) {
+        if (player == null || entity == null) return true;
+        org.bukkit.block.Block block = entity.getWorld().getBlockAt(entity.getLocation());
+        if (entity instanceof org.bukkit.entity.Hanging hanging) {
+            org.bukkit.event.hanging.HangingPlaceEvent event = new org.bukkit.event.hanging.HangingPlaceEvent(
+                    hanging, player, block, org.bukkit.block.BlockFace.UP, org.bukkit.inventory.EquipmentSlot.HAND);
+            Bukkit.getPluginManager().callEvent(event);
+            return !event.isCancelled();
+        }
+if (data.billableItem() != null) {
+            org.bukkit.event.entity.EntityPlaceEvent event = new org.bukkit.event.entity.EntityPlaceEvent(
+                    entity, player, block, org.bukkit.block.BlockFace.UP);
+            Bukkit.getPluginManager().callEvent(event);
+            if (event.isCancelled()) return false;
+            // CoreProtect's EntityPlaceListener only logs Boat/Minecart; HangingPlaceListener
+            // logs ItemFrame/Painting as block-place. Directly queue CO spawn logs for placed
+            // entities that CO's listeners skip (armor stands, leash knots, …).
+            if (!(entity instanceof org.bukkit.entity.Boat || entity instanceof org.bukkit.entity.Minecart)) {
+                reflectCoEntitySpawnLog(player.getName(), entity.getUniqueId(), entity.getType(), entity.getLocation());
+            }
+            return true;
+        }
+        org.bukkit.event.entity.EntitySpawnEvent event = new org.bukkit.event.entity.EntitySpawnEvent(entity);
+        Bukkit.getPluginManager().callEvent(event);
+        return !event.isCancelled();
+    }
+
+    /**
+     * Directly enqueue an entity spawn log to CoreProtect via reflection, bypassing event-based
+     * listeners that only cover a subset of entity types ({@code EntityPlaceListener} only handles
+     * Boat/Minecart; {@code HangingPlaceListener} only handles ItemFrame/Painting). This ensures
+     * armor stands, leash knots, and other entities pasted via MaxFastBuild appear in CO lookups.     * No-op when CoreProtect is absent or the API method is missing.
+     */
+    private static void reflectCoEntitySpawnLog(String user, java.util.UUID uuid,
+                                                org.bukkit.entity.EntityType type, org.bukkit.Location location) {
+        try {
+            Class<?> queueClass = Class.forName("net.coreprotect.consumer.Queue");
+            java.lang.reflect.Method method = queueClass.getMethod(
+                    "queueEntitySpawnLog", String.class, java.util.UUID.class,
+                    org.bukkit.entity.EntityType.class, org.bukkit.Location.class);
+            method.invoke(null, user, uuid, type, location);
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+        }
+    }
+
+    /** Give back the billable item + container contents for entities that were not spawned. */
+    private void returnEntityMaterials(Player player, List<PendingEntity> entities,
+                                       PaperInventoryHelper.RemovalLedger removals) {
+        if (player == null || entities == null || entities.isEmpty()) return;
+        if (player.getGameMode() == GameMode.CREATIVE) return;
+        for (PendingEntity pe : entities) {
+            if (pe.data().billableItem() == null) continue;
+            String key = pe.data().billableItem().getKey().toString();
+            if (removals != null) removals.refundOrGive(player, key, 1);
+            else PaperInventoryHelper.giveOrDrop(player, key, 1);
+            for (PaperNbtHelper.ItemInstance item : pe.data().contents()) {
+                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
+                org.bukkit.inventory.ItemStack template = item.bukkit().clone();
+                template.setAmount(1);
+                if (removals != null) removals.refundOrGiveExact(player, template, item.count());
+                else PaperInventoryHelper.giveExact(player, item.bukkit().clone(), item.count());
+            }
+        }
+    }
+
+    private void returnUnusedMaterials(Player player, BuildPlan plan, Set<Integer> unappliedIndices,
+                                       PaperInventoryHelper.RemovalLedger removals) {
         List<BlockMutation> all = plan.mutations();
         if (all.isEmpty()) return;
         if (player != null && player.getGameMode() == GameMode.CREATIVE) return;
@@ -1874,6 +2068,31 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (unused.isEmpty()) return;
         World world = Bukkit.getWorld(plan.world());
         Object registry = world == null ? null : PaperNbtHelper.registryAccess(world);
+        // With a live removal ledger (no server restart) return items to their exact source slots
+        // (player inventory or nearby container); leftovers fall back to the player.
+        if (removals != null) {
+            for (BlockMutation mutation : unused) {
+                String key = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
+                Material blockMaterial = PaperInventoryHelper.resolveMaterial(key);
+                // Fire blocks consume flint-and-steel durability (recorded under FLINT_AND_STEEL),
+                // so an unapplied fire block refunds one flint use, never a fire item.
+                if (blockMaterial != null && PaperInventoryHelper.isFire(blockMaterial)) {
+                    removals.refundMaterial("minecraft:flint_and_steel", 1);
+                } else if (player != null) {
+                    removals.refundOrGive(player, key, 1);
+                } else {
+                    removals.refundMaterial(key, 1);
+                }
+                for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
+                    if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
+                    org.bukkit.inventory.ItemStack template = item.bukkit().clone();
+                    template.setAmount(1);
+                    if (player != null) removals.refundOrGiveExact(player, template, item.count());
+                    else removals.refundExact(template, item.count());
+                }
+            }
+            return;
+        }
         if (player != null) {
             for (BlockMutation mutation : unused) {
                 PaperInventoryHelper.giveOrDrop(player, PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()), 1);
@@ -1967,6 +2186,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             world.settlePlacements(pending.world, settled);
             scheduleRedstoneTail(pending.world, settled);
         }
+        // Spawn pasted entities (minecarts/boats/armor stands/mobs) after the blocks are placed.
+        if (!pending.entities.isEmpty()) {
+            spawnEntities(player, pending.world, pending.entities, pending.removals);
+        }
         long planned = mutations.size();
         long missed = unapplied.size();
 
@@ -1989,7 +2212,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             ledger.complete(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund, result.successful(), result.message());
         }
         if (missed > 0) {
-            returnUnusedMaterials(player, plan, unapplied);
+            returnUnusedMaterials(player, plan, unapplied, pending.removals);
         }
         debugLog("paste executed player=" + player.getName()
                 + " applied=" + applied + " planned=" + planned + " skipped=" + missed
@@ -2169,6 +2392,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     /** Absolute position and its palette target state (client-supplied, re-validated per tick). */
     private record PastePos(BlockPos position, String targetState, String targetNbt) {}
 
+    /** A validated pasted entity and its absolute spawn position. */
+    private record PendingEntity(PaperEntityHelper.EntityData data, double x, double y, double z) {}
+
     /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
     private static final class PendingPaste {
         final Player player;
@@ -2176,15 +2402,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         final boolean instant;
         final Iterator<PastePos> iterator;
         final List<BlockMutation> mutations = new ArrayList<>();
+        final List<PendingEntity> entities;
+        PaperInventoryHelper.RemovalLedger removals;
         long replaceBreakCount = 0;
         long processed = 0;
         long planningSkipped = 0;
 
-        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions) {
+        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions, List<PendingEntity> entities) {
             this.player = player;
             this.world = world;
             this.instant = instant;
             this.iterator = positions.iterator();
+            this.entities = entities == null ? List.of() : List.copyOf(entities);
         }
     }
 }

@@ -15,6 +15,9 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `rate-limit.requests` / `interval-seconds` / `burst` | Token-bucket request limits | yes |
 | `inventory.search-shulker-boxes` | Count/take place materials from carried shulker boxes | yes |
 | `inventory.require-shulker-permission` | If true, also require `maxfastbuild.material.shulker` | yes |
+| `inventory.search-containers` | Also search nearby containers (chests/trapped chests/barrels/placed shulker boxes + shulker boxes nested inside them) for paste materials | yes |
+| `inventory.container-search-radius` | Horizontal/vertical radius in blocks from the player's feet for the container search (default 5) | yes |
+| `inventory.fire-requires-flint-and-steel` | Fire/soul fire require a flint and steel instead of a fire item (each fire costs 1 durability; Mending flints keep 1 point) | yes |
 | `inventory.fluid-bucket-requirement` | Buckets needed to place unlimited water/lava (default 2, never consumed) | yes |
 | `economy.enabled` | Master switch for Vault charges | yes |
 | `economy.per-operation.enabled` / `.price` | Fixed fee per accepted task | yes |

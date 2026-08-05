@@ -96,6 +96,12 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.error.insufficient_materials".equals(key) && args.length >= 3) {
             return "MaxFastBuild: not enough materials: need " + args[0] + ", have " + args[1] + " (" + args[2] + ")";
         }
+        if ("maxfastbuild.error.requires_flint_and_steel".equals(key) && args.length >= 1) {
+            return "MaxFastBuild: placing fire (" + args[0] + ") requires a flint and steel (1 durability per fire)";
+        }
+        if ("maxfastbuild.error.requires_buckets".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: placing fluid (" + args[0] + ") requires " + args[1] + " matching buckets in your inventory or nearby containers (not consumed)";
+        }
         if ("maxfastbuild.error.invalid_material".equals(key) && args.length >= 1) {
             return "MaxFastBuild: invalid material: " + args[0];
         }
@@ -132,6 +138,9 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.task.accepted".equals(key) && args.length >= 2) {
             return "MaxFastBuild: accepted " + args[0] + " blocks, cost " + args[1];
         }
+        if ("maxfastbuild.paste.blocks_skipped".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: " + args[0] + " blocks were skipped (protected, unbreakable, or unsupported) — " + args[1] + " placed";
+        }
         if (args.length == 0) return "MaxFastBuild: " + key;
         StringBuilder sb = new StringBuilder("MaxFastBuild: ").append(key).append(" [");
         for (int i = 0; i < args.length; i++) {
@@ -148,11 +157,17 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         return switch (key) {
             case "maxfastbuild.task.accepted" ->
                     new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
+            case "maxfastbuild.paste.blocks_skipped" ->
+                    new Object[]{jsonString(data, "skipped"), jsonString(data, "planned")};
             case "maxfastbuild.task.completed", "maxfastbuild.task.partial" ->
                     new Object[]{jsonString(data, "applied"), jsonString(data, "planned"),
                             jsonString(data, "cost"), jsonString(data, "refund")};
             case "maxfastbuild.error.insufficient_materials" ->
                     new Object[]{jsonString(data, "need"), jsonString(data, "have"), jsonString(data, "material")};
+            case "maxfastbuild.error.requires_flint_and_steel" ->
+                    new Object[]{jsonString(data, "material")};
+            case "maxfastbuild.error.requires_buckets" ->
+                    new Object[]{jsonString(data, "material"), jsonString(data, "buckets")};
             case "maxfastbuild.error.unbreakable_block" ->
                     new Object[]{jsonString(data, "position"), jsonString(data, "block")};
             case "maxfastbuild.error.wrong_tool" ->

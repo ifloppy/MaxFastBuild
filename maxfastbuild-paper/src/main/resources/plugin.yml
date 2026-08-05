@@ -35,6 +35,9 @@ permissions:
     default: false
   maxfastbuild.bypass.materials:
     default: false
+  maxfastbuild.bypass.entities:
+    description: Allow pasting living mobs (villagers/animals) in survival mode
+    default: false
   maxfastbuild.bypass.rate-limit:
     default: false
   maxfastbuild.admin:

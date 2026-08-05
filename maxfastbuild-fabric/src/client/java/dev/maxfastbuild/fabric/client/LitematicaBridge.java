@@ -11,6 +11,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 
 import java.lang.reflect.Method;
@@ -56,8 +57,26 @@ public final class LitematicaBridge {
     }
 
     private static Reason lastReason = Reason.NOT_LOADED;
+    /** Entities from the most recent successful {@link #collect()}, empty when none. */
+    private static List<PasteEntity> lastEntities = List.of();
+    /**
+     * When true, the {@code Items} tag is removed from every container block-entity before it is
+     * serialized, so the pasted container is empty and the server never bills its contents. Set by
+     * {@code PasteController.confirmStart} from the {@code skipContents} filter before collection.
+     */
+    private static volatile boolean stripContainerItems;
 
     private LitematicaBridge() {}
+
+    /** Toggle container {@code Items} stripping for the next {@link #collect()}. */
+    public static void setStripContainerItems(boolean value) {
+        stripContainerItems = value;
+    }
+
+    /** Entities collected alongside the most recent {@link #collect()} blocks. */
+    public static List<PasteEntity> lastEntities() {
+        return lastEntities;
+    }
 
     /** Server-advertised paste limit (clamped to what the transfer protocol can carry). */
     public static void setMaxBlocks(int value) {
@@ -93,6 +112,7 @@ public final class LitematicaBridge {
     public static List<PasteBlock> collect() {
         if (!available()) {
             lastReason = Reason.NOT_LOADED;
+            lastEntities = List.of();
             return List.of();
         }
         try {
@@ -106,22 +126,31 @@ public final class LitematicaBridge {
             for (Object placement : collection) {
                 if (!Boolean.TRUE.equals(invoke(placement, "isEnabled"))) continue;
                 sawEnabled = true;
-                List<PasteBlock> blocks = collectPlacement(placement);
-                if (!blocks.isEmpty()) return blocks;
+                List<PasteEntity> entities = new ArrayList<>();
+                List<PasteBlock> blocks = collectPlacement(placement, entities);
+                if (!blocks.isEmpty()) {
+                    lastEntities = entities;
+                    LOGGER.info("[MaxFastBuild] collected blocks=" + blocks.size() + " entities=" + entities.size());
+                    return blocks;
+                }
             }
             if (!sawEnabled) lastReason = Reason.ALL_DISABLED;
+            lastEntities = List.of();
             return List.of();
         } catch (TooLargeException ex) {
             lastReason = Reason.TOO_LARGE;
+            lastEntities = List.of();
             return List.of();
         } catch (ReflectiveOperationException | LinkageError | RuntimeException ex) {
             lastReason = Reason.API_ERROR;
+            lastEntities = List.of();
             LOGGER.warn("[MaxFastBuild] Failed to read the Litematica placement", ex);
             return List.of();
         }
     }
 
-    private static List<PasteBlock> collectPlacement(Object placement) throws ReflectiveOperationException {
+    private static List<PasteBlock> collectPlacement(Object placement, List<PasteEntity> entitiesOut)
+            throws ReflectiveOperationException {
         Object schematic = invoke(placement, "getSchematic");
         Object originObj = invoke(placement, "getOrigin");
         if (schematic == null || originObj == null) return List.of();
@@ -138,7 +167,7 @@ public final class LitematicaBridge {
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             Object container = invoke(schematic, "getSubRegionContainer", new Class<?>[]{String.class}, entry.getKey());
             if (container == null) continue;
-            collectSubRegion(result, schematic, entry.getKey(), entry.getValue(), container, origin,
+            collectSubRegion(result, entitiesOut, schematic, entry.getKey(), entry.getValue(), container, origin,
                     placementMirror, placementRotation);
         }
         if (result.isEmpty()) lastReason = Reason.ZERO_BLOCKS;
@@ -146,9 +175,9 @@ public final class LitematicaBridge {
         return result;
     }
 
-    private static void collectSubRegion(List<PasteBlock> result, Object schematic, Object name, Object subRegion,
-            Object container, BlockPos origin, Mirror placementMirror, Rotation placementRotation)
-            throws ReflectiveOperationException {
+    private static void collectSubRegion(List<PasteBlock> result, List<PasteEntity> entitiesOut, Object schematic,
+            Object name, Object subRegion, Object container, BlockPos origin, Mirror placementMirror,
+            Rotation placementRotation) throws ReflectiveOperationException {
         Mirror subMirror = (Mirror) invoke(subRegion, "getMirror");
         Rotation subRotation = (Rotation) invoke(subRegion, "getRotation");
         BlockPos subPos = (BlockPos) invoke(subRegion, "getPos");
@@ -210,6 +239,87 @@ public final class LitematicaBridge {
                 }
             }
         }
+        collectEntities(entitiesOut, schematic, name, subRegion, origin, placementMirror, placementRotation);
+    }
+
+    /**
+     * Collects the sub-region's entities (minecarts, boats, armor stands, mobs, …) via Litematica's
+     * {@code getEntityListForRegion}, transforms their positions like {@code placeEntitiesToWorld},
+     * strips {@code id}/{@code Pos}/{@code UUID} from the NBT, and appends them as {@link PasteEntity}.
+     * No-op when the installed Litematica exposes no such API.
+     */
+    private static void collectEntities(List<PasteEntity> out, Object schematic, Object name, Object subRegion,
+            BlockPos origin, Mirror placementMirror, Rotation placementRotation) {
+        Object list;
+        try {
+            list = invoke(schematic, "getEntityListForRegion", new Class<?>[]{String.class}, name);
+        } catch (ReflectiveOperationException ignored) {
+            return;
+        }
+        if (!(list instanceof Collection<?> collection)) return;
+        Mirror subMirror = (Mirror) invokeQuiet(subRegion, "getMirror");
+        Rotation subRotation = (Rotation) invokeQuiet(subRegion, "getRotation");
+        BlockPos subPos = (BlockPos) invokeQuiet(subRegion, "getPos");
+        if (subMirror == null || subRotation == null || subPos == null) return;
+        Rotation combined = placementRotation.getRotated(subRotation);
+        Mirror subMirrorAdj = adjustedSubMirror(subMirror, placementRotation);
+        BlockPos boxT = getTransformedBlockPos(subPos, placementMirror, placementRotation);
+        for (Object info : collection) {
+            Vec3 pos = asVec3(invokeQuiet(info, "getPosition"));
+            if (pos == null) pos = asVec3(invokeQuiet(info, "getPos"));
+            if (pos == null) pos = asVec3(invokeQuiet(info, "posVec"));
+            if (pos == null) pos = asVec3(getFieldQuiet(info, "posVec"));
+            if (pos == null) pos = asVec3(getFieldQuiet(info, "pos"));
+            if (pos == null) pos = asVec3(getFieldQuiet(info, "position"));
+            Object nbt = invokeQuiet(info, "getNbt");
+            if (nbt == null) nbt = invokeQuiet(info, "nbt");
+            if (nbt == null) nbt = getFieldQuiet(info, "nbt");
+            if (pos == null || nbt == null) continue;
+            String type = ClientPlatform.instance().entityType(nbt);
+            if (type == null || !type.contains(":")) continue;
+            String snbt = ClientPlatform.instance().entityNbtToSnbt(nbt);
+            if (snbt == null || snbt.isBlank()) continue;
+            Vec3 transformed = getTransformedVec3(
+                    getTransformedVec3(pos, placementMirror, placementRotation), subMirrorAdj, combined);
+            double wx = boxT.getX() + origin.getX() + transformed.x();
+            double wy = boxT.getY() + origin.getY() + transformed.y();
+            double wz = boxT.getZ() + origin.getZ() + transformed.z();
+            try {
+                out.add(new PasteEntity(type, wx, wy, wz, snbt));
+            } catch (IllegalArgumentException ignored) {
+            }
+        }
+    }
+
+    /** Mirrors/rotates a fractional position like {@link #getTransformedBlockPos} for block coordinates. */
+    private static Vec3 getTransformedVec3(Vec3 pos, Mirror mirror, Rotation rotation) {
+        double x = pos.x();
+        double y = pos.y();
+        double z = pos.z();
+        switch (mirror.ordinal()) {
+            case 1: z = -z; break; // LEFT_RIGHT
+            case 2: x = -x; break; // FRONT_BACK
+            default: break;
+        }
+        switch (rotation.ordinal()) {
+            case 1: return new Vec3(-z, y, x);
+            case 2: return new Vec3(-x, y, -z);
+            case 3: return new Vec3(z, y, -x);
+            default: return new Vec3(x, y, z);
+        }
+    }
+
+    private static Vec3 asVec3(Object value) {
+        if (value instanceof Vec3 vec) return vec;
+        return null;
+    }
+
+    private static Object getFieldQuiet(Object target, String name) {
+        try {
+            return target.getClass().getField(name).get(target);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return null;
+        }
     }
 
     /**
@@ -267,7 +377,12 @@ public final class LitematicaBridge {
     private static String readBlockEntityNbt(Map<String, Object> tileNbt, BlockPos relative, BlockPos worldPos, BlockState out) {
         boolean lectern = out.getBlock() == Blocks.LECTERN;
         Object nbt = (tileNbt == null) ? null : tileNbt.get(relative.getX() + "," + relative.getY() + "," + relative.getZ());
-        String snbt = nbt == null ? null : ClientPlatform.instance().nbtToSnbt(nbt);
+        String snbt;
+        if (stripContainerItems && nbt != null && ClientPlatform.instance().nbtHasKey(nbt, "Items")) {
+            snbt = ClientPlatform.instance().nbtToSnbtWithoutKey(nbt, "Items");
+        } else {
+            snbt = nbt == null ? null : ClientPlatform.instance().nbtToSnbt(nbt);
+        }
         boolean usable = snbt != null && !snbt.isBlank() && !"{}".equals(snbt);
         // A lectern's schematic NBT counts as usable only when it actually carries a Book;
         // Litematica 26.2 can save has_book=true with no book content ({components:{}}).

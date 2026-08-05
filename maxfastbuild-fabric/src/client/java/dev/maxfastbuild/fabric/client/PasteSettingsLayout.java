@@ -12,15 +12,15 @@ final class PasteSettingsLayout {
     }
 
     /** Checkbox order matches the settings screen's {@code checked[]} array. */
-    enum Option { FLUIDS, ENTITIES, NBT, INSTANT }
+    enum Option { FLUIDS, ENTITIES, MOBS, DROPS, CONTENTS, NBT, INSTANT }
 
-    static final int TITLE_Y = 46;
-    static final int ROWS_START = 84;
-    static final int ROW_SPACING = 26;
-    static final int ROW_HEIGHT = 24;
+    static final int TITLE_Y = 42;
+    static final int ROWS_START = 66;
+    static final int ROW_SPACING = 20;
+    static final int ROW_HEIGHT = 18;
     /** Y of the red instant-paste redstone warning line, drawn only while instant is checked. */
     static final int WARNING_Y = ROWS_START + (Option.values().length - 1) * ROW_SPACING + ROW_HEIGHT + 4;
-    static final int BOX = 16;
+    static final int BOX = 14;
     static final int BUTTON_W = 76;
     static final int BUTTON_H = 20;
     static final int BUTTON_Y = 216;

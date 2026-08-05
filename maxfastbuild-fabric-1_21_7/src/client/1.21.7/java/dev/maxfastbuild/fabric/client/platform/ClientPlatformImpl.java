@@ -126,6 +126,42 @@ public final class ClientPlatformImpl extends ClientPlatform {
     }
 
     @Override
+    public String nbtToSnbtWithoutKey(Object nbtTag, String key) {
+        if (nbtTag instanceof net.minecraft.nbt.CompoundTag compound) {
+            net.minecraft.nbt.CompoundTag copy = compound.copy();
+            copy.remove("id");
+            copy.remove("x");
+            copy.remove("y");
+            copy.remove("z");
+            copy.remove(key);
+            return copy.toString();
+        }
+        if (nbtTag instanceof net.minecraft.nbt.Tag tag) return tag.toString();
+        return null;
+    }
+
+    @Override
+    public String entityType(Object nbt) {
+        if (nbt instanceof net.minecraft.nbt.CompoundTag compound) {
+            String id = compound.getString("id").orElse("");
+            return id.isEmpty() ? null : id;
+        }
+        return null;
+    }
+
+    @Override
+    public String entityNbtToSnbt(Object nbt) {
+        if (nbt instanceof net.minecraft.nbt.CompoundTag compound) {
+            net.minecraft.nbt.CompoundTag copy = compound.copy();
+            copy.remove("id");
+            copy.remove("Pos");
+            copy.remove("UUID");
+            return copy.toString();
+        }
+        return null;
+    }
+
+    @Override
     public String blockEntityNbtAt(BlockPos pos, Block expectedBlock) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) return null;

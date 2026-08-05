@@ -76,8 +76,17 @@ public abstract class ClientPlatform {
     /** Serialize a Minecraft NBT tag (e.g. a block-entity compound) to SNBT, or null when unsupported. */
     public abstract String nbtToSnbt(Object nbtTag);
 
+    /** Like {@link #nbtToSnbt} but with an extra top-level key removed (e.g. container {@code Items}). */
+    public abstract String nbtToSnbtWithoutKey(Object nbtTag, String key);
+
     /** True when a compound NBT tag holds the given key (Litematica schematic tile data). */
     public abstract boolean nbtHasKey(Object nbt, String key);
+
+    /** The namespaced entity type id of a schematic entity's NBT compound, or null. */
+    public abstract String entityType(Object nbt);
+
+    /** Serialize a schematic entity's NBT to SNBT with {@code id}/{@code Pos}/{@code UUID} stripped. */
+    public abstract String entityNbtToSnbt(Object nbt);
 
     /**
      * Serialize the client world's block entity at {@code pos} to SNBT, but only when the block

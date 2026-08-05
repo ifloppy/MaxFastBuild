@@ -40,6 +40,8 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 ### Costs and materials (server-defined)
 
 - **Place** (survival): consumes matching blocks from the inventory; may charge economy if enabled. Insufficient items or balance rejects the request.
+- **Nearby containers** (survival paste): with `inventory.search-containers` (default on) materials are also gathered from chests (incl. double), trapped chests, barrels, placed shulker boxes, and shulker boxes nested inside those containers within **5 blocks** (`container-search-radius`) of the player's feet; consumption and refunds go to the **exact source slot**.
+- **Fire/soul fire** (survival): a **flint and steel** anywhere in the searched sources is required instead of a fire item; **each fire block costs 1 durability**. A flint enchanted with Mending keeps its last durability point and the next flint and steel is used instead.
 - **Water/lava** (survival): never consumed. With the configured number of buckets (default **2** water buckets / **2** lava buckets) in the inventory, unlimited water/lava can be placed; the buckets themselves are not spent.
 - **Break**: normal drops and tool wear; a tool is never worn below **4** remaining durability—other inventory tools are used next.
 - **Partial completion**: unfinished mutations refund variable per-block/per-area fees and unused place materials. A fixed per-operation fee (if enabled) is generally kept once execution has started.
@@ -75,7 +77,7 @@ With the client mod and **Litematica** both installed, the current active placem
 
 Notes:
 
-- Block entities (chests, signs, lecterns, …) keep their **contents/text**: a container paste deducts **one plain container block item** plus **every item inside its stored contents** (exact match) from the inventory.
+- Block entities (chests, signs, lecterns, …) keep their **contents/text**: a container paste deducts **one plain container block item** plus **every item inside its stored contents** (exact match), from the inventory or nearby containers.
 - Optional **instant paste**: bind the "**Toggle instant paste**" key (default unbound), press it to arm the mode (HUD indicator), then paste. Instant pastes are charged at the server's `instant-paste.multiplier` (default 2×) and execute immediately instead of waiting in the queue; they are capped by `instant-paste.max-blocks` (default 5000). Materials and tool durability are still required.
 - A single paste is bounded by the server's `execution.max-region-blocks` limit (default 100000); split larger schematics.
 - As with normal placement, survival deducts **per block type** from the inventory and applies world-protection, tool-durability and economy checks.
@@ -85,6 +87,6 @@ Notes:
 
 - **Menu does not open**: check key conflicts; confirm the client mod and server version.
 - **Cannot pick**: select a mode first; hold a block or tool.
-- **Insufficient materials**: you need at least as many blocks as the shape will place.
+- **Insufficient materials**: you need at least as many blocks as the shape will place (in your inventory, or nearby containers within 5 blocks when container search is on); fire needs a flint and steel, water/lava need buckets.
 - **Payment failed**: not enough balance or economy unavailable.
 - **Partial refund message**: normal when some blocks could not be applied.

@@ -107,7 +107,8 @@ final class PaperNbtHelper {
                 "CREEPER_HEAD", "CREEPER_WALL_HEAD", "PIGLIN_HEAD", "PIGLIN_WALL_HEAD",
                 "BEACON", "ENCHANTING_TABLE", "CONDUIT", "BELL",
                 "SCULK_SENSOR", "CALIBRATED_SCULK_SENSOR", "SCULK_SHRIEKER",
-                "BEE_NEST", "BEEHIVE");
+                "BEE_NEST", "BEEHIVE",
+                "COMPARATOR", "SCULK_CATALYST");
 
         // Deliberately unsupported: Vault (unbilled server_data items) and End Gateway (ExitPortal grief).
     }
@@ -253,6 +254,39 @@ final class PaperNbtHelper {
             }
         }
         return null;
+    }
+
+    /** Entity validation: same forbidden-key sweep as {@link #validateKeys}, package-visible. */
+    static String validateEntityKeys(Object compound) {
+        return validateKeys(compound, 0);
+    }
+
+    /** The entity type id string (the compound's {@code id}), or null. */
+    static String entityTypeId(Object compound) {
+        if (compound == null) return null;
+        String value = stringValue(getTag(compound, "id"));
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    /**
+     * Decode an entity container's {@code Items} list (minecart/hopper/furnace minecarts) for
+     * billing. Returns {@code null} when any entry is forbidden or undecodable (entity must be
+     * rejected), otherwise the list of billable stacks.
+     */
+    static List<ItemInstance> decodeEntityItems(Object compound, Object registryAccess) {
+        Object tag = getTag(compound, "Items");
+        if (tag == null) return List.of();
+        if (!tag.getClass().getName().equals(LIST_TAG)) return null;
+        int size = listSize(tag);
+        List<ItemInstance> out = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) {
+            Object element = listGet(tag, i);
+            if (element == null || !element.getClass().getName().equals(COMPOUND_TAG)) return null;
+            Decoded decoded = decodeItem(element, registryAccess);
+            if (decoded == null) return null;
+            out.add(new ItemInstance(decoded.bukkit(), decoded.nms(), decoded.count()));
+        }
+        return out;
     }
 
     /** Parse SNBT into an NMS {@code CompoundTag}, or {@code null} when unavailable or malformed. */
@@ -551,6 +585,38 @@ final class PaperNbtHelper {
         }
     }
 
+    /** Put a string tag (used to re-add an entity's {@code id}). */
+    static void putString(Object compound, String key, String value) {
+        try {
+            Method valueOf = method(Class.forName("net.minecraft.nbt.StringTag"), "valueOf", String.class);
+            if (valueOf == null) return;
+            putTag(compound, key, valueOf.invoke(null, value));
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+        }
+    }
+
+    /** Put a {@code [x,y,z]} double list tag (used to re-add an entity's {@code Pos}). */
+    static void putDoubleList(Object compound, String key, double x, double y, double z) {
+        try {
+            Object list = Class.forName(LIST_TAG).getConstructor().newInstance();
+            Method valueOf = method(Class.forName("net.minecraft.nbt.DoubleTag"), "valueOf", double.class);
+            if (valueOf == null) return;
+            listAdd(list, valueOf.invoke(null, x));
+            listAdd(list, valueOf.invoke(null, y));
+            listAdd(list, valueOf.invoke(null, z));
+            putTag(compound, key, list);
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+        }
+    }
+
+    private static void putTag(Object compound, String key, Object tag) {
+        try {
+            Method put = method(compound.getClass(), "put", String.class, Class.forName("net.minecraft.nbt.Tag"));
+            if (put != null) put.invoke(compound, key, tag);
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+        }
+    }
+
     private static void removeTag(Object compound, String key) {
         try {
             Method remove = method(compound.getClass(), "remove", String.class);
@@ -559,7 +625,7 @@ final class PaperNbtHelper {
         }
     }
 
-    private static Object cloneCompound(Object compound) {
+    static Object cloneCompound(Object compound) {
         Method copy = method(compound.getClass(), "copy");
         if (copy == null) return null;
         try {

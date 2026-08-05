@@ -76,6 +76,7 @@ unknown-subcommand: "<red>未知子命令：{0}</red> <gray>输入 /mfb help 查
 admin-unknown: "<red>未知管理子命令。</red> <gray>可用：reload | recovery</gray>"
 
 task-accepted: "<green>任务已接受：{0} 个方块，费用 {1}。</green>"
+blocks-skipped: "<yellow>⚠ {0} 个方块被跳过（受保护/不可破坏/NBT不支持），已放置 {1} 个。</yellow>"
 task-queued: "<yellow>指令已加入队列（位置 {0}）。</yellow>"
 queue-full: "<red>队列已满（上限 {0}），请稍后再试。</red>"
 task-completed: "<green>任务完成：已处理 {0}/{1}，退款 {2}。</green>"

@@ -153,6 +153,14 @@ final class PasteController {
             notify(Component.translatable("maxfastbuild.paste.no_blocks_after_filters"));
             return;
         }
+        List<PasteEntity> rawEntities = LitematicaBridge.lastEntities();
+        List<PasteEntity> entities = applyEntitySkip(rawEntities, settings);
+        int entityCap = instant ? PasteTransfer.MAX_INSTANT_ENTITIES : PasteTransfer.MAX_NORMAL_ENTITIES;
+        if (entities.size() > entityCap) {
+            resetSession();
+            notify(Component.translatable("maxfastbuild.paste.too_many_entities", entityCap));
+            return;
+        }
         if (instant && blocks.size() > instantMaxBlocks) {
             resetSession();
             notify(Component.translatable("maxfastbuild.paste.instant_too_large", instantMaxBlocks));
@@ -175,9 +183,13 @@ final class PasteController {
             });
             entries.add(new PasteTransfer.Entry(block.x() - minX, block.y() - minY, block.z() - minZ, index));
         }
+        List<PasteTransfer.EntityEntry> entityEntries = new ArrayList<>(entities.size());
+        for (PasteEntity entity : entities) {
+            entityEntries.add(new PasteTransfer.EntityEntry(entity.type(), entity.x(), entity.y(), entity.z(), entity.nbt()));
+        }
         pasteSessionId = UUID.randomUUID().toString();
         try {
-            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, instant);
+            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, entityEntries, instant);
         } catch (IllegalArgumentException ex) {
             resetSession();
             notify(Component.translatable("maxfastbuild.paste.too_large"));
@@ -237,6 +249,9 @@ final class PasteController {
         }
         settings = newSettings;
         instant = newInstant;
+        // Container contents are stripped at collection time (before SNBT serialization), so the
+        // collected palette never carries them and the server bills only the empty container block.
+        LitematicaBridge.setStripContainerItems(newSettings.skipContents());
         state = State.PENDING_HELLO;
         pendingSince = now();
         send("__mfb hello");
@@ -244,11 +259,11 @@ final class PasteController {
 
     /**
      * Apply the settings screen filters to a collected placement. Fluids are dropped, block-entity
-     * NBT is stripped from the palette (server then places a plain block), and entities are dropped
-     * once entity paste is collected.
+     * NBT is stripped from the palette (server then places a plain block), and container contents
+     * are stripped from block-entity NBT (empty container pasted, not billed) when {@code skipContents}.
      */
     private static List<PasteBlock> applySkip(List<PasteBlock> blocks, PasteSettings skip) {
-        if (!skip.skipFluids() && !skip.skipEntities() && !skip.skipNbt()) return blocks;
+        if (!skip.skipFluids() && !skip.skipEntities() && !skip.skipNbt() && !skip.skipContents()) return blocks;
         List<PasteBlock> out = new ArrayList<>(blocks.size());
         for (PasteBlock block : blocks) {
             if (skip.skipFluids() && isFluidBlock(block.blockData())) continue;
@@ -275,6 +290,44 @@ final class PasteController {
     private static boolean isEntityBlock(String blockData) {
         // Entity paste is collected separately (not as PasteBlock); reserved for that feature.
         return false;
+    }
+
+    /**
+     * Entity skip filters: {@code skipEntities} drops every entity; {@code skipMobs} drops only
+     * living creatures (villagers, animals, monsters) and keeps item/vehicle/decor entities such as
+     * minecarts, boats, armor stands, item frames and paintings; {@code skipDrops} drops only
+     * dropped item entities ({@code minecraft:item}) while keeping minecarts, boats and decor.
+     */
+    private static List<PasteEntity> applyEntitySkip(List<PasteEntity> entities, PasteSettings skip) {
+        if (entities == null || entities.isEmpty()) return entities;
+        if (!skip.skipEntities() && !skip.skipMobs() && !skip.skipDrops()) return entities;
+        List<PasteEntity> out = new ArrayList<>(entities.size());
+        for (PasteEntity entity : entities) {
+            if (skip.skipEntities()) continue;
+            if (skip.skipMobs() && isMobEntity(entity.type())) continue;
+            if (skip.skipDrops() && isDropItemEntity(entity.type())) continue;
+            out.add(entity);
+        }
+        return out;
+    }
+
+    private static boolean isDropItemEntity(String type) {
+        String id = type.indexOf(':') >= 0 ? type.substring(type.indexOf(':') + 1) : type;
+        return id.equals("item");
+    }
+
+    private static boolean isMobEntity(String type) {
+        String id = type.indexOf(':') >= 0 ? type.substring(type.indexOf(':') + 1) : type;
+        return !(id.endsWith("minecart")
+                || id.endsWith("_boat")
+                || id.equals("armor_stand")
+                || id.equals("item_frame")
+                || id.equals("glow_item_frame")
+                || id.equals("painting")
+                || id.equals("leash_knot")
+                || id.endsWith("_display")
+                || id.equals("interaction")
+                || id.equals("marker"));
     }
 
     private static void sendPart() {

@@ -42,6 +42,16 @@ inventory:
   search-shulker-boxes: false
   # If true, search-shulker-boxes also requires permission maxfastbuild.material.shulker
   require-shulker-permission: false
+  # Search nearby containers for the items a paste needs, in addition to the player inventory.
+  # Scanned: chests (incl. double), trapped chests, barrels, placed shulker boxes, and shulker
+  # boxes nested inside any of those containers. Items consumed come from the container slot
+  # directly; on a partial/cancelled paste they are returned to the exact source slot.
+  search-containers: true
+  # Horizontal/vertical radius (blocks, from the player's feet) for the container search above.
+  container-search-radius: 5
+  # Fire/soul fire are placed without consuming a fire item: a flint and steel anywhere in the
+  # searched sources is required instead. Each fire block placed consumes 1 durability from it.
+  fire-requires-flint-and-steel: true
   # Water/lava buckets in inventory (main + shulkers when enabled) required to place an
   # unlimited amount of that fluid. Buckets are never consumed; fewer than this count rejects.
   fluid-bucket-requirement: 2
