@@ -12,13 +12,14 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
         switch (request.mode()) {
             case SINGLE -> add(result, request.first(), limit);
             case LINE, DIAGONAL_LINE -> line(result, request.first(), request.second(), limit);
-            case WALL, DIAGONAL_WALL, SLOPE_FLOOR -> wall(result, request, limit);
-            case FLOOR, CUBE -> cuboid(result, request.bounds(), request.hollow(), request.mode() == BuildMode.FLOOR, limit);
-            case CIRCLE -> ellipse(result, request.bounds(), request.hollow(), false, limit);
-            case CYLINDER -> ellipse(result, request.bounds(), request.hollow(), true, limit);
-            case SPHERE -> ellipsoid(result, request.bounds(), request.hollow(), limit);
-            case PYRAMID -> pyramid(result, request.bounds(), request.hollow(), false, limit);
-            case CONE -> pyramid(result, request.bounds(), request.hollow(), true, limit);
+            case WALL, DIAGONAL_WALL -> wall(result, request, limit);
+            case SLOPE_FLOOR -> slopeFloor(result, request, limit);
+            case FLOOR, CUBE -> cuboid(result, request.bounds(), request.hollow() != 0, request.mode() == BuildMode.FLOOR, limit);
+            case CIRCLE -> ellipse(result, request.bounds(), request.hollow() != 0, false, limit);
+            case CYLINDER -> ellipse(result, request.bounds(), request.hollow() != 0, true, limit);
+            case SPHERE -> ellipsoid(result, request.bounds(), request.hollow() != 0, limit);
+            case PYRAMID -> pyramid(result, request.bounds(), request.hollow() != 0, false, limit);
+            case CONE -> pyramid(result, request.bounds(), request.hollow() != 0, true, limit);
         }
         return Collections.unmodifiableSet(result);
     }
@@ -42,6 +43,66 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
         int minY = Math.min(a.y(), request.second().y());
         int maxY = Math.max(a.y(), request.second().y());
         for (BlockPos pos : base) for (int y = minY; y <= maxY; y++) add(out, new BlockPos(pos.x(), y, pos.z()), limit);
+    }
+
+    private static void slopeFloor(Set<BlockPos> out, ShapeRequest request, int limit) {
+        int hollow = request.hollow();
+        if (hollow == 0) {
+            smoothSurface(out, request, limit);
+        } else if (hollow == 1) {
+            slopeStair(out, request, true, limit);
+        } else {
+            slopeStair(out, request, false, limit);
+        }
+    }
+
+    private static void smoothSurface(Set<BlockPos> out, ShapeRequest request, int limit) {
+        BlockPos a = request.first();
+        BlockPos b = request.second();
+        int dx = b.x() - a.x();
+        int dz = b.z() - a.z();
+        int dy = b.y() - a.y();
+        long denom = (long) dx * dx + (long) dz * dz;
+        Bounds bounds = request.bounds();
+        for (int x = bounds.min().x(); x <= bounds.max().x(); x++) {
+            for (int z = bounds.min().z(); z <= bounds.max().z(); z++) {
+                int y;
+                if (denom == 0) {
+                    y = a.y();
+                } else {
+                    long proj = (long) (x - a.x()) * dx + (long) (z - a.z()) * dz;
+                    y = a.y() + (int) Math.round((double) proj / denom * dy);
+                }
+                add(out, new BlockPos(x, y, z), limit);
+            }
+        }
+    }
+
+    private static void slopeStair(Set<BlockPos> out, ShapeRequest request, boolean axisX, int limit) {
+        BlockPos a = request.first();
+        BlockPos b = request.second();
+        int dy = b.y() - a.y();
+        int dPrimary = axisX ? (b.x() - a.x()) : (b.z() - a.z());
+        Bounds bounds = request.bounds();
+        int pStart = axisX ? bounds.min().x() : bounds.min().z();
+        int pEnd = axisX ? bounds.max().x() : bounds.max().z();
+        int cStart = axisX ? bounds.min().z() : bounds.min().x();
+        int cEnd = axisX ? bounds.max().z() : bounds.max().x();
+        int aPrimary = axisX ? a.x() : a.z();
+        for (int p = pStart; p <= pEnd; p++) {
+            int y;
+            if (dPrimary == 0) {
+                y = a.y();
+            } else {
+                double ratio = (double) (p - aPrimary) / dPrimary;
+                y = a.y() + (int) Math.round(ratio * dy);
+            }
+            for (int c = cStart; c <= cEnd; c++) {
+                int x = axisX ? p : c;
+                int z = axisX ? c : p;
+                add(out, new BlockPos(x, y, z), limit);
+            }
+        }
     }
 
     private static void cuboid(Set<BlockPos> out, Bounds b, boolean hollow, boolean floor, int limit) {

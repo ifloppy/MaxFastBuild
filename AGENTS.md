@@ -8,25 +8,24 @@
 
 ## Build & deploy to Leaf test server
 
-After any Paper plugin change, agents **must** produce a jar and install it into the local Leaf plugins folder (overwrite old):
+After completing code changes, agents **must**:
 
+1. **Run the full build** to verify everything compiles and tests pass:
+   ```bash
+   ./gradlew build
+   ```
+
+2. **Ask the user** whether to deploy the Paper jar to the Leaf test server. Do NOT deploy automatically unless the user confirms.
+
+When deploying to Leaf (user confirms):
+```bash
+./gradlew :maxfastbuild-paper:jar deployPaperToLeaf
+```
+
+Deploy target:
 ```text
 ../test-server-leaf/plugins/MaxFastBuild.jar
 ```
-
-Preferred commands (from this repo root):
-
-```bash
-./gradlew :maxfastbuild-paper:jar deployPaperToLeaf
-# or full build (also copies release/ + deploy when Leaf exists):
-./gradlew build
-```
-
-- `copyReleaseJars` → `release/`
-- `deployPaperToLeaf` → `../test-server-leaf/plugins/MaxFastBuild.jar` (no-op with a log if the server dir is missing)
-- Root `build` / Paper `jar` are wired so a successful Paper jar build refreshes the test plugin when the Leaf tree is present
-
-Do **not** leave a stale jar in `test-server-leaf/plugins/` after code changes. Do not commit jars under `release/` (gitignored except `.gitkeep`) or the test server.
 
 ## Modules
 

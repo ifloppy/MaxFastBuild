@@ -15,7 +15,7 @@ final class ClientSession {
     private ClientSession() {}
 
     /** Compact single-command place intent. Server regenerates the shape. */
-    static void sendPlace(String mode, int x1, int y1, int z1, int x2, int y2, int z2, boolean hollow, String material) {
+    static void sendPlace(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow, String material) {
         CompactPlaceCommand.Intent intent = new CompactPlaceCommand.Intent(
                 BuildMode.valueOf(mode.toUpperCase(Locale.ROOT)),
                 new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow, material);
@@ -23,7 +23,7 @@ final class ClientSession {
     }
 
     /** Compact single-command break intent. Server regenerates the shape. */
-    static void sendBreak(String mode, int x1, int y1, int z1, int x2, int y2, int z2, boolean hollow) {
+    static void sendBreak(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow) {
         CompactBreakCommand.Intent intent = new CompactBreakCommand.Intent(
                 BuildMode.valueOf(mode.toUpperCase(Locale.ROOT)),
                 new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow);

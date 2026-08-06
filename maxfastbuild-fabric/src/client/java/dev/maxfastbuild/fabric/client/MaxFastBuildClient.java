@@ -8,6 +8,7 @@ import dev.maxfastbuild.fabric.mixin.KeyMappingAccessor;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
 import net.fabricmc.fabric.api.event.client.player.ClientPreAttackCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
@@ -23,6 +24,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
     /** Toggle instant paste mode (paid synchronous server execution). */
     public static KeyMapping instantKey;
 
+    private static boolean helloPending;
+
     @Override
     public void onInitializeClient() {
         radialKey = ClientPlatform.instance().createRadialKey();
@@ -30,6 +33,10 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         instantKey = ClientPlatform.instance().createInstantKey();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (helloPending && client.player != null && client.getConnection() != null) {
+                helloPending = false;
+                client.getConnection().sendCommand("__mfb hello " + ProtocolEnvelope.CURRENT_VERSION);
+            }
             // Hold-to-open: use physical key (Screen opens → KeyMapping.releaseAll clears isDown).
             if (isRadialKeyPhysicallyDown()
                     && client.player != null
@@ -51,6 +58,10 @@ public final class MaxFastBuildClient implements ClientModInitializer {
 
         ClientPlatform.instance().registerHud();
         ClientPlatform.instance().registerPreviewRenderer();
+
+        ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
+            helloPending = true;
+        });
     }
 
     private static boolean consumeProtocol(Component message) {
@@ -93,6 +104,9 @@ public final class MaxFastBuildClient implements ClientModInitializer {
     }
 
     private static String formatFallback(String key, Object[] args) {
+        if ("maxfastbuild.error.version_mismatch".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: version mismatch — client v" + args[0] + ", server v" + args[1] + ". Please update to a matching version.";
+        }
         if ("maxfastbuild.error.insufficient_materials".equals(key) && args.length >= 3) {
             return "MaxFastBuild: not enough materials: need " + args[0] + ", have " + args[1] + " (" + args[2] + ")";
         }
@@ -194,8 +208,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
                     new Object[]{jsonString(data, "reason")};
             case "maxfastbuild.error.insufficient_tool",
                  "maxfastbuild.error.hold_block_or_tool" -> new Object[0];
-            case "maxfastbuild.error.insufficient_tool_durability" ->
-                    new Object[]{jsonString(data, "need"), jsonString(data, "have")};
+            case "maxfastbuild.error.version_mismatch" ->
+                    new Object[]{jsonString(data, "clientVersion"), jsonString(data, "serverVersion")};
             default -> legacyArguments(data);
         };
     }

@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class CompactBreakCommand {
     private CompactBreakCommand() {}
 
-    public record Intent(BuildMode mode, BlockPos first, BlockPos second, boolean hollow) {
+    public record Intent(BuildMode mode, BlockPos first, BlockPos second, int hollow) {
         public Intent {
             Objects.requireNonNull(mode);
             Objects.requireNonNull(first);
@@ -21,7 +21,7 @@ public final class CompactBreakCommand {
         return "__mfb break " + intent.mode().name().toLowerCase(Locale.ROOT)
                 + " " + intent.first().x() + " " + intent.first().y() + " " + intent.first().z()
                 + " " + intent.second().x() + " " + intent.second().y() + " " + intent.second().z()
-                + " " + (intent.hollow() ? "1" : "0");
+                + " " + intent.hollow();
     }
 
     /** Accepts command with or without leading slash. */
@@ -34,7 +34,7 @@ public final class CompactBreakCommand {
         BuildMode mode = BuildMode.valueOf(parts[2].toUpperCase(Locale.ROOT));
         BlockPos first = new BlockPos(Integer.parseInt(parts[3]), Integer.parseInt(parts[4]), Integer.parseInt(parts[5]));
         BlockPos second = new BlockPos(Integer.parseInt(parts[6]), Integer.parseInt(parts[7]), Integer.parseInt(parts[8]));
-        boolean hollow = parts[9].equals("1") || Boolean.parseBoolean(parts[9]);
+        int hollow = Integer.parseInt(parts[9]);
         return new Intent(mode, first, second, hollow);
     }
 }

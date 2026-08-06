@@ -2,7 +2,7 @@ package dev.maxfastbuild.api;
 
 import java.util.Objects;
 
-public record ShapeRequest(BuildMode mode, BlockPos first, BlockPos second, boolean hollow) {
+public record ShapeRequest(BuildMode mode, BlockPos first, BlockPos second, int hollow) {
     public ShapeRequest {
         Objects.requireNonNull(mode);
         Objects.requireNonNull(first);

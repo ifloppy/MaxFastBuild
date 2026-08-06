@@ -288,7 +288,26 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         try {
             switch (parts[1]) {
-                case "hello" -> issueSession(player);
+                case "hello" -> {
+                    if (parts.length >= 3) {
+                        int clientVersion;
+                        try {
+                            clientVersion = Integer.parseInt(parts[2]);
+                        } catch (NumberFormatException ignored) {
+                            sendProtocol(player, "error", "maxfastbuild.error.version_mismatch",
+                                    Map.of("serverVersion", String.valueOf(ProtocolEnvelope.CURRENT_VERSION),
+                                            "clientVersion", parts.length >= 3 ? parts[2] : "?"));
+                            return;
+                        }
+                        if (clientVersion != ProtocolEnvelope.CURRENT_VERSION) {
+                            sendProtocol(player, "error", "maxfastbuild.error.version_mismatch",
+                                    Map.of("serverVersion", String.valueOf(ProtocolEnvelope.CURRENT_VERSION),
+                                            "clientVersion", String.valueOf(clientVersion)));
+                            return;
+                        }
+                    }
+                    issueSession(player);
+                }
                 case "place" -> {
                     if (!player.hasPermission("maxfastbuild.use")) {
                         sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
@@ -385,7 +404,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
         Selection selection = selections.computeIfAbsent(player.getUniqueId(),
-                ignored -> new Selection(BuildMode.LINE, null, null, false, "minecraft:stone", player.getWorld().getName()));
+                ignored -> new Selection(BuildMode.LINE, null, null, 0, "minecraft:stone", player.getWorld().getName()));
         String sub = args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
             case "mode" -> {
@@ -414,16 +433,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "pos2-set", formatPos(pos));
             }
             case "hollow" -> {
-                boolean hollow;
+                int hollow;
                 if (args.length < 2) {
-                    hollow = !selection.hollow();
-                } else if ("true".equalsIgnoreCase(args[1]) || "1".equals(args[1]) || "on".equalsIgnoreCase(args[1])) {
-                    hollow = true;
-                } else if ("false".equalsIgnoreCase(args[1]) || "0".equals(args[1]) || "off".equalsIgnoreCase(args[1])) {
-                    hollow = false;
+                    boolean old = selection.hollow() != 0;
+                    hollow = old ? 0 : 1;
                 } else {
-                    messages.send(player, "hollow-usage");
-                    return;
+                    try {
+                        hollow = Integer.parseInt(args[1]);
+                    } catch (NumberFormatException e) {
+                        hollow = "true".equalsIgnoreCase(args[1]) || "1".equals(args[1]) || "on".equalsIgnoreCase(args[1]) ? 1 : 0;
+                    }
                 }
                 selections.put(player.getUniqueId(), selection.withHollow(hollow));
                 messages.send(player, "hollow-set", hollow);
@@ -919,12 +938,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         Material filter = null;
         boolean keepOnly = false;
-        boolean hollow = false;
+        int hollow = 0;
         if (args.length > 7) {
             String mode = args[7].toLowerCase(Locale.ROOT);
             switch (mode) {
                 case "destroy" -> { }
-                case "hollow", "outline" -> hollow = true;
+                case "hollow", "outline" -> hollow = 1;
                 case "keep" -> keepOnly = true;
                 case "replace" -> {
                     if (args.length > 8) {
@@ -2436,13 +2455,13 @@ if (data.billableItem() != null) {
         return budget <= 0 ? Integer.MAX_VALUE : budget;
     }
 
-    private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, boolean hollow, String material) {}
+    private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, int hollow, String material) {}
     private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
-    private record Selection(BuildMode mode, BlockPos first, BlockPos second, boolean hollow, String material, String world) {
+    private record Selection(BuildMode mode, BlockPos first, BlockPos second, int hollow, String material, String world) {
         Selection withMode(BuildMode value) { return new Selection(value, first, second, hollow, material, world); }
         Selection withFirst(BlockPos value) { return new Selection(mode, value, second, hollow, material, world); }
         Selection withSecond(BlockPos value) { return new Selection(mode, first, value, hollow, material, world); }
-        Selection withHollow(boolean value) { return new Selection(mode, first, second, value, material, world); }
+        Selection withHollow(int value) { return new Selection(mode, first, second, value, material, world); }
         Selection withMaterial(String value) { return new Selection(mode, first, second, hollow, value, world); }
         Selection withWorld(String value) { return new Selection(mode, first, second, hollow, material, value); }
     }

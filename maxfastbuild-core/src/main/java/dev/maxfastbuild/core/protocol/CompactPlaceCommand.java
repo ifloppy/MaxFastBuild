@@ -9,7 +9,7 @@ import java.util.Objects;
 public final class CompactPlaceCommand {
     private CompactPlaceCommand() {}
 
-    public record Intent(BuildMode mode, BlockPos first, BlockPos second, boolean hollow, String material) {
+    public record Intent(BuildMode mode, BlockPos first, BlockPos second, int hollow, String material) {
         public Intent {
             Objects.requireNonNull(mode);
             Objects.requireNonNull(first);
@@ -22,7 +22,7 @@ public final class CompactPlaceCommand {
         return "__mfb place " + intent.mode().name().toLowerCase(Locale.ROOT)
                 + " " + intent.first().x() + " " + intent.first().y() + " " + intent.first().z()
                 + " " + intent.second().x() + " " + intent.second().y() + " " + intent.second().z()
-                + " " + (intent.hollow() ? "1" : "0")
+                + " " + intent.hollow()
                 + " " + intent.material();
     }
 
@@ -36,7 +36,7 @@ public final class CompactPlaceCommand {
         BuildMode mode = BuildMode.valueOf(parts[2].toUpperCase(Locale.ROOT));
         BlockPos first = new BlockPos(Integer.parseInt(parts[3]), Integer.parseInt(parts[4]), Integer.parseInt(parts[5]));
         BlockPos second = new BlockPos(Integer.parseInt(parts[6]), Integer.parseInt(parts[7]), Integer.parseInt(parts[8]));
-        boolean hollow = parts[9].equals("1") || Boolean.parseBoolean(parts[9]);
+        int hollow = Integer.parseInt(parts[9]);
         String material = String.join(" ", java.util.Arrays.copyOfRange(parts, 10, parts.length));
         return new Intent(mode, first, second, hollow, material);
     }

@@ -17,7 +17,7 @@ class CompactPlaceCommandTest {
         for (String log : logs) {
             CompactPlaceCommand.Intent intent = CompactPlaceCommand.parse(log);
             assertThat(intent.material()).isEqualTo("minecraft:oak_planks");
-            assertThat(intent.hollow()).isFalse();
+            assertThat(intent.hollow()).isEqualTo(0);
             assertThat(CompactPlaceCommand.format(intent).split(" ").length).isEqualTo(11);
         }
         CompactPlaceCommand.Intent wall = CompactPlaceCommand.parse(logs[3]);

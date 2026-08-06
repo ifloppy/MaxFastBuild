@@ -48,6 +48,8 @@ public final class BuildSelectionController {
     };
 
     private static BuildMode mode = BuildMode.LINE;
+    private static int currentHollow;
+    private static boolean prevShiftDown;
     private static BlockPos first;
     private static BlockPos hovered;
     private static boolean active;
@@ -66,6 +68,7 @@ public final class BuildSelectionController {
 
     static void selectMode(BuildMode selected) {
         mode = selected;
+        currentHollow = 0;
         first = null;
         hovered = null;
         active = true;
@@ -73,6 +76,9 @@ public final class BuildSelectionController {
         cachedFaces = List.of();
         clampLookDistance(Minecraft.getInstance());
         notify(Component.translatable("maxfastbuild.selection.mode_selected", modeName()));
+        if (submodeCount() > 1) {
+            notify(submodeLabel());
+        }
     }
 
     static boolean active() {
@@ -128,6 +134,11 @@ public final class BuildSelectionController {
     static void tick(Minecraft client) {
         if (!active || client.player == null || client.level == null) return;
         clampLookDistance(client);
+        boolean shiftDown = client.player.isShiftKeyDown();
+        if (shiftDown && !prevShiftDown && first == null && !ClientPlatform.instance().isScreenOpen(client)) {
+            toggleSubmode();
+        }
+        prevShiftDown = shiftDown;
         refreshHovered(client);
         refreshPreviewCache(client.player);
     }
@@ -165,8 +176,8 @@ public final class BuildSelectionController {
         int y = canvas.guiHeight() - 108;
         int outline = !breaking && !placing ? 0xCCB7C0CC : (breaking ? 0xCCFF8A4D : 0xCC65D9FF);
         int titleColor = !breaking && !placing ? 0xFFB7C0CC : (breaking ? 0xFFFF8A4D : 0xFF8EE9FF);
-        canvas.fill(center - 170, y - 5, center + 170, y + 52, 0xB018202A);
-        canvas.outline(center - 170, y - 5, 340, 57, outline);
+        canvas.fill(center - 170, y - 5, center + 170, y + 65, 0xB018202A);
+        canvas.outline(center - 170, y - 5, 340, 70, outline);
         Component title = !breaking && !placing
                 ? Component.translatable("maxfastbuild.selection.title_none", modeName())
                 : Component.translatable(
@@ -190,6 +201,10 @@ public final class BuildSelectionController {
                         breaking ? "maxfastbuild.selection.cancel_hint_break"
                                 : (placing ? "maxfastbuild.selection.cancel_hint" : "maxfastbuild.selection.cancel_hint_none")),
                 center, y + 36, 0xFFB7C0CC);
+        Component sm = submodeLabel();
+        if (sm != null && first == null) {
+            canvas.centeredText(client.font, sm, center, y + 50, 0xFFA0A0A0);
+        }
     }
 
     private static InteractionResult confirmPick(Player player, Level level) {
@@ -285,7 +300,7 @@ public final class BuildSelectionController {
         cacheBreak = breaking;
         try {
             Set<BlockPos> full = new DefaultShapeGenerator().generate(
-                    new ShapeRequest(mode, first, end, false), UNBOUNDED);
+                    new ShapeRequest(mode, first, end, currentHollow), UNBOUNDED);
             cachedFull = full instanceof HashSet ? full : new HashSet<>(full);
             // Cuboid modes only need bounds; skip face enumeration.
             if (isSimpleCuboidPreview(mode)) {
@@ -316,14 +331,14 @@ public final class BuildSelectionController {
     }
 
     private static void submit(Player player, BlockPos second, boolean breaking) {
-        int count = new DefaultShapeGenerator().generate(new ShapeRequest(mode, first, second, false), UNBOUNDED).size();
+        int count = new DefaultShapeGenerator().generate(new ShapeRequest(mode, first, second, currentHollow), UNBOUNDED).size();
         String modeKey = mode.name().toLowerCase(Locale.ROOT);
         if (breaking) {
             if (!isBreakIntent(player)) {
                 notify(Component.translatable("maxfastbuild.selection.hold_tool"));
                 return;
             }
-            ClientSession.sendBreak(modeKey, first.x(), first.y(), first.z(), second.x(), second.y(), second.z(), false);
+            ClientSession.sendBreak(modeKey, first.x(), first.y(), first.z(), second.x(), second.y(), second.z(), currentHollow);
             notify(Component.translatable("maxfastbuild.selection.submitted_break", count));
         } else {
             String material = material(player);
@@ -331,7 +346,7 @@ public final class BuildSelectionController {
                 notify(Component.translatable("maxfastbuild.selection.hold_block"));
                 return;
             }
-            ClientSession.sendPlace(modeKey, first.x(), first.y(), first.z(), second.x(), second.y(), second.z(), false, material);
+            ClientSession.sendPlace(modeKey, first.x(), first.y(), first.z(), second.x(), second.y(), second.z(), currentHollow, material);
             notify(Component.translatable("maxfastbuild.selection.submitted", count));
         }
         first = null;
@@ -348,6 +363,59 @@ public final class BuildSelectionController {
         cachedFull = Set.of();
         cachedFaces = List.of();
         notify(Component.translatable("maxfastbuild.selection.cancelled"));
+    }
+
+    private static int submodeCount() {
+        return switch (mode) {
+            case SLOPE_FLOOR -> 3;
+            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE -> 2;
+            default -> 1;
+        };
+    }
+
+    private static String submodeKey() {
+        return switch (mode) {
+            case SLOPE_FLOOR -> switch (currentHollow) {
+                case 0 -> "maxfastbuild.submode.smooth";
+                case 1 -> "maxfastbuild.submode.stair_x";
+                default -> "maxfastbuild.submode.stair_z";
+            };
+            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE ->
+                currentHollow == 0 ? "maxfastbuild.submode.solid" : "maxfastbuild.submode.hollow";
+            default -> null;
+        };
+    }
+
+    private static Component submodeLabel() {
+        int count = submodeCount();
+        if (count <= 1) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            if (i > 0) sb.append("  ");
+            sb.append(i == currentHollow ? "▸ " : "  ");
+            sb.append(Component.translatable(submodeKeyFor(mode, i)).getString());
+        }
+        return Component.literal(sb.toString());
+    }
+
+    private static String submodeKeyFor(BuildMode m, int index) {
+        return switch (m) {
+            case SLOPE_FLOOR -> switch (index) {
+                case 0 -> "maxfastbuild.submode.smooth";
+                case 1 -> "maxfastbuild.submode.stair_x";
+                default -> "maxfastbuild.submode.stair_z";
+            };
+            default -> index == 0 ? "maxfastbuild.submode.solid" : "maxfastbuild.submode.hollow";
+        };
+    }
+
+    private static void toggleSubmode() {
+        int count = submodeCount();
+        if (count <= 1) return;
+        currentHollow = (currentHollow + 1) % count;
+        cachedFull = Set.of();
+        cachedFaces = List.of();
+        notify(submodeLabel());
     }
 
     private static boolean isPlaceIntent(Player player) {

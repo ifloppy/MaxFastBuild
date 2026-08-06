@@ -8,14 +8,14 @@ import static org.assertj.core.api.Assertions.*;
 class CompactBreakCommandTest {
     @Test void roundTripsTenTokens() {
         CompactBreakCommand.Intent intent = new CompactBreakCommand.Intent(
-                BuildMode.WALL, new BlockPos(-17, 75, -41), new BlockPos(-13, 71, -41), false);
+                BuildMode.WALL, new BlockPos(-17, 75, -41), new BlockPos(-13, 71, -41), 0);
         String cmd = CompactBreakCommand.format(intent);
         assertThat(cmd.split(" ").length).isEqualTo(10);
         CompactBreakCommand.Intent parsed = CompactBreakCommand.parse("/" + cmd);
         assertThat(parsed.mode()).isEqualTo(BuildMode.WALL);
         assertThat(parsed.first()).isEqualTo(new BlockPos(-17, 75, -41));
         assertThat(parsed.second()).isEqualTo(new BlockPos(-13, 71, -41));
-        assertThat(parsed.hollow()).isFalse();
+        assertThat(parsed.hollow()).isEqualTo(0);
     }
 
     @Test void rejectsWrongArity() {

@@ -142,6 +142,8 @@ final class PluginMessages {
                     component("task-queued", data.get("position"));
             case "maxfastbuild.error.queue_full" ->
                     component("queue-full", data.get("limit"));
+            case "maxfastbuild.error.version_mismatch" ->
+                    component("version-mismatch", data.get("clientVersion"), data.get("serverVersion"));
             default -> component("protocol-rejected", messageKey);
         };
     }
