@@ -88,6 +88,9 @@ public abstract class ClientPlatform {
     /** Serialize a schematic entity's NBT to SNBT with {@code id}/{@code Pos}/{@code UUID} stripped. */
     public abstract String entityNbtToSnbt(Object nbt);
 
+    /** Like {@link #entityNbtToSnbt} but with an extra top-level key removed (e.g. container {@code Items}). */
+    public abstract String entityNbtToSnbtWithoutKey(Object nbt, String key);
+
     /**
      * Serialize the client world's block entity at {@code pos} to SNBT, but only when the block
      * there is exactly {@code expectedBlock} (a lectern-with-book fallback source). Returns null

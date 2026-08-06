@@ -277,7 +277,12 @@ public final class LitematicaBridge {
             if (pos == null || nbt == null) continue;
             String type = ClientPlatform.instance().entityType(nbt);
             if (type == null || !type.contains(":")) continue;
-            String snbt = ClientPlatform.instance().entityNbtToSnbt(nbt);
+            String snbt;
+            if (stripContainerItems && ClientPlatform.instance().nbtHasKey(nbt, "Items")) {
+                snbt = ClientPlatform.instance().entityNbtToSnbtWithoutKey(nbt, "Items");
+            } else {
+                snbt = ClientPlatform.instance().entityNbtToSnbt(nbt);
+            }
             if (snbt == null || snbt.isBlank()) continue;
             Vec3 transformed = getTransformedVec3(
                     getTransformedVec3(pos, placementMirror, placementRotation), subMirrorAdj, combined);
