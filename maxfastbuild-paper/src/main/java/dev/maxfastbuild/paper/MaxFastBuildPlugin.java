@@ -1259,6 +1259,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         // Validate pasted entities (minecarts/boats/armor stands/mobs). Invalid entities are skipped
         // individually, never allowed to abort the whole paste.
         List<PendingEntity> entities = new ArrayList<>();
+        List<PastePrecheckIssue> entityIssues = new ArrayList<>();
         if (assembled.entities() != null) {
             Object registry = PaperNbtHelper.registryAccess(player.getWorld());
             for (PasteTransfer.EntityEntry entity : assembled.entities()) {
@@ -1268,10 +1269,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 } catch (PaperEntityHelper.EntityRejectException ex) {
                     debugLog("paste entity rejected player=" + player.getName()
                             + " type=" + entity.type() + " reason=" + ex.reason);
+                    entityIssues.add(new PastePrecheckIssue("entity", entity.type(), "rejected: " + ex.reason, false));
+                } catch (LinkageError | RuntimeException ex) {
+                    debugLog("paste entity unexpected error player=" + player.getName()
+                            + " type=" + entity.type() + " error=" + shortError(ex));
+                    entityIssues.add(new PastePrecheckIssue("entity", entity.type(), shortError(ex), true));
                 }
             }
         }
-        pendingPastes.put(player.getUniqueId(), new PendingPaste(player, worldName, instant, positions, entities));
+        PendingPaste pending = new PendingPaste(player, worldName, instant, positions, entities);
+        pending.issues.addAll(entityIssues);
+        pendingPastes.put(player.getUniqueId(), pending);
         debugLog("paste assembled player=" + player.getName()
                 + " blocks=" + positions.size() + " entities=" + entities.size() + " instant=" + instant);
     }
@@ -1291,7 +1299,22 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             int perPlayer = Math.min(batch, globalRemaining);
             int before = (int) pending.processed;
-            PlanningError error = advancePastePlanning(pending, perPlayer);
+            PlanningError error;
+            try {
+                error = advancePastePlanning(pending, perPlayer);
+            } catch (LinkageError | RuntimeException ex) {
+                // Safety net: never let one paste crash the tick loop or spam errors forever.
+                getLogger().severe("Paste planning crashed for " + player.getName() + ": " + ex);
+                pending.issues.add(new PastePrecheckIssue("block", "<planning>", shortError(ex), true));
+                if (hasFatalPrecheck(pending)) {
+                    cancelPastePrecheck(player, pending);
+                } else {
+                    sendProtocol(player, "error", "maxfastbuild.error.paste_precheck_failed",
+                            Map.of("count", 1, "fatal", 1, "detail", shortError(ex)));
+                }
+                it.remove();
+                continue;
+            }
             globalRemaining -= (int) (pending.processed - before);
             if (error != null) {
                 debugLog("paste planning rejected player=" + player.getName()
@@ -1326,10 +1349,24 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 pending.planningSkipped++;
                 continue;
             }
-            String before = world.stateAt(pending.world, pos);
+            String before;
+            try {
+                before = world.stateAt(pending.world, pos);
+            } catch (LinkageError | RuntimeException ex) {
+                pending.issues.add(new PastePrecheckIssue("block", pp.targetState(), shortError(ex), true));
+                pending.planningSkipped++;
+                continue;
+            }
             if (before.equals(pp.targetState()) && pp.targetNbt() == null) continue;
             BlockMutation mutation = new BlockMutation(pos, before, pp.targetState(), pp.targetNbt());
-            WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+            WorldAccess.ValidationResult validation;
+            try {
+                validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+            } catch (LinkageError | RuntimeException ex) {
+                pending.issues.add(new PastePrecheckIssue("block", pp.targetState(), shortError(ex), true));
+                pending.planningSkipped++;
+                continue;
+            }
             if (!validation.allowed()) {
                 debugLog("paste planning skipped player=" + player.getName()
                         + " pos=" + pos + " target=" + pp.targetState()
@@ -1347,6 +1384,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     private void finalizePastePlanning(PendingPaste pending) {
         Player player = pending.player;
+        // Any unexpected precheck error (missing NMS class, etc.) cancels the whole paste before
+        // any material is deducted or anything is placed — nothing half-built, nothing charged.
+        for (PastePrecheckIssue issue : pending.issues) {
+            if (issue.fatal()) {
+                cancelPastePrecheck(player, pending);
+                return;
+            }
+        }
         List<BlockMutation> mutations = pending.mutations;
         if (mutations.isEmpty()) {
             debugLog("paste finalized player=" + player.getName()
@@ -1406,6 +1451,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         } catch (PasteRejectException reject) {
             debugLog("paste rejected player=" + player.getName() + " reason=" + reject.key);
             sendProtocol(player, "error", reject.key, reject.data);
+            return;
+        } catch (LinkageError | RuntimeException ex) {
+            pending.issues.add(new PastePrecheckIssue("item", "<materials>", shortError(ex), true));
+            cancelPastePrecheck(player, pending);
             return;
         }
         if (requireMaterials) {
@@ -1487,11 +1536,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         // Notify the player when some blocks were skipped during planning (protected, unbreakable
-        // occupant, unsupported NBT, etc.) so they know the paste is incomplete.
-        if (pending.planningSkipped > 0) {
-            debugLog("paste planning skipped total player=" + player.getName() + " count=" + pending.planningSkipped);
+        // occupant, unsupported NBT, etc.) or entities were rejected, so they know the paste is incomplete.
+        long entitySkips = pending.issues.stream().filter(i -> !i.fatal() && "entity".equals(i.kind())).count();
+        if (pending.planningSkipped > 0 || entitySkips > 0) {
+            debugLog("paste planning skipped total player=" + player.getName()
+                    + " blocks=" + pending.planningSkipped + " entities=" + entitySkips);
             sendProtocol(player, "warning", "maxfastbuild.paste.blocks_skipped",
-                    Map.of("skipped", pending.planningSkipped, "planned", mutations.size()));
+                    Map.of("skipped", pending.planningSkipped, "planned", mutations.size(),
+                            "entitySkipped", entitySkips));
         }
 
         // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
@@ -1539,6 +1591,41 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
                     Map.of("need", need, "have", have, "material", materialKey));
         }
+    }
+
+    /** Cancel the paste with a detailed precheck-failure report to the player + admin log. */
+    private void cancelPastePrecheck(Player player, PendingPaste pending) {        StringBuilder detail = new StringBuilder();
+        int fatal = 0, total = 0;
+        for (PastePrecheckIssue issue : pending.issues) {
+            total++;
+            if (issue.fatal()) fatal++;
+            if (detail.length() < 500) {
+                if (detail.length() > 0) detail.append("; ");
+                detail.append(issue.kind()).append(" ").append(issue.target())
+                        .append(" → ").append(issue.detail());
+            }
+        }
+        String text = detail.length() > 500 ? detail.substring(0, 497) + "…" : detail.toString();
+        getLogger().severe("Paste precheck failed for " + player.getName()
+                + " fatal=" + fatal + " total=" + total + " — " + text);
+        debugLog("paste precheck failed player=" + player.getName() + " fatal=" + fatal + " total=" + total);
+        sendProtocol(player, "error", "maxfastbuild.error.paste_precheck_failed",
+                Map.of("count", total, "fatal", fatal, "detail", text));
+    }
+
+    /** Short error description for an unexpected server error (class name + message). */
+    private static String shortError(Throwable t) {
+        String name = t.getClass().getSimpleName();
+        String msg = t.getMessage();
+        if (msg == null || msg.isBlank()) return name;
+        return name + ": " + msg;
+    }
+
+    private static boolean hasFatalPrecheck(PendingPaste pending) {
+        for (PastePrecheckIssue issue : pending.issues) {
+            if (issue.fatal()) return true;
+        }
+        return false;
     }
 
     private void refundMoney(Player player, UUID taskId, BigDecimal amount, String transactionId) {
@@ -2395,6 +2482,13 @@ if (data.billableItem() != null) {
     /** A validated pasted entity and its absolute spawn position. */
     private record PendingEntity(PaperEntityHelper.EntityData data, double x, double y, double z) {}
 
+    /**
+     * A precheck problem with one pasted block/entity/item. {@code fatal} marks an unexpected
+     * server error (e.g. a missing NMS class on this server version), which cancels the whole
+     * paste; non-fatal entries are expected rejections/skips that are reported but do not stop it.
+     */
+    private record PastePrecheckIssue(String kind, String target, String detail, boolean fatal) {}
+
     /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
     private static final class PendingPaste {
         final Player player;
@@ -2403,6 +2497,7 @@ if (data.billableItem() != null) {
         final Iterator<PastePos> iterator;
         final List<BlockMutation> mutations = new ArrayList<>();
         final List<PendingEntity> entities;
+        final List<PastePrecheckIssue> issues = new ArrayList<>();
         PaperInventoryHelper.RemovalLedger removals;
         long replaceBreakCount = 0;
         long processed = 0;

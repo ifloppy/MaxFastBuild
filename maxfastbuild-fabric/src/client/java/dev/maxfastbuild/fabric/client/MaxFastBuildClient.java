@@ -138,8 +138,11 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.task.accepted".equals(key) && args.length >= 2) {
             return "MaxFastBuild: accepted " + args[0] + " blocks, cost " + args[1];
         }
-        if ("maxfastbuild.paste.blocks_skipped".equals(key) && args.length >= 2) {
-            return "MaxFastBuild: " + args[0] + " blocks were skipped (protected, unbreakable, or unsupported) — " + args[1] + " placed";
+        if ("maxfastbuild.paste.blocks_skipped".equals(key) && args.length >= 3) {
+            return "MaxFastBuild: " + args[0] + " blocks, " + args[1] + " entities skipped (protected/unbreakable/unsupported) — " + args[2] + " placed";
+        }
+        if ("maxfastbuild.error.paste_precheck_failed".equals(key) && args.length >= 3) {
+            return "MaxFastBuild: paste precheck failed (" + args[0] + " items, " + args[1] + " fatal) — " + args[2];
         }
         if (args.length == 0) return "MaxFastBuild: " + key;
         StringBuilder sb = new StringBuilder("MaxFastBuild: ").append(key).append(" [");
@@ -158,7 +161,9 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             case "maxfastbuild.task.accepted" ->
                     new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
             case "maxfastbuild.paste.blocks_skipped" ->
-                    new Object[]{jsonString(data, "skipped"), jsonString(data, "planned")};
+                    new Object[]{jsonString(data, "skipped"), jsonString(data, "entitySkipped"), jsonString(data, "planned")};
+            case "maxfastbuild.error.paste_precheck_failed" ->
+                    new Object[]{jsonString(data, "count"), jsonString(data, "fatal"), jsonString(data, "detail")};
             case "maxfastbuild.task.completed", "maxfastbuild.task.partial" ->
                     new Object[]{jsonString(data, "applied"), jsonString(data, "planned"),
                             jsonString(data, "cost"), jsonString(data, "refund")};

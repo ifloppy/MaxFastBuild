@@ -76,7 +76,8 @@ unknown-subcommand: "<red>Unknown subcommand: {0}</red> <gray>Try /mfb help</gra
 admin-unknown: "<red>Unknown admin subcommand.</red> <gray>reload | recovery</gray>"
 
 task-accepted: "<green>Task accepted: {0} blocks, cost {1}.</green>"
-blocks-skipped: "<yellow>⚠ {0} blocks were skipped (protected/unbreakable/unsupported) — {1} placed.</yellow>"
+blocks-skipped: "<yellow>⚠ {0} blocks, {1} entities skipped (protected/unbreakable/unsupported) — {2} placed.</yellow>"
+paste-precheck-failed: "<red>⚠ Paste precheck failed: {0} items could not be pasted ({1} fatal). Details: {2}. Report to admin, or try with 'Skip NBT/Skip entities' enabled.</red>"
 task-queued: "<yellow>Command queued (position {0}).</yellow>"
 queue-full: "<red>Queue is full (limit {0}); try again later.</red>"
 task-completed: "<green>Task complete: {0}/{1} applied, refund {2}.</green>"
