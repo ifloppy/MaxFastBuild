@@ -2058,6 +2058,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (result.added() && fireEntitySpawnEvent(player, result.entity(), pe.data())) {
                 spawned++;
             } else {
+                if (!result.added()) {
+                    debugLog("paste entity spawn failed player=" + (player == null ? "?" : player.getName())
+                            + " type=" + pe.data().type() + " reason=" + (result.reason() == null ? "unknown" : result.reason()));
+                }
                 // A cancelled event (protection plugin) removes the entity so it does not linger
                 // while its materials are refunded.
                 if (result.added() && result.entity() != null) {

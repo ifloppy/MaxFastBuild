@@ -88,6 +88,7 @@ final class PaperInventoryHelper {
         if (id.endsWith("_wall_sign")) return id.substring(0, id.length() - "_wall_sign".length()) + "_sign";
         if (id.endsWith("_wall_torch")) return id.substring(0, id.length() - "_wall_torch".length()) + "_torch";
         if (id.endsWith("_wall_banner")) return id.substring(0, id.length() - "_wall_banner".length()) + "_banner";
+        if (id.endsWith("_coral_wall_fan")) return id.substring(0, id.length() - "_wall_fan".length()) + "_fan";
         if (id.endsWith("_plant")) return id.substring(0, id.length() - "_plant".length());
         return BLOCK_TO_ITEM.getOrDefault(id, id);
     }

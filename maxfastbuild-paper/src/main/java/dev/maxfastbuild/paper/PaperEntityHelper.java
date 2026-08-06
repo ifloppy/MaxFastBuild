@@ -27,9 +27,10 @@ final class PaperEntityHelper {
                       List<PaperNbtHelper.ItemInstance> contents) {}
 
     /** Outcome of spawning: {@code added} mirrors the {@code addFreshEntity} call, {@code entity}
-     *  is the Bukkit wrapper (may be null when the wrapper could not be reflected). */
-    record SpawnResult(boolean added, org.bukkit.entity.Entity entity) {
-        static final SpawnResult FAILED = new SpawnResult(false, null);
+     *  is the Bukkit wrapper (may be null when the wrapper could not be reflected), and
+     *  {@code reason} explains a failure for the caller's diagnostics. */
+    record SpawnResult(boolean added, org.bukkit.entity.Entity entity, String reason) {
+        static final SpawnResult FAILED = new SpawnResult(false, null, "spawn_failed");
     }
 
     static final class EntityRejectException extends RuntimeException {
@@ -112,7 +113,7 @@ final class PaperEntityHelper {
             PaperNbtHelper.putString(compound, "id", data.type());
             PaperNbtHelper.putDoubleList(compound, "Pos", x, y, z);
             Object entity = loadEntity(compound, nmsWorld);
-            if (entity == null) return SpawnResult.FAILED;
+            if (entity == null) return new SpawnResult(false, null, "loadEntity returned null");
             Method add = nmsWorld.getClass().getMethod("addFreshEntity",
                     Class.forName("net.minecraft.world.entity.Entity"));
             add.invoke(nmsWorld, entity);
@@ -122,9 +123,9 @@ final class PaperEntityHelper {
                 if (wrapper instanceof org.bukkit.entity.Entity cast) bukkit = cast;
             } catch (ReflectiveOperationException ignored) {
             }
-            return new SpawnResult(true, bukkit);
+            return new SpawnResult(true, bukkit, null);
         } catch (ReflectiveOperationException | LinkageError e) {
-            return SpawnResult.FAILED;
+            return new SpawnResult(false, null, e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage()));
         }
     }
 
@@ -143,10 +144,26 @@ final class PaperEntityHelper {
                     requestType, processorType);
             return load.invoke(null, compound, level, request, processor);
         } catch (NoSuchMethodException | ClassNotFoundException ignored) {
-            // 1.21.x fallback: EntityType.create(CompoundTag, Level)
+            // fall through to create() variants
+        }
+        // 1.21.x: EntityType.create(CompoundTag, Level)
+        try {
             Method create = entityType.getMethod("create",
                     Class.forName("net.minecraft.nbt.CompoundTag"), Class.forName("net.minecraft.world.level.Level"));
             return create.invoke(null, compound, level);
+        } catch (NoSuchMethodException ignored) {
+            // fall through
+        }
+        // 1.21.2+: EntityType.create(CompoundTag, Level, EntitySpawnReason)
+        try {
+            Class<?> reasonType = Class.forName("net.minecraft.world.entity.EntitySpawnReason");
+            Object reason = reasonType.getField("COMMAND").get(null);
+            Method create = entityType.getMethod("create",
+                    Class.forName("net.minecraft.nbt.CompoundTag"), Class.forName("net.minecraft.world.level.Level"),
+                    reasonType);
+            return create.invoke(null, compound, level, reason);
+        } catch (NoSuchMethodException | ClassNotFoundException ignored) {
+            throw new NoSuchMethodException("no EntityType.create/loadEntityRecursive variant found");
         }
     }
 }
