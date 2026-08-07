@@ -40,8 +40,11 @@ class PasteTransferTest {
     }
 
     @Test void encodeDecodeRoundTrips() {
+        PasteTransfer.EntityEntry entity = new PasteTransfer.EntityEntry(
+                "minecraft:chest_minecart", 1.5, 64, -2.5, "{Items:[]}");
         PasteTransfer.Payload payload = new PasteTransfer.Payload("abc123", 0, 2, ORIGIN,
-                List.of("minecraft:stone", "minecraft:oak_planks"), List.of("0,0,0:0", "1,0,0:1"));
+                List.of("minecraft:stone", "minecraft:oak_planks"), List.of("0,0,0:0", "1,0,0:1"),
+                true, List.of(entity), true);
         PasteTransfer.Payload decoded = PasteTransfer.decode(PasteTransfer.encode(payload));
         assertThat(decoded.pasteSessionId()).isEqualTo(payload.pasteSessionId());
         assertThat(decoded.part()).isEqualTo(payload.part());
@@ -49,6 +52,9 @@ class PasteTransferTest {
         assertThat(decoded.origin()).isEqualTo(ORIGIN);
         assertThat(decoded.palette()).isEqualTo(payload.palette());
         assertThat(decoded.blocks()).isEqualTo(payload.blocks());
+        assertThat(decoded.instant()).isTrue();
+        assertThat(decoded.entities()).containsExactly(entity);
+        assertThat(decoded.skipContents()).isTrue();
     }
 
     @Test void splitCapsPerPartAndRepeatsPalette() {

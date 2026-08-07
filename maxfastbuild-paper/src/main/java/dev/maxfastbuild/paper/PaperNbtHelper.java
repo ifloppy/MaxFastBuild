@@ -79,19 +79,21 @@ final class PaperNbtHelper {
                 resolve("BREWING_STAND"), resolve("CRAFTER"), resolve("CHISELED_BOOKSHELF"),
                 resolve("CAMPFIRE"), resolve("SOUL_CAMPFIRE"));
         for (Material material : containers) {
-            if (material != null) register(material, new ItemField(FieldKind.LIST, "Items"));
+            if (material != null) register(material, new ItemField(FieldKind.LIST, "Items", true));
         }
         for (String color : List.of("WHITE", "ORANGE", "MAGENTA", "LIGHT_BLUE", "YELLOW", "LIME", "PINK",
                 "GRAY", "LIGHT_GRAY", "CYAN", "PURPLE", "BLUE", "BROWN", "GREEN", "RED", "BLACK")) {
             Material shulker = resolve(color + "_SHULKER_BOX");
-            if (shulker != null) register(shulker, new ItemField(FieldKind.LIST, "Items"));
+            if (shulker != null) register(shulker, new ItemField(FieldKind.LIST, "Items", true));
         }
 
-        // Group B — single-item tiles.
-        register(resolve("LECTERN"), new ItemField(FieldKind.SINGLE, "Book"));
-        register(resolve("JUKEBOX"), new ItemField(FieldKind.SINGLE, "RecordItem"));
-        register(resolve("DECORATED_POT"), new ItemField(FieldKind.SINGLE, "item"),
-                new ItemField(FieldKind.SHERDS, "sherds"));
+        // Group B — single-item tiles. Lecture/record content is a functional part of the tile, so an
+        // empty-container paste preserves it (and it is still billed); a pot's item/sherds are bulk
+        // storage and are stripped like container contents.
+        register(resolve("LECTERN"), new ItemField(FieldKind.SINGLE, "Book", false));
+        register(resolve("JUKEBOX"), new ItemField(FieldKind.SINGLE, "RecordItem", false));
+        register(resolve("DECORATED_POT"), new ItemField(FieldKind.SINGLE, "item", true),
+                new ItemField(FieldKind.SHERDS, "sherds", true));
 
         // Group C — state-only tiles (no item fields).
         for (String wood : List.of("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK",
@@ -116,7 +118,7 @@ final class PaperNbtHelper {
     /** How an item-bearing field is laid out in the tile's compound. */
     private enum FieldKind { LIST, SINGLE, SHERDS }
 
-    private record ItemField(FieldKind kind, String key) {}
+    private record ItemField(FieldKind kind, String key, boolean stripOnSkip) {}
 
     private static void register(Material material, ItemField... fields) {
         if (material == null) return;
@@ -623,6 +625,59 @@ final class PaperNbtHelper {
             if (remove != null) remove.invoke(compound, key);
         } catch (ReflectiveOperationException | LinkageError ignored) {
         }
+    }
+
+    /**
+     * Strip the storage-style content fields of the given tile material (container {@code Items},
+     * decorated-pot {@code item}/{@code sherds}) from SNBT, leaving functional single items
+     * (lectern {@code Book}, jukebox {@code RecordItem}) intact so they stay billed and pasted.
+     * Used when the client requested an empty-container paste: the server enforces it
+     * authoritatively, so a tile whose content key the client never strips (e.g. the pot's
+     * {@code item}) is billed neither nor placed with items.
+     * <p>
+     * Returns the stripped SNBT, or {@code null} when the SNBT cannot be parsed, the tile carries
+     * no strippable fields (state-only tiles such as signs), or nothing was actually removed — in
+     * every such case the caller keeps the original NBT untouched (no SNBT round-trip).
+     */
+    static String stripContentFields(String snbt, Material material) {
+        List<ItemField> fields = ITEM_FIELDS.get(material);
+        if (fields == null || fields.isEmpty()) return null;
+        Object compound = parseCompound(snbt);
+        if (compound == null) return null;
+        Object copy = cloneCompound(compound);
+        if (copy == null) copy = compound;
+        boolean changed = false;
+        for (ItemField field : fields) {
+            if (!field.stripOnSkip()) continue;
+            if (getTag(copy, field.key()) != null) {
+                removeTag(copy, field.key());
+                changed = true;
+            }
+        }
+        return changed ? toSnbt(copy) : null;
+    }
+
+    /** Remove storage contents from entity NBT when an empty-container paste is requested. */
+    static String stripEntityContents(String snbt) {
+        Object compound = parseCompound(snbt);
+        if (compound == null || getTag(compound, "Items") == null) return snbt;
+        Object copy = cloneCompound(compound);
+        if (copy == null) copy = compound;
+        removeTag(copy, "Items");
+        return toSnbt(copy);
+    }
+
+    /** Serialize a compound back to SNBT via {@code Tag.getAsString()} (26.2 and 1.21.x). */
+    private static String toSnbt(Object compound) {
+        Method getAsString = method(compound.getClass(), "getAsString");
+        if (getAsString != null) {
+            try {
+                Object result = getAsString.invoke(compound);
+                if (result != null) return result.toString();
+            } catch (ReflectiveOperationException | LinkageError ignored) {
+            }
+        }
+        return compound.toString();
     }
 
     static Object cloneCompound(Object compound) {

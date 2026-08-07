@@ -64,7 +64,7 @@ public final class PasteTransfer {
     }
 
     /** One part of a paste transfer. */
-    public record Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities) {
+    public record Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities, boolean skipContents) {
         public Payload {
             Objects.requireNonNull(pasteSessionId);
             Objects.requireNonNull(palette);
@@ -77,12 +77,17 @@ public final class PasteTransfer {
 
         /** Backward-compatible constructor defaulting {@code instant} to false (legacy/non-instant). */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of(), false);
         }
 
         /** Backward-compatible constructor with no entities. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of(), false);
+        }
+
+        /** Backward-compatible constructor with entities but no skip flag. */
+        public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities) {
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, false);
         }
 
         @Override
@@ -167,10 +172,11 @@ public final class PasteTransfer {
      * Split a paste into {@link Payload} parts. Every part repeats the full palette.
      *
      * @param instant true when the paste should be executed immediately by the server (paid, capped size)
+     * @param skipContents true when the client asked to paste containers empty (no contents billed or placed)
      * @throws IllegalArgumentException when the paste exceeds {@link #MAX_PARTS}.
      */
     public static List<Payload> split(String pasteSessionId, int[] origin, List<String> palette, List<Entry> entries,
-                                      List<EntityEntry> entities, boolean instant) {
+                                      List<EntityEntry> entities, boolean instant, boolean skipContents) {
         if (origin == null || origin.length != 3) throw new IllegalArgumentException("invalid_origin");
         int totalParts = Math.max(1, (entries.size() + MAX_BLOCKS_PER_PART - 1) / MAX_BLOCKS_PER_PART);
         if (totalParts > MAX_PARTS) throw new IllegalArgumentException("request_too_large");
@@ -184,9 +190,20 @@ public final class PasteTransfer {
             for (int i = from; i < to; i++) {
                 blockEntries.add(formatEntry(entries.get(i)));
             }
-            result.add(new Payload(pasteSessionId, part, totalParts, originCopy, palette, blockEntries, instant, entityList));
+            result.add(new Payload(pasteSessionId, part, totalParts, originCopy, palette, blockEntries, instant, entityList, skipContents));
         }
         return result;
+    }
+
+    /**
+     * Split a paste into {@link Payload} parts. Every part repeats the full palette.
+     *
+     * @param instant true when the paste should be executed immediately by the server (paid, capped size)
+     * @throws IllegalArgumentException when the paste exceeds {@link #MAX_PARTS}.
+     */
+    public static List<Payload> split(String pasteSessionId, int[] origin, List<String> palette, List<Entry> entries,
+                                      List<EntityEntry> entities, boolean instant) {
+        return split(pasteSessionId, origin, palette, entries, entities, instant, false);
     }
 
     /**

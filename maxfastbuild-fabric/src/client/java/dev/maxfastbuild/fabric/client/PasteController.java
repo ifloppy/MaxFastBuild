@@ -189,7 +189,7 @@ final class PasteController {
         }
         pasteSessionId = UUID.randomUUID().toString();
         try {
-            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, entityEntries, instant);
+            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, entityEntries, instant, settings.skipContents());
         } catch (IllegalArgumentException ex) {
             resetSession();
             notify(Component.translatable("maxfastbuild.paste.too_large"));

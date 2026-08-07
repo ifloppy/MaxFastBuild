@@ -93,16 +93,24 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             }
             String key = object.has("messageKey") ? object.get("messageKey").getAsString() : "maxfastbuild.error.protocol";
             Object[] args = arguments(key, object);
+            boolean seedHint = isSeedHint(key, object);
             Minecraft client = Minecraft.getInstance();
             if (client.player != null) {
                 Component translated = Component.translatable(key, args);
                 String plain = translated.getString();
                 // Fall back if key unresolved OR format placeholders left unfilled (%s).
+                Component finalMessage;
                 if (plain.equals(key) || plain.contains("%s") || plain.contains("%d")) {
-                    ClientPlatform.instance().sendSystemMessage(Component.literal(formatFallback(key, args)));
+                    finalMessage = Component.literal(formatFallback(key, args));
                 } else {
-                    ClientPlatform.instance().sendSystemMessage(translated);
+                    finalMessage = translated;
                 }
+                if (seedHint) {
+                    finalMessage = finalMessage.copy()
+                            .append(Component.literal("\n"))
+                            .append(seedHintComponent(args));
+                }
+                ClientPlatform.instance().sendSystemMessage(finalMessage);
             }
         } catch (RuntimeException ex) {
             Minecraft client = Minecraft.getInstance();
@@ -111,6 +119,23 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             }
         }
         return false;
+    }
+
+    private static boolean isSeedHint(String key, JsonObject object) {
+        if (!"maxfastbuild.error.insufficient_materials".equals(key)) return false;
+        if (!object.has("data") || !object.get("data").isJsonObject()) return false;
+        JsonObject data = object.getAsJsonObject("data");
+        return data.has("seedFarm") && data.get("seedFarm").getAsBoolean();
+    }
+
+    private static Component seedHintComponent(Object[] args) {
+        String material = args.length >= 3 ? String.valueOf(args[2]) : "";
+        Component hint = Component.translatable("maxfastbuild.error.seed_farm_hint", material);
+        if (hint.getString().contains("maxfastbuild.error.seed_farm_hint") || hint.getString().contains("%s")) {
+            return Component.literal("MaxFastBuild: hold 1 " + material
+                    + " + sticky piston + slime block + observer to place it infinitely (not consumed)");
+        }
+        return hint;
     }
 
     private static void notifyHandshakeOk() {

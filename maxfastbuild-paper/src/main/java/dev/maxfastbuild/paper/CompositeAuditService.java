@@ -2,6 +2,7 @@ package dev.maxfastbuild.paper;
 
 import dev.maxfastbuild.api.AuditService;
 import dev.maxfastbuild.api.BlockMutation;
+import dev.maxfastbuild.api.BlockPos;
 import dev.maxfastbuild.api.OperationKind;
 
 import java.util.List;
@@ -38,6 +39,21 @@ final class CompositeAuditService implements AuditService {
                        OperationKind kind, boolean breakAlreadyLogged) {
         for (AuditService service : services) {
             if (service.available()) service.record(playerId, playerName, world, mutation, kind, breakAlreadyLogged);
+        }
+    }
+
+    @Override
+    public void beforeContainerMutation(UUID playerId, String playerName, String world, BlockPos pos) {
+        for (AuditService service : services) {
+            if (service.available()) service.beforeContainerMutation(playerId, playerName, world, pos);
+        }
+    }
+
+    @Override
+    public void recordItemRemoval(UUID playerId, String playerName, String world, BlockPos pos,
+                                  String materialKey, int amount) {
+        for (AuditService service : services) {
+            if (service.available()) service.recordItemRemoval(playerId, playerName, world, pos, materialKey, amount);
         }
     }
 }

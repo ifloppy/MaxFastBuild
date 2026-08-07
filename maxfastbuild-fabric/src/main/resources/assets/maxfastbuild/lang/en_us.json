@@ -64,6 +64,7 @@
   "maxfastbuild.error.insufficient_materials": "Not enough materials: need %s, have %s (%s)",
   "maxfastbuild.error.requires_flint_and_steel": "Placing fire (%s) requires a flint and steel (1 durability per fire)",
   "maxfastbuild.error.requires_buckets": "Placing fluid (%s) requires %s matching buckets in your inventory or nearby containers (buckets are not consumed)",
+  "maxfastbuild.error.seed_farm_hint": "Hold 1 %s + sticky piston + slime block + observer to place this material infinitely (catalysts are not consumed)",
   "maxfastbuild.error.invalid_material": "Invalid material: %s",
   "maxfastbuild.error.no_permission": "Missing permission: %s",
   "maxfastbuild.error.shape_too_large": "Shape exceeds server limit (%s blocks / volume)",

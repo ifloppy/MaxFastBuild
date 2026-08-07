@@ -2,6 +2,7 @@ package dev.maxfastbuild.paper;
 
 import dev.maxfastbuild.api.AuditService;
 import dev.maxfastbuild.api.BlockMutation;
+import dev.maxfastbuild.api.BlockPos;
 import dev.maxfastbuild.api.OperationKind;
 import net.coreprotect.CoreProtect;
 import net.coreprotect.CoreProtectAPI;
@@ -108,6 +109,20 @@ final class CoreProtectAuditService implements AuditService {
             LOG.warning("CoreProtect skip bad block data for " + kind + ": " + ex.getMessage());
         } catch (RuntimeException ex) {
             LOG.warning("CoreProtect log failed: " + ex.getMessage());
+        }
+    }
+
+    @Override
+    public void beforeContainerMutation(UUID playerId, String playerName, String world, BlockPos pos) {
+        if (api == null || playerName == null || playerName.isBlank() || world == null || pos == null) return;
+        World bukkitWorld = Bukkit.getWorld(world);
+        if (bukkitWorld == null) return;
+        // Registers a logContainerTransaction that captures the exact inventory write we then perform.
+        // Called immediately before we setItem into the container so CoreProtect can diff its inventory.
+        try {
+            api.logContainerTransaction(playerName, new Location(bukkitWorld, pos.x(), pos.y(), pos.z()));
+        } catch (RuntimeException ex) {
+            LOG.warning("CoreProtect container transaction log failed: " + ex.getMessage());
         }
     }
 }

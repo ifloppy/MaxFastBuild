@@ -55,6 +55,14 @@ inventory:
   # Water/lava buckets in inventory (main + shulkers when enabled) required to place an
   # unlimited amount of that fluid. Buckets are never consumed; fewer than this count rejects.
   fluid-bucket-requirement: 2
+  # Seed farms: holding the listed catalysts lets a player place that material in unlimited
+  # quantity without consuming anything (blocks, container NBT contents and entity contents all
+  # count as free; the material cost is waived but economy fees still apply). Catalysts are never
+  # consumed. Seeds count from the same sources a normal paste searches: player inventory,
+  # carried shulker boxes, and nearby containers when container search is enabled.
+  #   carpet: 1 target-colored carpet + 1 sticky piston + 1 slime block + 1 observer
+  seed-farms:
+    carpet: true
 economy:
   enabled: false
   per-operation:

@@ -22,6 +22,12 @@ class PasteAccumulatorTest {
         return new PasteTransfer.Payload(session, part, parts, ORIGIN, PALETTE, blocks);
     }
 
+    private static PasteTransfer.Payload part(String session, int part, int parts, List<String> blocks,
+                                              boolean skipContents) {
+        return new PasteTransfer.Payload(session, part, parts, ORIGIN, PALETTE, blocks,
+                false, List.of(), skipContents);
+    }
+
     @Test void assemblesSinglePart() {
         PasteAccumulator accumulator = newAccumulator();
         UUID player = UUID.randomUUID();
@@ -55,6 +61,22 @@ class PasteAccumulatorTest {
         PasteTransfer.Payload mismatched = new PasteTransfer.Payload("s4", 1, 2, ORIGIN,
                 List.of("minecraft:dirt"), List.of("0,0,0:0"));
         assertThatThrownBy(() -> accumulator.accept(player, mismatched)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test void skipContentsRoundTripsAndMismatchIsRejected() {
+        PasteAccumulator accumulator = newAccumulator();
+        UUID player = UUID.randomUUID();
+        assertThat(accumulator.accept(player, part("skip", 0, 2, List.of("0,0,0:0"), true))).isEmpty();
+        assertThatThrownBy(() -> accumulator.accept(player,
+                part("skip", 1, 2, List.of("1,0,0:1"), false)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("paste_part_mismatch");
+
+        PasteAccumulator complete = newAccumulator();
+        assertThat(complete.accept(player, part("complete", 0, 2, List.of("0,0,0:0"), true))).isEmpty();
+        PasteAccumulator.Assembled assembled = complete.accept(player,
+                part("complete", 1, 2, List.of("1,0,0:1"), true)).orElseThrow();
+        assertThat(assembled.skipContents()).isTrue();
     }
 
     @Test void paletteIndexOutOfRangeRejectedOnAssembly() {

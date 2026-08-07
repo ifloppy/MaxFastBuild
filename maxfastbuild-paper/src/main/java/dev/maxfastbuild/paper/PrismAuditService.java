@@ -2,8 +2,10 @@ package dev.maxfastbuild.paper;
 
 import dev.maxfastbuild.api.AuditService;
 import dev.maxfastbuild.api.BlockMutation;
+import dev.maxfastbuild.api.BlockPos;
 import dev.maxfastbuild.api.OperationKind;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.BlockState;
@@ -123,6 +125,25 @@ final class PrismAuditService implements AuditService {
                 .cause(new Cause(new PlayerContainer(playerName, playerId)))
                 .build();
         api.recordingService().addToQueue(activity);
+    }
+
+    @Override
+    public void recordItemRemoval(UUID playerId, String playerName, String world, BlockPos pos,
+                                  String materialKey, int amount) {
+        if (api == null || playerName == null || playerName.isBlank() || world == null || pos == null) return;
+        World bukkitWorld = Bukkit.getWorld(world);
+        if (bukkitWorld == null) return;
+        Material material = Material.matchMaterial(materialKey);
+        if (material == null || material.isAir()) return;
+        try {
+            ItemStack stack = new ItemStack(material);
+            recordActivity(bukkitWorld, pos,
+                    api.actionFactory().createItemAction(actionType("item-remove"), stack,
+                            amount, "maxfastbuild-paste"),
+                    playerName, playerId);
+        } catch (RuntimeException ex) {
+            LOG.warning("Prism item-remove log failed: " + ex.getMessage());
+        }
     }
 
     private ActionType actionType(String key) {

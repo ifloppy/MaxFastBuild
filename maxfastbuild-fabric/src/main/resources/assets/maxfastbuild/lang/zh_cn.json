@@ -64,6 +64,7 @@
   "maxfastbuild.error.insufficient_materials": "材料不足：需要 %s，仅有 %s（%s）",
   "maxfastbuild.error.requires_flint_and_steel": "放置火焰（%s）需要打火石（每个火焰消耗 1 点耐久）",
   "maxfastbuild.error.requires_buckets": "放置流体（%s）需要在身上或附近容器中准备 %s 个对应桶（桶不会被消耗）",
+  "maxfastbuild.error.seed_farm_hint": "携带 1 %s + 粘性活塞 + 粘液块 + 侦测器 即可无限放置该材料（凭证不消耗）",
   "maxfastbuild.error.invalid_material": "无效材料：%s",
   "maxfastbuild.error.no_permission": "缺少权限：%s",
   "maxfastbuild.error.shape_too_large": "形状超过服务器上限（%s 格/体积）",

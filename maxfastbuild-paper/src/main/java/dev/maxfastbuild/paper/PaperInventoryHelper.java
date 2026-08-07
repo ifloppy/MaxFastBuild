@@ -18,6 +18,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -120,6 +121,11 @@ final class PaperInventoryHelper {
     interface ItemSource {
         long count(Material material);
 
+        /** Count non-consumed seed catalysts, including nested container bundles when enabled. */
+        default long countSeed(Material material) {
+            return count(material);
+        }
+
         long countExact(ItemStack template);
 
         /** Removes up to {@code amount}; records every slot mutation on {@code ledger} for refunds. */
@@ -132,6 +138,15 @@ final class PaperInventoryHelper {
 
         /** Consumes up to {@code amount} flint-and-steel durability, recording each slot mutation. */
         long takeFlintUses(long amount, RemovalLedger ledger);
+
+        /**
+         * Container block this source reads from/writes to, or {@code null} for the player inventory
+         * (which has no audit location of its own). Used to tell audit backends which container's
+         * inventory a material deduction touched.
+         */
+        default Location container() {
+            return null;
+        }
     }
 
     /**
@@ -147,10 +162,16 @@ final class PaperInventoryHelper {
         private final boolean nestedShulkers;
         private final ItemStack[] contents;
         private final int offhandPosition;
+        private final Location container;
 
         SlotInventorySource(Inventory inventory, boolean nestedShulkers) {
+            this(inventory, nestedShulkers, null);
+        }
+
+        SlotInventorySource(Inventory inventory, boolean nestedShulkers, Location container) {
             this.inventory = inventory;
             this.nestedShulkers = nestedShulkers;
+            this.container = container;
             if (inventory instanceof PlayerInventory playerInventory) {
                 ItemStack[] base = inventory.getContents();
                 this.contents = Arrays.copyOf(base, base.length + 1);
@@ -160,6 +181,11 @@ final class PaperInventoryHelper {
                 this.contents = inventory.getContents();
                 this.offhandPosition = -1;
             }
+        }
+
+        @Override
+        public Location container() {
+            return container;
         }
 
         /** Map a contents index to the real inventory slot (offhand lives at 40 for players). */
@@ -179,6 +205,17 @@ final class PaperInventoryHelper {
                 if (stack == null) continue;
                 if (stack.getType() == material) total += stack.getAmount();
                 else if (nestedShulkers) total += countInShulker(stack, material);
+            }
+            return total;
+        }
+
+        @Override
+        public long countSeed(Material material) {
+            long total = 0;
+            for (ItemStack stack : contents) {
+                if (stack == null) continue;
+                if (stack.getType() == material) total += stack.getAmount();
+                else if (nestedShulkers) total += countInContainerBundle(stack, material, 0);
             }
             return total;
         }
@@ -333,6 +370,8 @@ final class PaperInventoryHelper {
         private final List<Removal> all = new ArrayList<>();
         private final Map<Material, List<Removal>> byMaterial = new HashMap<>();
         private final Map<ItemStack, List<Removal>> byExact = new HashMap<>();
+        /** Material keys whose take was satisfied entirely by seed catalysis (nothing removed). */
+        private final Set<String> seedSatisfied = new HashSet<>();
 
         void record(Removal removal) {
             all.add(removal);
@@ -344,8 +383,26 @@ final class PaperInventoryHelper {
             }
         }
 
+        /** Mark that {@code materialKey}'s whole take was satisfied by seeds (nothing was removed). */
+        void markSeedSatisfied(String materialKey) {
+            seedSatisfied.add(materialKey);
+        }
+
+        /** True when the take for {@code materialKey} was entirely seed-catalyzed (never remove anything back). */
+        boolean isSeedSatisfied(String materialKey) {
+            return seedSatisfied.contains(materialKey);
+        }
+
         boolean isEmpty() {
             return all.isEmpty();
+        }
+
+        /** Snapshot of removals still consumed after any partial refunds. */
+        java.util.List<Removal> remainingRemovals() {
+            List<Removal> remaining = new ArrayList<>();
+            for (List<Removal> records : byMaterial.values()) remaining.addAll(records);
+            for (List<Removal> records : byExact.values()) remaining.addAll(records);
+            return List.copyOf(remaining);
         }
 
         /** Restore every touched slot in reverse take order, exactly undoing all removals. */
@@ -361,7 +418,7 @@ final class PaperInventoryHelper {
 
         /** Return up to {@code amount} of {@code materialKey} to its original slots. */
         long refundMaterial(String materialKey, long amount) {
-            if (amount <= 0) return 0;
+            if (amount <= 0 || isSeedSatisfied(materialKey)) return 0;
             Material material = resolveMaterial(materialKey);
             if (material == null) return 0;
             List<Removal> records = byMaterial.get(material);
@@ -385,6 +442,7 @@ final class PaperInventoryHelper {
         /** Return up to {@code amount} exact copies of {@code template} to their original slots. */
         long refundExact(ItemStack template, long amount) {
             if (amount <= 0 || template == null) return 0;
+            if (isSeedSatisfied(template.getType().getKey().toString())) return amount;
             List<Removal> records = byExact.get(template);
             if (records == null || records.isEmpty()) return 0;
             long left = amount;
@@ -405,6 +463,7 @@ final class PaperInventoryHelper {
 
         /** Refund to the original slots, giving any not-accounted leftovers to the player. */
         long refundOrGive(Player player, String materialKey, long amount) {
+            if (isSeedSatisfied(materialKey)) return amount;
             long refunded = refundMaterial(materialKey, amount);
             long left = amount - refunded;
             if (left > 0 && player != null) giveOrDrop(player, materialKey, left);
@@ -412,6 +471,7 @@ final class PaperInventoryHelper {
         }
 
         long refundOrGiveExact(Player player, ItemStack template, long amount) {
+            if (template != null && isSeedSatisfied(template.getType().getKey().toString())) return amount;
             long refunded = refundExact(template, amount);
             long left = amount - refunded;
             if (left > 0 && player != null) giveExact(player, template, left);
@@ -454,7 +514,7 @@ final class PaperInventoryHelper {
                     if (!(block.getState() instanceof InventoryHolder holder)) continue;
                     Inventory inventory = holder.getInventory();
                     if (seen.add(inventory)) {
-                        out.add(new SlotInventorySource(inventory, true));
+                        out.add(new SlotInventorySource(inventory, true, block.getLocation()));
                     }
                 }
             }
@@ -465,6 +525,7 @@ final class PaperInventoryHelper {
     static long count(List<ItemSource> sources, String materialKey, int requiredBuckets, boolean fireRequiresFlint) {
         Material material = resolveMaterial(materialKey);
         if (material == null) return 0;
+        if (SeedCatalog.ownsSeeds(sources, material)) return Long.MAX_VALUE;
         if (isFluid(material)) {
             return countAcross(sources, fluidBucket(material)) >= requiredBuckets ? Long.MAX_VALUE : 0;
         }
@@ -485,6 +546,10 @@ final class PaperInventoryHelper {
         if (amount <= 0) return 0;
         Material material = resolveMaterial(materialKey);
         if (material == null) return 0;
+        if (SeedCatalog.ownsSeeds(sources, material)) {
+            if (ledger != null) ledger.markSeedSatisfied(materialKey);
+            return amount;
+        }
         if (isFluid(material)) {
             return countAcross(sources, fluidBucket(material)) >= requiredBuckets ? amount : 0;
         }
@@ -502,6 +567,7 @@ final class PaperInventoryHelper {
 
     static long countExact(List<ItemSource> sources, ItemStack template) {
         if (template == null || template.getType().isAir()) return 0;
+        if (SeedCatalog.ownsSeeds(sources, template.getType())) return Long.MAX_VALUE;
         long total = 0;
         for (ItemSource source : sources) total += source.countExact(template);
         return total;
@@ -510,6 +576,10 @@ final class PaperInventoryHelper {
     /** Remove up to {@code amount} exact matches of {@code template} across all sources. */
     static long takeExact(List<ItemSource> sources, ItemStack template, long amount, RemovalLedger ledger) {
         if (amount <= 0 || template == null || template.getType().isAir()) return 0;
+        if (SeedCatalog.ownsSeeds(sources, template.getType())) {
+            if (ledger != null) ledger.markSeedSatisfied(template.getType().getKey().toString());
+            return amount;
+        }
         long remaining = amount;
         for (ItemSource source : sources) {
             remaining -= source.takeExact(template, remaining, ledger);
@@ -548,9 +618,35 @@ final class PaperInventoryHelper {
                 materialKey, requiredBuckets, true);
     }
 
+    /** Search-option-aware count for single/region place: player inventory plus nearby containers. */
+    static long count(Player player, String materialKey, SearchOptions options) {
+        return count(options.sources(player), materialKey, options.requiredBuckets, options.fireRequiresFlint);
+    }
+
+    /** Whether {@code player} holds the complete seed set for the given material key (no containers). */
+    static boolean playerOwnsSeeds(Player player, String materialKey, boolean searchShulkers) {
+        if (player == null) return false;
+        Material material = resolveMaterial(materialKey);
+        if (material == null) return false;
+        return SeedCatalog.ownsSeeds(List.of(new SlotInventorySource(player.getInventory(), searchShulkers)), material);
+    }
+
+    /** Search-option-aware seed check for single/region place: player inventory plus nearby containers. */
+    static boolean playerOwnsSeeds(Player player, String materialKey, SearchOptions options) {
+        if (player == null) return false;
+        Material material = resolveMaterial(materialKey);
+        if (material == null) return false;
+        return SeedCatalog.ownsSeeds(options.sources(player), material);
+    }
+
     static long take(Player player, String materialKey, long amount, boolean searchShulkers, int requiredBuckets) {
         return take(List.of(new SlotInventorySource(player.getInventory(), searchShulkers)),
                 materialKey, amount, requiredBuckets, true, null);
+    }
+
+    /** Search-option-aware take for single/region place: player inventory plus nearby containers. */
+    static long take(Player player, String materialKey, long amount, SearchOptions options, RemovalLedger ledger) {
+        return take(options.sources(player), materialKey, amount, options.requiredBuckets, options.fireRequiresFlint, ledger);
     }
 
     static long countExact(Player player, ItemStack template, boolean searchShulkers) {
@@ -766,6 +862,20 @@ final class PaperInventoryHelper {
         long total = 0;
         for (ItemStack inner : box.getInventory().getContents()) {
             if (inner != null && inner.getType() == material) total += inner.getAmount();
+        }
+        return total;
+    }
+
+    /** Seed catalysts are never removed, so compact admin bundles may be searched recursively. */
+    private static long countInContainerBundle(ItemStack containerStack, Material material, int depth) {
+        if (depth >= 4) return 0;
+        if (!(containerStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;
+        if (!(meta.getBlockState() instanceof InventoryHolder holder)) return 0;
+        long total = 0;
+        for (ItemStack inner : holder.getInventory().getContents()) {
+            if (inner == null) continue;
+            if (inner.getType() == material) total += inner.getAmount();
+            else total += countInContainerBundle(inner, material, depth + 1);
         }
         return total;
     }
