@@ -94,14 +94,28 @@ public final class BuildSelectionController {
     }
 
     /**
-     * Shift+scroll adjusts look distance. Plain scroll must not be consumed.
-     *
-     * @return true if the scroll was consumed (hotbar must not change).
+     * Shift+scroll adjusts look distance. Ctrl+scroll adjusts hollow/submode.
+     * Both must return true so hotbar does not change.
      */
     public static boolean onHotbarScroll(double vertical) {
         if (!active || vertical == 0) return false;
         Minecraft client = Minecraft.getInstance();
-        if (client.player == null || !client.player.isShiftKeyDown()) return false;
+        if (client.player == null) return false;
+        if (ClientPlatform.instance().isCtrlKeyDown()) {
+            int delta = vertical > 0 ? 1 : -1;
+            if (mode == BuildMode.SLOPE_FLOOR) {
+                currentHollow = (currentHollow + delta + 3) % 3;
+            } else if (isVolumeMode(mode)) {
+                currentHollow = Math.max(0, Math.min(MAX_HOLLOW, currentHollow + delta));
+            } else {
+                return true;
+            }
+            cachedFull = Set.of();
+            cachedFaces = List.of();
+            notify(submodeLabel());
+            return true;
+        }
+        if (!client.player.isShiftKeyDown()) return false;
         int delta = vertical > 0 ? 1 : -1;
         int next = Math.max(1, Math.min(MAX_LOOK_DISTANCE, lookDistance + delta));
         if (next == lookDistance) return true;
@@ -135,7 +149,7 @@ public final class BuildSelectionController {
         if (!active || client.player == null || client.level == null) return;
         clampLookDistance(client);
         boolean shiftDown = client.player.isShiftKeyDown();
-        if (shiftDown && !prevShiftDown && first == null && !ClientPlatform.instance().isScreenOpen(client)) {
+        if (shiftDown && !prevShiftDown && !ClientPlatform.instance().isScreenOpen(client)) {
             toggleSubmode();
         }
         prevShiftDown = shiftDown;
@@ -202,7 +216,7 @@ public final class BuildSelectionController {
                                 : (placing ? "maxfastbuild.selection.cancel_hint" : "maxfastbuild.selection.cancel_hint_none")),
                 center, y + 36, 0xFFB7C0CC);
         Component sm = submodeLabel();
-        if (sm != null && first == null) {
+        if (sm != null) {
             canvas.centeredText(client.font, sm, center, y + 50, 0xFFA0A0A0);
         }
     }
@@ -368,45 +382,40 @@ public final class BuildSelectionController {
     private static int submodeCount() {
         return switch (mode) {
             case SLOPE_FLOOR -> 3;
-            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE -> 2;
+            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE -> MAX_HOLLOW + 1;
             default -> 1;
         };
     }
 
-    private static String submodeKey() {
-        return switch (mode) {
-            case SLOPE_FLOOR -> switch (currentHollow) {
-                case 0 -> "maxfastbuild.submode.smooth";
-                case 1 -> "maxfastbuild.submode.stair_x";
-                default -> "maxfastbuild.submode.stair_z";
-            };
-            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE ->
-                currentHollow == 0 ? "maxfastbuild.submode.solid" : "maxfastbuild.submode.hollow";
-            default -> null;
+    private static boolean isVolumeMode(BuildMode m) {
+        return switch (m) {
+            case CUBE, CIRCLE, CYLINDER, SPHERE, PYRAMID, CONE -> true;
+            default -> false;
         };
     }
+
+    private static final int MAX_HOLLOW = 10;
 
     private static Component submodeLabel() {
-        int count = submodeCount();
-        if (count <= 1) return null;
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < count; i++) {
-            if (i > 0) sb.append("  ");
-            sb.append(i == currentHollow ? "▸ " : "  ");
-            sb.append(Component.translatable(submodeKeyFor(mode, i)).getString());
+        if (mode == BuildMode.SLOPE_FLOOR) {
+            return slopeLabel();
         }
-        return Component.literal(sb.toString());
+        if (!isVolumeMode(mode)) return null;
+        String value = currentHollow == 0
+                ? Component.translatable("maxfastbuild.submode.solid").getString()
+                : Component.translatable("maxfastbuild.submode.hollow_shell", currentHollow).getString();
+        return Component.literal("▸ " + value);
     }
 
-    private static String submodeKeyFor(BuildMode m, int index) {
-        return switch (m) {
-            case SLOPE_FLOOR -> switch (index) {
-                case 0 -> "maxfastbuild.submode.smooth";
-                case 1 -> "maxfastbuild.submode.stair_x";
-                default -> "maxfastbuild.submode.stair_z";
-            };
-            default -> index == 0 ? "maxfastbuild.submode.solid" : "maxfastbuild.submode.hollow";
-        };
+    private static Component slopeLabel() {
+        String[] keys = {"maxfastbuild.submode.smooth", "maxfastbuild.submode.stair_x", "maxfastbuild.submode.stair_z"};
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            if (i > 0) sb.append("  ");
+            sb.append(i == currentHollow ? "▸ " : "  ");
+            sb.append(Component.translatable(keys[i]).getString());
+        }
+        return Component.literal(sb.toString());
     }
 
     private static void toggleSubmode() {

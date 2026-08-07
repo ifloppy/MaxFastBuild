@@ -67,6 +67,9 @@ public abstract class ClientPlatform {
     /** Physical key state via GLFW — works while a Screen is open. */
     public abstract boolean isKeyPhysicalDown(InputConstants.Key key);
 
+    /** Whether Ctrl (left or right) is physically pressed. Works while a Screen is open. */
+    public abstract boolean isCtrlKeyDown();
+
     /** Hook hotbar-scroll cancellation while a selection is active (no-op where unsupported). */
     public abstract void registerHotbarScrollHook();
 

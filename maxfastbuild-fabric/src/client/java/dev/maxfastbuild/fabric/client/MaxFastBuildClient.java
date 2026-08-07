@@ -25,6 +25,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
     public static KeyMapping instantKey;
 
     private static boolean helloPending;
+    /** True after the first successful handshake this connection, so the "loaded" notice shows once. */
+    private static boolean handshakeNotified;
 
     @Override
     public void onInitializeClient() {
@@ -61,17 +63,24 @@ public final class MaxFastBuildClient implements ClientModInitializer {
 
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             helloPending = true;
+            handshakeNotified = false;
         });
     }
 
     private static boolean consumeProtocol(Component message) {
         String text = message.getString();
-        if (!text.startsWith(ProtocolEnvelope.MESSAGE_MARKER)) return true;
+        if (!text.startsWith(ProtocolEnvelope.MESSAGE_MARKER)) {
+            // Hide the vanilla "unknown or incomplete command: __mfb ..." error that appears when
+            // the server has no MaxFastBuild plugin (handshake can never succeed there).
+            if (text.contains("__mfb")) return false;
+            return true;
+        }
         try {
             JsonObject object = JsonParser.parseString(text.substring(ProtocolEnvelope.MESSAGE_MARKER.length())).getAsJsonObject();
             String type = object.has("type") ? object.get("type").getAsString() : "response";
             if ("hello".equals(type)) {
                 PasteController.onHello(object);
+                notifyHandshakeOk();
                 return false;
             }
             if ("paste_ack".equals(type)) {
@@ -101,6 +110,16 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             }
         }
         return false;
+    }
+
+    private static void notifyHandshakeOk() {
+        if (handshakeNotified) return;
+        handshakeNotified = true;
+        Minecraft client = Minecraft.getInstance();
+        if (client.player == null) return;
+        Component message = Component.translatable("maxfastbuild.handshake.ok")
+                .withStyle(style -> style.withColor(net.minecraft.ChatFormatting.GREEN));
+        ClientPlatform.instance().sendSystemMessage(message);
     }
 
     private static String formatFallback(String key, Object[] args) {

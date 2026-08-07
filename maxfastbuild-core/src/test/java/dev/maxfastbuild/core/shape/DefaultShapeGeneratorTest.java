@@ -12,9 +12,24 @@ class DefaultShapeGeneratorTest {
         assertThat(blocks).contains(new BlockPos(0, 0, 0), new BlockPos(2, 1, 0), new BlockPos(4, 2, 0)).hasSize(5);
     }
 
-    @Test void hollowCubeExcludesInterior() {
+    @Test void solidCubeIsFull() {
+        var blocks = generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(2, 2, 2), 0), 100);
+        assertThat(blocks).hasSize(27);
+    }
+
+    @Test void shell1CubeExcludesInterior() {
         var blocks = generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(2, 2, 2), 1), 100);
         assertThat(blocks).hasSize(26).doesNotContain(new BlockPos(1, 1, 1));
+    }
+
+    @Test void shellThicknessIsAutoCapped() {
+        var blocks = generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(2, 2, 2), 10), 100);
+        assertThat(blocks).hasSize(26);
+    }
+
+    @Test void shell2CubeLeavesSmallerHollow() {
+        var blocks = generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(4, 4, 4), 2), 300);
+        assertThat(blocks).hasSize(125 - 1).doesNotContain(new BlockPos(2, 2, 2));
     }
 
     @Test void slopeFloorSmoothSurface() {
@@ -54,7 +69,6 @@ class DefaultShapeGeneratorTest {
     }
 
     @Test void rejectsHollowCuboidWhenBoundingVolumeExceedsLimit() {
-        // Surface alone would be under a high surface budget, but volume scan would be huge.
         assertThatThrownBy(() -> generator.generate(
                 new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(50, 50, 50), 1), 1000))
                 .isInstanceOf(ShapeLimitException.class);

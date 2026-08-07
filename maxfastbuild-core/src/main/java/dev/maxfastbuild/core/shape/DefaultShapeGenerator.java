@@ -4,6 +4,8 @@ import dev.maxfastbuild.api.*;
 import java.util.*;
 
 public final class DefaultShapeGenerator implements ShapeGenerator {
+    private static final int[][] NEIGHBORS_6 = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+
     @Override
     public Set<BlockPos> generate(ShapeRequest request, int limit) {
         if (limit < 1) throw new IllegalArgumentException("limit must be positive");
@@ -14,12 +16,42 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
             case LINE, DIAGONAL_LINE -> line(result, request.first(), request.second(), limit);
             case WALL, DIAGONAL_WALL -> wall(result, request, limit);
             case SLOPE_FLOOR -> slopeFloor(result, request, limit);
-            case FLOOR, CUBE -> cuboid(result, request.bounds(), request.hollow() != 0, request.mode() == BuildMode.FLOOR, limit);
-            case CIRCLE -> ellipse(result, request.bounds(), request.hollow() != 0, false, limit);
-            case CYLINDER -> ellipse(result, request.bounds(), request.hollow() != 0, true, limit);
-            case SPHERE -> ellipsoid(result, request.bounds(), request.hollow() != 0, limit);
-            case PYRAMID -> pyramid(result, request.bounds(), request.hollow() != 0, false, limit);
-            case CONE -> pyramid(result, request.bounds(), request.hollow() != 0, true, limit);
+            case FLOOR, CUBE -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                cuboidSolid(solid, request.bounds(), request.mode() == BuildMode.FLOOR, limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
+            case CIRCLE -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                ellipseSolid(solid, request.bounds(), false, limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
+            case CYLINDER -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                ellipseSolid(solid, request.bounds(), true, limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
+            case SPHERE -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                ellipsoidSolid(solid, request.bounds(), limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
+            case PYRAMID -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                pyramidSolid(solid, request.bounds(), false, limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
+            case CONE -> {
+                LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
+                pyramidSolid(solid, request.bounds(), true, limit);
+                if (request.hollow() > 0) shell(solid, request.bounds(), request.hollow());
+                result.addAll(solid);
+            }
         }
         return Collections.unmodifiableSet(result);
     }
@@ -105,18 +137,52 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
         }
     }
 
-    private static void cuboid(Set<BlockPos> out, Bounds b, boolean hollow, boolean floor, int limit) {
+    /**
+     * Extract an N-thickness shell from a solid block set via BFS from the surface.
+     * Automatically caps thickness so at least one interior block remains hollow.
+     */
+    static void shell(LinkedHashSet<BlockPos> solid, Bounds bounds, int thickness) {
+        if (solid.isEmpty() || thickness < 1) return;
+        int maxDim = (int) Math.min(Math.min(bounds.sizeX(), bounds.sizeY()), bounds.sizeZ());
+        int maxThickness = Math.min(thickness, (maxDim - 1) / 2);
+        if (maxThickness < 1) return;
+        Map<BlockPos, Integer> depth = new HashMap<>(solid.size());
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        for (BlockPos pos : solid) {
+            for (int[] n : NEIGHBORS_6) {
+                BlockPos nb = new BlockPos(pos.x() + n[0], pos.y() + n[1], pos.z() + n[2]);
+                if (!solid.contains(nb)) {
+                    depth.put(pos, 0);
+                    queue.add(pos);
+                    break;
+                }
+            }
+        }
+        while (!queue.isEmpty()) {
+            BlockPos pos = queue.pollFirst();
+            int d = depth.get(pos);
+            if (d >= maxThickness) continue;
+            for (int[] n : NEIGHBORS_6) {
+                BlockPos nb = new BlockPos(pos.x() + n[0], pos.y() + n[1], pos.z() + n[2]);
+                if (solid.contains(nb) && !depth.containsKey(nb)) {
+                    depth.put(nb, d + 1);
+                    queue.add(nb);
+                }
+            }
+        }
+        solid.retainAll(depth.keySet());
+        solid.removeIf(pos -> depth.get(pos) >= maxThickness);
+    }
+
+    private static void cuboidSolid(Set<BlockPos> out, Bounds b, boolean floor, int limit) {
         int maxY = floor ? b.min().y() : b.max().y();
         for (int x = b.min().x(); x <= b.max().x(); x++)
             for (int y = b.min().y(); y <= maxY; y++)
-                for (int z = b.min().z(); z <= b.max().z(); z++) {
-                    boolean edge = x == b.min().x() || x == b.max().x() || y == b.min().y()
-                            || y == maxY || z == b.min().z() || z == b.max().z();
-                    if (!hollow || edge) add(out, new BlockPos(x, y, z), limit);
-                }
+                for (int z = b.min().z(); z <= b.max().z(); z++)
+                    add(out, new BlockPos(x, y, z), limit);
     }
 
-    private static void ellipse(Set<BlockPos> out, Bounds b, boolean hollow, boolean cylinder, int limit) {
+    private static void ellipseSolid(Set<BlockPos> out, Bounds b, boolean cylinder, int limit) {
         double cx = (b.min().x() + b.max().x() + 1) / 2.0;
         double cz = (b.min().z() + b.max().z() + 1) / 2.0;
         double rx = Math.max(.5, b.sizeX() / 2.0), rz = Math.max(.5, b.sizeZ() / 2.0);
@@ -125,11 +191,11 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
             for (int x = b.min().x(); x <= b.max().x(); x++)
                 for (int z = b.min().z(); z <= b.max().z(); z++) {
                     double d = sq((x + .5 - cx) / rx) + sq((z + .5 - cz) / rz);
-                    if (d <= 1.0 && (!hollow || d >= .60)) add(out, new BlockPos(x, y, z), limit);
+                    if (d <= 1.0) add(out, new BlockPos(x, y, z), limit);
                 }
     }
 
-    private static void ellipsoid(Set<BlockPos> out, Bounds b, boolean hollow, int limit) {
+    private static void ellipsoidSolid(Set<BlockPos> out, Bounds b, int limit) {
         double cx = (b.min().x() + b.max().x() + 1) / 2.0;
         double cy = (b.min().y() + b.max().y() + 1) / 2.0;
         double cz = (b.min().z() + b.max().z() + 1) / 2.0;
@@ -138,11 +204,11 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
             for (int y = b.min().y(); y <= b.max().y(); y++)
                 for (int z = b.min().z(); z <= b.max().z(); z++) {
                     double d = sq((x + .5 - cx) / rx) + sq((y + .5 - cy) / ry) + sq((z + .5 - cz) / rz);
-                    if (d <= 1.0 && (!hollow || d >= .58)) add(out, new BlockPos(x, y, z), limit);
+                    if (d <= 1.0) add(out, new BlockPos(x, y, z), limit);
                 }
     }
 
-    private static void pyramid(Set<BlockPos> out, Bounds b, boolean hollow, boolean round, int limit) {
+    private static void pyramidSolid(Set<BlockPos> out, Bounds b, boolean round, int limit) {
         int height = Math.max(1, (int) b.sizeY());
         double cx = (b.min().x() + b.max().x()) / 2.0, cz = (b.min().z() + b.max().z()) / 2.0;
         for (int layer = 0; layer < height; layer++) {
@@ -153,16 +219,12 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
             int xEnd = (int) Math.floor(cx + rx);
             int zStart = (int) Math.ceil(cz - rz);
             int zEnd = (int) Math.floor(cz + rz);
-            boolean topOrBottom = layer == 0 || layer == height - 1;
-            for (int x = xStart; x <= xEnd; x++) {
-                boolean xEdge = x == xStart || x == xEnd;
+            for (int x = xStart; x <= xEnd; x++)
                 for (int z = zStart; z <= zEnd; z++) {
-                    boolean edge = xEdge || z == zStart || z == zEnd;
                     double normalized = rx == 0 || rz == 0 ? 0 : sq((x - cx) / rx) + sq((z - cz) / rz);
-                    if ((!round || normalized <= 1.0) && (!hollow || edge || topOrBottom))
+                    if (!round || normalized <= 1.0)
                         add(out, new BlockPos(x, b.min().y() + layer, z), limit);
                 }
-            }
         }
     }
 
