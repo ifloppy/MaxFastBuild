@@ -4,6 +4,7 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.Chest;
 import org.bukkit.block.ShulkerBox;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
@@ -585,6 +586,111 @@ final class PaperInventoryHelper {
             HashMap<Integer, ItemStack> leftover = player.getInventory().addItem(item);
             dropLeftover(player, leftover);
             left -= stack;
+        }
+    }
+
+    /**
+     * Compact a list of materials/items (each ItemStack carries its full amount in {@code getAmount()})
+     * into full white shulker boxes, then pack those boxes into chest-with-NBT items (27 boxes per chest).
+     * Shulker-box materials go directly into the chest (a shulker cannot nest in a shulker).
+     * Returns the chest items; the caller hands them to the player.
+     */
+    static java.util.List<ItemStack> compactStorage(java.util.List<ItemStack> supplies) {
+        java.util.List<ItemStack> boxes = new ArrayList<>();
+        for (ItemStack supply : supplies) {
+            if (supply == null || supply.getAmount() <= 0 || supply.getType().isAir()) continue;
+            Material mat = supply.getType();
+            int maxStack = mat.getMaxStackSize();
+            long left = supply.getAmount();
+            if (isShulkerBox(mat)) { // cannot nest a shulker inside a shulker; outer chest holds them
+                while (left > 0) {
+                    int stack = (int) Math.min(left, maxStack);
+                    ItemStack copy = supply.clone();
+                    copy.setAmount(stack);
+                    boxes.add(copy);
+                    left -= stack;
+                }
+                continue;
+            }
+            long perShulker = 27L * maxStack;
+            while (left > 0) {
+                long batch = Math.min(left, perShulker);
+                boxes.add(packShulker(supply, maxStack, batch));
+                left -= batch;
+            }
+        }
+        java.util.List<ItemStack> chests = new ArrayList<>();
+        for (int i = 0; i < boxes.size(); i += 27) {
+            ItemStack chestItem = new ItemStack(Material.CHEST);
+            BlockStateMeta meta = (BlockStateMeta) chestItem.getItemMeta();
+            Chest chest = (Chest) meta.getBlockState();
+            Inventory inv = chest.getInventory();
+            int end = Math.min(i + 27, boxes.size());
+            for (int s = i; s < end; s++) inv.setItem(s - i, boxes.get(s));
+            meta.setBlockState(chest);
+            chestItem.setItemMeta(meta);
+            chests.add(chestItem);
+        }
+        return chests;
+    }
+
+    private static ItemStack packShulker(ItemStack supply, int maxStack, long count) {
+        ItemStack box = new ItemStack(Material.WHITE_SHULKER_BOX);
+        BlockStateMeta meta = (BlockStateMeta) box.getItemMeta();
+        ShulkerBox shulker = (ShulkerBox) meta.getBlockState();
+        Inventory inner = shulker.getInventory();
+        long left = count;
+        for (int slot = 0; slot < 27 && left > 0; slot++) {
+            int stack = (int) Math.min(left, maxStack);
+            ItemStack copy = supply.clone();
+            copy.setAmount(stack);
+            inner.setItem(slot, copy);
+            left -= stack;
+        }
+        meta.setBlockState(shulker);
+        box.setItemMeta(meta);
+        return box;
+    }
+
+    /** Expand chest-NBT items carried by the player back into their shulker boxes; overflow drops. Returns items unpacked. */
+    static int unpackChestStorage(Player player) {
+        Inventory inv = player.getInventory();
+        int unpacked = 0;
+        for (int slot = 0; slot < inv.getSize(); slot++) {
+            ItemStack stack = inv.getItem(slot);
+            if (stack == null || stack.getType() != Material.CHEST) continue;
+            if (!(stack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) continue;
+            if (!(meta.getBlockState() instanceof Chest chest)) continue;
+            ItemStack[] inner = chest.getInventory().getContents();
+            boolean changed = false;
+            for (ItemStack item : inner) {
+                if (item == null || item.getType().isAir()) continue;
+                dropLeftover(player, inv.addItem(item));
+                unpacked += item.getAmount();
+                changed = true;
+            }
+            if (changed || inner.length > 0) inv.setItem(slot, null);
+        }
+        return unpacked;
+    }
+
+    /** Remove every dropped item entity in the player's world; returns how many were removed. */
+    static int clearWorldDrops(Player player) {
+        int removed = 0;
+        for (org.bukkit.entity.Entity entity : player.getWorld().getEntities()) {
+            if (entity instanceof org.bukkit.entity.Item) {
+                entity.remove();
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    /** Give a list of compact chest-NBT items to the player; overflow drops at the player location. */
+    static void giveBundles(Player player, java.util.List<ItemStack> chests) {
+        for (ItemStack chest : chests) {
+            if (chest == null || chest.getType().isAir()) continue;
+            dropLeftover(player, player.getInventory().addItem(chest));
         }
     }
 

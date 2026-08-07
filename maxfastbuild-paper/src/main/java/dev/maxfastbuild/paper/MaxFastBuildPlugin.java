@@ -37,6 +37,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
     private final Map<UUID, PendingPaste> pendingPastes = new ConcurrentHashMap<>();
+    /** Last computed paste materials per player, kept even after the pending is removed (materials check may reject). */
+    private final Map<UUID, PasteMaterials> lastPasteNeeds = new ConcurrentHashMap<>();
     private final Map<UUID, List<PendingEntity>> taskEntities = new ConcurrentHashMap<>();
     private final Map<UUID, PaperInventoryHelper.RemovalLedger> taskRemovals = new ConcurrentHashMap<>();
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
@@ -235,6 +237,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sessions.clear();
             pendingBuilds.clear();
             pendingPastes.clear();
+            lastPasteNeeds.clear();
             commandQueues.clear();
             try { chunks.clear(); } catch (RuntimeException ignored) { }
             try { pastes.clear(); } catch (RuntimeException ignored) { }
@@ -363,6 +366,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         UUID playerId = event.getPlayer().getUniqueId();
         pendingBuilds.remove(playerId);
         commandQueues.remove(playerId);
+        pendingPastes.remove(playerId);
+        lastPasteNeeds.remove(playerId);
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(playerId)) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
@@ -1476,6 +1481,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             cancelPastePrecheck(player, pending);
             return;
         }
+        pending.needs = needs;
+        lastPasteNeeds.put(player.getUniqueId(), needs);
         if (requireMaterials) {
             for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 Material resolved = PaperInventoryHelper.resolveMaterial(entry.getKey());
@@ -1798,6 +1805,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             messages.send(sender, "admin-help-header");
             messages.send(sender, "admin-help-reload");
             messages.send(sender, "admin-help-recovery");
+            sender.sendMessage("/mfbadmin giveall <player> [exceptMaterial] - give all paste materials except one");
+            sender.sendMessage("/mfbadmin clear <player> - clear the player's inventory and ground drops");
+            sender.sendMessage("/mfbadmin unpack <player> - expand chest-NBT items into shulker boxes");
             return true;
         }
         if (args[0].equalsIgnoreCase("reload")) {
@@ -1812,10 +1822,106 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             messages.send(sender, "recovery", tasks.recoverable().size(), ledger.pending().size());
         } else if (args[0].equalsIgnoreCase("torches") && args.length >= 7) {
             dumpTorches(sender, args);
+        } else if (args[0].equalsIgnoreCase("giveall") && args.length >= 2) {
+            giveAllPasteMaterials(sender, args);
+        } else if ((args[0].equalsIgnoreCase("clear") || args[0].equalsIgnoreCase("clearinv")) && args.length >= 2) {
+            clearPlayerAndDrops(sender, args);
+        } else if (args[0].equalsIgnoreCase("unpack") && args.length >= 2) {
+            unpackPasteStorage(sender, args);
         } else {
             messages.send(sender, "admin-unknown");
         }
         return true;
+    }
+
+    /** Debug/admin helper: empty a player's inventory and remove every dropped item in their world. */
+    private void clearPlayerAndDrops(org.bukkit.command.CommandSender sender, String[] args) {
+        Player target = Bukkit.getPlayer(args[1]);
+        if (target == null) {
+            sender.sendMessage("Player not found: " + args[1]);
+            return;
+        }
+        target.getInventory().clear();
+        int removed = PaperInventoryHelper.clearWorldDrops(target);
+        getLogger().info("[MaxFastBuild] admin clear player=" + target.getName()
+                + " dropsRemoved=" + removed);
+        sender.sendMessage("Cleared " + target.getName() + "'s inventory and removed " + removed + " dropped items.");
+    }
+
+    /** Debug/admin helper: expand chest-with-NBT items back into the shulker boxes they hold. */
+    private void unpackPasteStorage(org.bukkit.command.CommandSender sender, String[] args) {
+        Player target = Bukkit.getPlayer(args[1]);
+        if (target == null) {
+            sender.sendMessage("Player not found: " + args[1]);
+            return;
+        }
+        int items = PaperInventoryHelper.unpackChestStorage(target);
+        getLogger().info("[MaxFastBuild] admin unpack player=" + target.getName()
+                + " items=" + items);
+        sender.sendMessage("Unpacked " + items + " items into " + target.getName() + "'s inventory.");
+    }
+
+    /**
+     * Debug/admin helper: give a player every item required by their last prechecked paste,
+     * except an optionally excluded material. Used to clone a large machine in survival mode
+     * without grinding every component.
+     * Usage: {@code /mfbadmin giveall <player> [exceptMaterial]}
+     */
+    private void giveAllPasteMaterials(org.bukkit.command.CommandSender sender, String[] args) {
+        Player target = Bukkit.getPlayer(args[1]);
+        if (target == null) {
+            sender.sendMessage("Player not found: " + args[1]);
+            return;
+        }
+        PasteMaterials needs = lastPasteNeeds.get(target.getUniqueId());
+        if (needs == null) {
+            sender.sendMessage("No computed paste materials for " + target.getName()
+                    + ". Paste once (even if rejected) so materials are computed.");
+            return;
+        }
+        String except = args.length >= 3 ? args[2] : null;
+        long givenBlocks = 0;
+        long skippedBlocks = 0;
+        java.util.List<org.bukkit.inventory.ItemStack> supplies = new java.util.ArrayList<>();
+        for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
+            if (except != null && except.equalsIgnoreCase(entry.getKey())) {
+                skippedBlocks += entry.getValue();
+                continue;
+            }
+            Material mat = PaperInventoryHelper.resolveMaterial(entry.getKey());
+            if (mat == null || !mat.isItem()) continue;
+            org.bukkit.inventory.ItemStack item = new org.bukkit.inventory.ItemStack(mat);
+            item.setAmount((int) (long) entry.getValue());
+            supplies.add(item);
+            givenBlocks += entry.getValue();
+        }
+        long givenContents = 0;
+        long skippedContents = 0;
+        for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
+            String key = entry.getKey().getType().getKey().toString();
+            if (except != null && except.equalsIgnoreCase(key)) {
+                skippedContents += entry.getValue();
+                continue;
+            }
+            org.bukkit.inventory.ItemStack item = entry.getKey().clone();
+            item.setAmount((int) (long) entry.getValue());
+            supplies.add(item);
+            givenContents += entry.getValue();
+        }
+        java.util.List<org.bukkit.inventory.ItemStack> chests = PaperInventoryHelper.compactStorage(supplies);
+        if (chests.isEmpty()) {
+            sender.sendMessage("No materials to give (all excluded by " + except + "?).");
+            return;
+        }
+        PaperInventoryHelper.giveBundles(target, chests);
+        sender.sendMessage("Gave " + target.getName() + " " + givenBlocks + " block items + "
+                + givenContents + " container contents, packed into "
+                + chests.size() + " chest(s) with NBT"
+                + (except == null ? "." : " (skipped " + skippedBlocks + " + " + skippedContents + " of " + except + ")."));
+        getLogger().info("[MaxFastBuild] admin giveall player=" + target.getName()
+                + " givenBlocks=" + givenBlocks + " givenContents=" + givenContents
+                + " chests=" + chests.size()
+                + " except=" + except + " skippedBlocks=" + skippedBlocks + " skippedContents=" + skippedContents);
     }
 
     /**
@@ -1980,6 +2086,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         Map.of("material", PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState())));
             }
             PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(mutation.targetNbt(), tileMaterial, registry);
+            if (check instanceof PaperNbtHelper.NbtCheck.Ok ok && !ok.items().isEmpty()) {
+                String nbt = String.valueOf(mutation.targetNbt());
+                Bukkit.getLogger().severe("[MaxFastBuild][nbtdbg] target=" + mutation.targetState()
+                        + " items=" + ok.items()
+                        + " nbt=" + (nbt == null ? "null" : nbt.substring(0, Math.min(120, nbt.length()))));
+            }
             if (check instanceof PaperNbtHelper.NbtCheck.Rejected rejected) {
                 String reason = rejected.reason();
                 if (reason.startsWith("forbidden_item_in_nbt")) {
@@ -1994,6 +2106,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 template.setAmount(1);
                 contents.merge(template, item.count(), Long::sum);
             }
+        }
+        if (!contents.isEmpty()) {
+            Bukkit.getLogger().severe("[MaxFastBuild][nbtdbg] TOTAL contents=" + contents);
         }
         return new PasteMaterials(blocks, contents);
     }
@@ -2522,6 +2637,7 @@ if (data.billableItem() != null) {
         final List<PendingEntity> entities;
         final List<PastePrecheckIssue> issues = new ArrayList<>();
         PaperInventoryHelper.RemovalLedger removals;
+        PasteMaterials needs;
         long replaceBreakCount = 0;
         long processed = 0;
         long planningSkipped = 0;

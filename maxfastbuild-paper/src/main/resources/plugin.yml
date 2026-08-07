@@ -21,7 +21,7 @@ commands:
     permission: maxfastbuild.use
   mfbadmin:
     description: MaxFastBuild 管理指令
-    usage: /mfbadmin <reload|recovery>
+    usage: /mfbadmin <reload|recovery|torches|giveall>
     permission: maxfastbuild.admin
 permissions:
   maxfastbuild.use:

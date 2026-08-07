@@ -73,6 +73,19 @@ public final class LitematicaBridge {
         stripContainerItems = value;
     }
 
+    /** Debug-only diagnostics, active when {@code config/maxfastbuild.json} has {@code "debug": true}. */
+    private static void debugLog(String message, Object... args) {
+        if (MaxFastBuildConfig.isDebugEnabled()) {
+            LOGGER.info("[MaxFastBuild] [debug] " + message, args);
+        }
+    }
+
+    /** Truncate a possibly large SNBT string for debug logging. */
+    private static String clip(String value, int max) {
+        if (value == null) return "null";
+        return value.length() <= max ? value : value.substring(0, max) + "...(" + value.length() + " chars)";
+    }
+
     /** Entities collected alongside the most recent {@link #collect()} blocks. */
     public static List<PasteEntity> lastEntities() {
         return lastEntities;
@@ -130,7 +143,8 @@ public final class LitematicaBridge {
                 List<PasteBlock> blocks = collectPlacement(placement, entities);
                 if (!blocks.isEmpty()) {
                     lastEntities = entities;
-                    LOGGER.info("[MaxFastBuild] collected blocks=" + blocks.size() + " entities=" + entities.size());
+                    LOGGER.info("[MaxFastBuild] collected blocks=" + blocks.size() + " entities=" + entities.size()
+                            + " strip=" + stripContainerItems + " debug=" + MaxFastBuildConfig.isDebugEnabled());
                     return blocks;
                 }
             }
@@ -283,6 +297,11 @@ public final class LitematicaBridge {
             } else {
                 snbt = ClientPlatform.instance().entityNbtToSnbt(nbt);
             }
+            debugLog("entity type={} strip={} hasItems={} snbtHasItems={} snbt={}",
+                    type, stripContainerItems,
+                    ClientPlatform.instance().nbtHasKey(nbt, "Items"),
+                    snbt != null && snbt.contains("Items"),
+                    clip(snbt, 600));
             if (snbt == null || snbt.isBlank()) continue;
             Vec3 transformed = getTransformedVec3(
                     getTransformedVec3(pos, placementMirror, placementRotation), subMirrorAdj, combined);
@@ -388,6 +407,12 @@ public final class LitematicaBridge {
         } else {
             snbt = nbt == null ? null : ClientPlatform.instance().nbtToSnbt(nbt);
         }
+        debugLog("blockEntity {} rel={} strip={} nbt={} hasItems={} snbtHasItems={} snbt={}",
+                out, relative, stripContainerItems,
+                nbt == null ? "null" : "present",
+                nbt != null && ClientPlatform.instance().nbtHasKey(nbt, "Items"),
+                snbt != null && snbt.contains("Items"),
+                clip(snbt, 600));
         boolean usable = snbt != null && !snbt.isBlank() && !"{}".equals(snbt);
         // A lectern's schematic NBT counts as usable only when it actually carries a Book;
         // Litematica 26.2 can save has_book=true with no book content ({components:{}}).

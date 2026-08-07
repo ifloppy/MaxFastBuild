@@ -30,6 +30,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
 
     @Override
     public void onInitializeClient() {
+        MaxFastBuildConfig.load();
         radialKey = ClientPlatform.instance().createRadialKey();
         pasteKey = ClientPlatform.instance().createPasteKey();
         instantKey = ClientPlatform.instance().createInstantKey();
