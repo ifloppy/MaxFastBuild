@@ -1522,6 +1522,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 fluidBucketRequirement(),
                 getConfig().getBoolean("inventory.fire-requires-flint-and-steel", true));
         List<PaperInventoryHelper.ItemSource> sources = search.sources(player);
+        debugLog("paste diag sources player=" + player.getName()
+                + " count=" + sources.size()
+                + " searchShulkers=" + searchShulkers
+                + " searchContainers=" + getConfig().getBoolean("inventory.search-containers", true)
+                + " radius=" + getConfig().getInt("inventory.container-search-radius", 5));
+        for (int si = 0; si < sources.size(); si++) {
+            Location c = sources.get(si).container();
+            debugLog("  diag source[" + si + "] " + (c != null
+                    ? "container " + c.getBlockX() + "," + c.getBlockY() + "," + c.getBlockZ()
+                    : "player"));
+        }
         PaperInventoryHelper.RemovalLedger removals = new PaperInventoryHelper.RemovalLedger();
         pending.removals = removals;
 
@@ -1543,6 +1554,27 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         pending.needs = needs;
         lastPasteNeeds.put(player.getUniqueId(), needs);
         if (requireMaterials) {
+            // Blocks and container contents draw from the same item pool. Verify the per-material
+            // TOTAL once up front, so a combined shortage (e.g. 68 shulker-box blocks + 454 boxes
+            // stored inside containers vs 365 boxes on hand) is reported clearly instead of passing
+            // every per-entry check and then failing midway through the sequential takes.
+            Map<String, Long> totalNeeds = new LinkedHashMap<>(needs.blocks);
+            for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
+                Material type = entry.getKey().getType();
+                if (type == null || type.isAir() || RestrictedMaterials.isForbiddenItem(type)) continue;
+                totalNeeds.merge(type.getKey().toString(), entry.getValue(), Long::sum);
+            }
+            for (Map.Entry<String, Long> entry : totalNeeds.entrySet()) {
+                long have = PaperInventoryHelper.count(sources, entry.getKey(),
+                        search.requiredBuckets, search.fireRequiresFlint);
+                if (have < entry.getValue()) {
+                    debugLog("paste materials insufficient total player=" + player.getName()
+                            + " material=" + entry.getKey() + " need=" + entry.getValue() + " have=" + have);
+                    sendMaterialError(player, entry.getKey(), entry.getValue(), have,
+                            search.fireRequiresFlint, search.requiredBuckets);
+                    return;
+                }
+            }
             for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 Material resolved = PaperInventoryHelper.resolveMaterial(entry.getKey());
                 // needs.blocks mixes block items and entity billable items (minecarts, boats, armor
@@ -1600,6 +1632,21 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         if (requireMaterials) {
             auditContainerTakes(player, pending.world, true, sources, null);
+            // Take exact container contents first, then block items by type. A player who pre-fills
+            // the shulker boxes the paste places therefore has the wood inside them drained first
+            // (boxes stay behind), then the (now empty) boxes are taken for the block requirement —
+            // instead of blocks-first consuming the filled boxes and leaving the wood untakeable.
+            for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
+                long removed = PaperInventoryHelper.takeExact(sources, entry.getKey(), entry.getValue(), removals);
+                if (removed < entry.getValue()) {
+                    auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, removals);
+                    removals.restoreAll();
+                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
+                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
+                            insufficientMaterialsData(entry.getKey().getType(), entry.getValue(), removed));
+                    return;
+                }
+            }
             for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
                 long removed = PaperInventoryHelper.take(sources, entry.getKey(), entry.getValue(),
                         search.requiredBuckets, search.fireRequiresFlint, removals);
@@ -1609,17 +1656,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
                     sendMaterialError(player, entry.getKey(), entry.getValue(), removed,
                             search.fireRequiresFlint, search.requiredBuckets);
-                    return;
-                }
-            }
-            for (Map.Entry<org.bukkit.inventory.ItemStack, Long> entry : needs.contents.entrySet()) {
-                long removed = PaperInventoryHelper.takeExact(sources, entry.getKey(), entry.getValue(), removals);
-                if (removed < entry.getValue()) {
-                    auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, removals);
-                    removals.restoreAll();
-                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                    sendProtocol(player, "error", "maxfastbuild.error.insufficient_materials",
-                            insufficientMaterialsData(entry.getKey().getType(), entry.getValue(), removed));
                     return;
                 }
             }
@@ -2277,16 +2313,39 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
             }
             for (PaperNbtHelper.ItemInstance item : ((PaperNbtHelper.NbtCheck.Ok) check).items()) {
-                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
-                org.bukkit.inventory.ItemStack template = item.bukkit().clone();
-                template.setAmount(1);
-                contents.merge(template, item.count(), Long::sum);
+                billContentItem(blocks, contents, item.bukkit(), item.count());
             }
         }
         return new PasteMaterials(blocks, contents);
     }
 
     private record PasteMaterials(Map<String, Long> blocks, Map<org.bukkit.inventory.ItemStack, Long> contents) {}
+
+    /**
+     * Bill one container-content item. A container item (shulker box) that carries its own contents
+     * is billed like a placed container block: the container item itself by type (so a player's
+     * pre-filled box satisfies the box requirement — counted via {@code count(material)}, which sees
+     * empty and filled boxes alike) plus every item inside it billed separately. Plain items are
+     * billed as exact templates.
+     */
+    private static void billContentItem(Map<String, Long> blocks,
+                                        Map<org.bukkit.inventory.ItemStack, Long> contents,
+                                        org.bukkit.inventory.ItemStack item, long count) {
+        if (item == null || item.getType().isAir() || count <= 0) return;
+        if (item.getItemMeta() instanceof org.bukkit.inventory.meta.BlockStateMeta bsm
+                && bsm.hasBlockState()
+                && bsm.getBlockState() instanceof org.bukkit.inventory.InventoryHolder holder) {
+            blocks.merge(item.getType().getKey().toString(), count, Long::sum);
+            for (org.bukkit.inventory.ItemStack inner : holder.getInventory().getContents()) {
+                if (inner == null || inner.getType().isAir()) continue;
+                billContentItem(blocks, contents, inner, count * inner.getAmount());
+            }
+            return;
+        }
+        org.bukkit.inventory.ItemStack template = item.clone();
+        template.setAmount(1);
+        contents.merge(template, count, Long::sum);
+    }
 
     /** Add the items a paste's entities consume: the entity item (minecart/boat/armor stand/…) plus any container contents. */
     private static void addEntityMaterials(PasteMaterials needs, List<PendingEntity> entities) {
@@ -2295,10 +2354,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (pe.data().billableItem() == null) continue;
             needs.blocks.merge(pe.data().billableItem().getKey().toString(), 1L, Long::sum);
             for (PaperNbtHelper.ItemInstance item : pe.data().contents()) {
-                if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
-                org.bukkit.inventory.ItemStack template = item.bukkit().clone();
-                template.setAmount(1);
-                needs.contents.merge(template, item.count(), Long::sum);
+                billContentItem(needs.blocks, needs.contents, item.bukkit(), item.count());
             }
         }
     }

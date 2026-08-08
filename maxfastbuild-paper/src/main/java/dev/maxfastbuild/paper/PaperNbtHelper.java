@@ -86,6 +86,8 @@ final class PaperNbtHelper {
             Material shulker = resolve(color + "_SHULKER_BOX");
             if (shulker != null) register(shulker, new ItemField(FieldKind.LIST, "Items", true));
         }
+        Material plainShulker = resolve("SHULKER_BOX");
+        if (plainShulker != null) register(plainShulker, new ItemField(FieldKind.LIST, "Items", true));
 
         // Group B — single-item tiles. Lecture/record content is a functional part of the tile, so an
         // empty-container paste preserves it (and it is still billed); a pot's item/sherds are bulk

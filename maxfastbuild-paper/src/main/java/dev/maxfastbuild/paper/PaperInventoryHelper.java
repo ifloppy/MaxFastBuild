@@ -160,7 +160,6 @@ final class PaperInventoryHelper {
 
         private final Inventory inventory;
         private final boolean nestedShulkers;
-        private final ItemStack[] contents;
         private final int offhandPosition;
         private final Location container;
 
@@ -172,15 +171,7 @@ final class PaperInventoryHelper {
             this.inventory = inventory;
             this.nestedShulkers = nestedShulkers;
             this.container = container;
-            if (inventory instanceof PlayerInventory playerInventory) {
-                ItemStack[] base = inventory.getContents();
-                this.contents = Arrays.copyOf(base, base.length + 1);
-                this.contents[base.length] = playerInventory.getItemInOffHand();
-                this.offhandPosition = base.length;
-            } else {
-                this.contents = inventory.getContents();
-                this.offhandPosition = -1;
-            }
+            this.offhandPosition = inventory instanceof PlayerInventory ? inventory.getContents().length : -1;
         }
 
         @Override
@@ -201,10 +192,25 @@ final class PaperInventoryHelper {
         @Override
         public long count(Material material) {
             long total = 0;
-            for (ItemStack stack : contents) {
+            ItemStack[] snap = snapshot();
+            boolean shulkerDiag = material.name().contains("SHULKER");
+            if (shulkerDiag) {
+                System.err.print("[MFB-DIAG] SlotSource.count mat=" + material
+                        + " nested=" + nestedShulkers + " len=" + snap.length + " types=[");
+                for (int si = 0; si < Math.min(snap.length, 10); si++) {
+                    if (snap[si] != null) {
+                        System.err.print(snap[si].getType().name() + "x" + snap[si].getAmount() + " ");
+                    }
+                }
+                System.err.println("]");
+            }
+            for (ItemStack stack : snap) {
                 if (stack == null) continue;
                 if (stack.getType() == material) total += stack.getAmount();
                 else if (nestedShulkers) total += countInShulker(stack, material);
+            }
+            if (shulkerDiag) {
+                System.err.println("[MFB-DIAG] SlotSource.count mat=" + material + " total=" + total);
             }
             return total;
         }
@@ -212,7 +218,7 @@ final class PaperInventoryHelper {
         @Override
         public long countSeed(Material material) {
             long total = 0;
-            for (ItemStack stack : contents) {
+            for (ItemStack stack : snapshot()) {
                 if (stack == null) continue;
                 if (stack.getType() == material) total += stack.getAmount();
                 else if (nestedShulkers) total += countInContainerBundle(stack, material, 0);
@@ -223,10 +229,21 @@ final class PaperInventoryHelper {
         @Override
         public long countExact(ItemStack template) {
             long total = 0;
-            for (ItemStack stack : contents) {
+            ItemStack[] snap = snapshot();
+            boolean shulkerDiag = template.getType().name().contains("SHULKER");
+            if (shulkerDiag) {
+                System.err.println("[MFB-DIAG] SlotSource.countExact tmpl=" + template.getType().name()
+                        + " hasMeta=" + template.hasItemMeta()
+                        + " nested=" + nestedShulkers + " len=" + snap.length);
+            }
+            for (ItemStack stack : snap) {
                 if (stack == null) continue;
                 if (stack.isSimilar(template)) total += stack.getAmount();
                 else if (nestedShulkers) total += countInShulkerExact(stack, template);
+            }
+            if (shulkerDiag) {
+                System.err.println("[MFB-DIAG] SlotSource.countExact tmpl=" + template.getType().name()
+                        + " total=" + total);
             }
             return total;
         }
@@ -234,8 +251,9 @@ final class PaperInventoryHelper {
         @Override
         public long take(Material material, long amount, RemovalLedger ledger) {
             long remaining = amount;
-            for (int i = 0; i < contents.length && remaining > 0; i++) {
-                ItemStack stack = contents[i];
+            ItemStack[] items = snapshot();
+            for (int i = 0; i < items.length && remaining > 0; i++) {
+                ItemStack stack = items[i];
                 if (stack == null || stack.getType() != material) continue;
                 int use = (int) Math.min(stack.getAmount(), remaining);
                 ItemStack original = stack.clone();
@@ -268,8 +286,9 @@ final class PaperInventoryHelper {
         @Override
         public long takeExact(ItemStack template, long amount, RemovalLedger ledger) {
             long remaining = amount;
-            for (int i = 0; i < contents.length && remaining > 0; i++) {
-                ItemStack stack = contents[i];
+            ItemStack[] items = snapshot();
+            for (int i = 0; i < items.length && remaining > 0; i++) {
+                ItemStack stack = items[i];
                 if (stack == null || !stack.isSimilar(template)) continue;
                 int use = (int) Math.min(stack.getAmount(), remaining);
                 ItemStack original = stack.clone();
@@ -302,15 +321,16 @@ final class PaperInventoryHelper {
         @Override
         public long countFlintUses() {
             long total = 0;
-            for (ItemStack stack : contents) total += flintUses(stack);
+            for (ItemStack stack : snapshot()) total += flintUses(stack);
             return total;
         }
 
         @Override
         public long takeFlintUses(long amount, RemovalLedger ledger) {
             long remaining = amount;
-            for (int i = 0; i < contents.length && remaining > 0; i++) {
-                ItemStack stack = contents[i];
+            ItemStack[] items = snapshot();
+            for (int i = 0; i < items.length && remaining > 0; i++) {
+                ItemStack stack = items[i];
                 long uses = flintUses(stack);
                 if (uses <= 0) continue;
                 long use = Math.min(uses, remaining);
@@ -524,7 +544,10 @@ final class PaperInventoryHelper {
 
     static long count(List<ItemSource> sources, String materialKey, int requiredBuckets, boolean fireRequiresFlint) {
         Material material = resolveMaterial(materialKey);
-        if (material == null) return 0;
+        if (material == null) {
+            System.err.println("[MFB-DIAG] count key=" + materialKey + " -> resolved=NULL -> 0");
+            return 0;
+        }
         if (SeedCatalog.ownsSeeds(sources, material)) return Long.MAX_VALUE;
         if (isFluid(material)) {
             return countAcross(sources, fluidBucket(material)) >= requiredBuckets ? Long.MAX_VALUE : 0;
@@ -532,8 +555,14 @@ final class PaperInventoryHelper {
         if (fireRequiresFlint && isFire(material)) {
             return countFlintUses(sources);
         }
-        if (!material.isItem()) return 0;
-        return countAcross(sources, material);
+        if (!material.isItem()) {
+            System.err.println("[MFB-DIAG] count key=" + materialKey + " mat=" + material + " isItem=false -> 0");
+            return 0;
+        }
+        long result = countAcross(sources, material);
+        System.err.println("[MFB-DIAG] count key=" + materialKey + " mat=" + material
+                + " sources=" + sources.size() + " result=" + result);
+        return result;
     }
 
     /**
@@ -570,6 +599,10 @@ final class PaperInventoryHelper {
         if (SeedCatalog.ownsSeeds(sources, template.getType())) return Long.MAX_VALUE;
         long total = 0;
         for (ItemSource source : sources) total += source.countExact(template);
+        if (template.getType().name().contains("SHULKER")) {
+            System.err.println("[MFB-DIAG] countExact tmpl=" + template.getType().name()
+                    + " sources=" + sources.size() + " result=" + total);
+        }
         return total;
     }
 
