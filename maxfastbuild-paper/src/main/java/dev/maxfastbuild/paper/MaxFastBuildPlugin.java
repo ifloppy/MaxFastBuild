@@ -723,6 +723,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             searchShulkers = false;
         }
         PaperInventoryHelper.SearchOptions search = inventorySearch(player, searchShulkers);
+        List<PaperInventoryHelper.ItemSource> singleSources = search.sources(player);
         String itemKey = PaperInventoryHelper.itemKeyFromBlockState(blockState);
         long need = 1;
         if (requireMaterials && !willBreak) {
@@ -731,7 +732,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", blockState));
                 return;
             }
-            long have = PaperInventoryHelper.count(player, itemKey, search);
+            long have = PaperInventoryHelper.count(singleSources, itemKey,
+                    search.requiredBuckets, search.fireRequiresFlint);
             if (have < need) {
                 sendMaterialError(player, itemKey, need, have, true, fluidBucketRequirement());
                 return;
@@ -766,13 +768,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         PaperInventoryHelper.RemovalLedger singleRemovals = null;
         if (requireMaterials && !destroy) {
             singleRemovals = new PaperInventoryHelper.RemovalLedger();
-            List<PaperInventoryHelper.ItemSource> singleSources = search.sources(player);
             auditContainerTakes(player, worldName, true, singleSources, null);
-            long removed = PaperInventoryHelper.take(player, itemKey, need, search, singleRemovals);
+            long removed = PaperInventoryHelper.take(singleSources, itemKey, need,
+                    search.requiredBuckets, search.fireRequiresFlint, singleRemovals);
             if (removed < need) {
-                if (removed > 0) singleRemovals.refundOrGive(player, itemKey, removed);
+                auditContainerRefunds(player.getUniqueId(), player.getName(), worldName, singleRemovals);
+                singleRemovals.restoreAll();
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                sendMaterialError(player, itemKey, need, removed, true, fluidBucketRequirement());
+                sendMaterialError(player, itemKey, need, removed,
+                        search.fireRequiresFlint, search.requiredBuckets);
                 return;
             }
         }
@@ -1138,12 +1142,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             searchShulkers = false;
         }
         PaperInventoryHelper.SearchOptions search = inventorySearch(player, searchShulkers);
+        List<PaperInventoryHelper.ItemSource> regionSources = search.sources(player);
         String itemKey = PaperInventoryHelper.itemKeyFromBlockState(selection.material());
         long need = mutations.size();
         if (requireMaterials) {
             org.bukkit.Material resolved = PaperInventoryHelper.resolveMaterial(itemKey);
             if (resolved == null || PaperWorldAccess.isForbiddenPlaceMaterial(resolved)) {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", String.valueOf(selection.material())));
+                return;
+            }
+            long have = PaperInventoryHelper.count(regionSources, itemKey,
+                    search.requiredBuckets, search.fireRequiresFlint);
+            if (have < need) {
+                sendMaterialError(player, itemKey, need, have,
+                        search.fireRequiresFlint, search.requiredBuckets);
                 return;
             }
         }
@@ -1168,13 +1180,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         PaperInventoryHelper.RemovalLedger regionRemovals = null;
         if (requireMaterials) {
             regionRemovals = new PaperInventoryHelper.RemovalLedger();
-            List<PaperInventoryHelper.ItemSource> regionSources = search.sources(player);
             auditContainerTakes(player, selection.world(), true, regionSources, null);
-            long removed = PaperInventoryHelper.take(player, itemKey, need, search, regionRemovals);
+            long removed = PaperInventoryHelper.take(regionSources, itemKey, need,
+                    search.requiredBuckets, search.fireRequiresFlint, regionRemovals);
             if (removed < need) {
-                if (removed > 0) regionRemovals.refundOrGive(player, itemKey, removed);
+                auditContainerRefunds(player.getUniqueId(), player.getName(), selection.world(), regionRemovals);
+                regionRemovals.restoreAll();
                 if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                sendMaterialError(player, itemKey, need, removed, true, fluidBucketRequirement());
+                sendMaterialError(player, itemKey, need, removed,
+                        search.fireRequiresFlint, search.requiredBuckets);
                 return;
             }
         }
