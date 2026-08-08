@@ -529,18 +529,24 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     private void handleClientRequest(Player player, ClientRequest request) {
         BuildMode mode = BuildMode.valueOf(request.mode().toUpperCase(Locale.ROOT));
-        // Same hand resolution as /mfb apply (HandIntent) — protocol op/material are not trusted.
+        String clientMaterial = request.material() == null ? "minecraft:stone" : request.material();
+        String clientProperties = extractBlockProperties(clientMaterial);
+        String baseMaterial = stripBlockProperties(clientMaterial);
         Selection anchors = new Selection(mode, request.first(), request.second(), request.hollow(),
-                request.material() == null ? "minecraft:stone" : request.material(), player.getWorld().getName());
-        submitFromHand(player, anchors, false);
+                baseMaterial, player.getWorld().getName());
+        submitFromHand(player, anchors, false, clientProperties);
     }
 
     /** /mfb apply and /__mfb — resolve place/break from main hand. */
     private void submitFromHand(Player player, Selection selection) {
-        submitFromHand(player, selection, true);
+        submitFromHand(player, selection, true, null);
     }
 
     private void submitFromHand(Player player, Selection selection, boolean cliFeedback) {
+        submitFromHand(player, selection, cliFeedback, null);
+    }
+
+    private void submitFromHand(Player player, Selection selection, boolean cliFeedback, String clientProperties) {
         HandIntent intent = HandIntent.from(player);
         if (intent.isNone()) {
             if (cliFeedback && messages != null) messages.send(player, "apply-need-hand");
@@ -550,10 +556,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         Selection effective = selection;
         if (intent.isPlace()) {
-            effective = selection.withMaterial(intent.material());
+            String material = intent.material();
+            if (clientProperties != null && !clientProperties.isEmpty()) {
+                material = material + clientProperties;
+            }
+            effective = selection.withMaterial(material);
             selections.put(player.getUniqueId(), effective);
             if (cliFeedback && messages != null) {
-                messages.send(player, "apply-place-from-hand", intent.material());
+                messages.send(player, "apply-place-from-hand", material);
             }
         } else {
             selections.put(player.getUniqueId(), effective);
@@ -562,6 +572,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
         submit(player, effective, intent.operation());
+    }
+
+    private static String extractBlockProperties(String material) {
+        int bracket = material.indexOf('[');
+        if (bracket < 0) return "";
+        return material.substring(bracket);
+    }
+
+    private static String stripBlockProperties(String material) {
+        int bracket = material.indexOf('[');
+        if (bracket < 0) return material;
+        return material.substring(0, bracket);
     }
 
     /** /mfbsetblock — standalone entry; routes into the /mfb setblock pipeline. */

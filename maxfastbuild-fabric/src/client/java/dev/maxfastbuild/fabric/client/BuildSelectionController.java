@@ -63,6 +63,11 @@ public final class BuildSelectionController {
     private static BlockPos cacheSecond;
     private static BuildMode cacheMode;
     private static boolean cacheBreak;
+    /** Pending submit state held while the PlaceSettingsScreen is open. */
+    private static BlockPos pendingSecond;
+    private static boolean pendingBreaking;
+    private static String pendingModeKey;
+    private static int pendingCount;
 
     private BuildSelectionController() {}
 
@@ -360,6 +365,22 @@ public final class BuildSelectionController {
                 notify(Component.translatable("maxfastbuild.selection.hold_block"));
                 return;
             }
+            if (isStair(player)) {
+                pendingSecond = second;
+                pendingBreaking = false;
+                pendingModeKey = modeKey;
+                pendingCount = count;
+                ClientPlatform.instance().setScreen(new PlaceSettingsScreen(playerFacing(player), true));
+                return;
+            }
+            if (isSlab(player)) {
+                pendingSecond = second;
+                pendingBreaking = false;
+                pendingModeKey = modeKey;
+                pendingCount = count;
+                ClientPlatform.instance().setScreen(new PlaceSettingsScreen("north", false));
+                return;
+            }
             ClientSession.sendPlace(modeKey, first.x(), first.y(), first.z(), second.x(), second.y(), second.z(), currentHollow, material);
             notify(Component.translatable("maxfastbuild.selection.submitted", count));
         }
@@ -453,6 +474,54 @@ public final class BuildSelectionController {
     private static String material(Player player) {
         if (!(player.getMainHandItem().getItem() instanceof BlockItem blockItem)) return null;
         return BuiltInRegistries.BLOCK.getKey(blockItem.getBlock()).toString();
+    }
+
+    private static boolean isStair(Player player) {
+        if (!(player.getMainHandItem().getItem() instanceof BlockItem blockItem)) return false;
+        return BuiltInRegistries.BLOCK.getKey(blockItem.getBlock()).getPath().endsWith("_stairs");
+    }
+
+    private static boolean isSlab(Player player) {
+        if (!(player.getMainHandItem().getItem() instanceof BlockItem blockItem)) return false;
+        return BuiltInRegistries.BLOCK.getKey(blockItem.getBlock()).getPath().endsWith("_slab");
+    }
+
+    private static String playerFacing(Player player) {
+        Direction dir = player.getDirection();
+        return switch (dir) {
+            case NORTH -> "north";
+            case SOUTH -> "south";
+            case EAST -> "east";
+            case WEST -> "west";
+            default -> "north";
+        };
+    }
+
+    /** Called by PlaceSettingsScreen when the user confirms placement options. */
+    public static void confirmPlaceSettings(PlaceSettings settings) {
+        Minecraft client = Minecraft.getInstance();
+        if (client.player == null || pendingModeKey == null) return;
+        String material = material(client.player);
+        if (material == null) return;
+        if (settings.isStair()) {
+            material = material + "[facing=" + settings.direction() + ",half=bottom]";
+        } else {
+            material = material + "[type=" + (settings.slabTop() ? "top" : "bottom") + "]";
+        }
+        ClientSession.sendPlace(pendingModeKey,
+                first.x(), first.y(), first.z(),
+                pendingSecond.x(), pendingSecond.y(), pendingSecond.z(),
+                currentHollow, material);
+        notify(Component.translatable("maxfastbuild.selection.submitted", pendingCount));
+        first = null;
+        hovered = null;
+        active = false;
+        pendingSecond = null;
+        pendingBreaking = false;
+        pendingModeKey = null;
+        pendingCount = 0;
+        cachedFull = Set.of();
+        cachedFaces = List.of();
     }
 
     private static Component modeName() {

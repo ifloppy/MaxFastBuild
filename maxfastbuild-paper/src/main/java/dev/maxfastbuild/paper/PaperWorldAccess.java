@@ -3,11 +3,15 @@ package dev.maxfastbuild.paper;
 import dev.maxfastbuild.api.*;
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.MultipleFacing;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -38,12 +42,82 @@ final class PaperWorldAccess implements WorldAccess {
         this.deferPhysics = false;
     }
 
+    private static final BlockFace[] HORIZONTAL = {BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST};
+
     @Override public void settlePlacements(String world, List<BlockPos> positions) {
         World resolved = Bukkit.getWorld(world);
         if (resolved == null) return;
         for (BlockPos position : positions) {
             settlePlaced(resolved, position);
         }
+        fixConnections(resolved, positions);
+    }
+
+    /**
+     * Recalculate pane/fence connections ({@link GlassPane} / {@link Fence}) after all blocks are placed.
+     * <p>
+     * {@code setBlockData} bakes default connection properties ({@code east=false, …}) into the
+     * placed block. {@link #settlePlaced} only triggers redstone/water physics — it does NOT
+     * recalculate directional connections. This pass forces every pane/fence in and around the
+     * fill region to re-evaluate its neighbours and form connections.
+     * <p>
+     * Redstone safety: this only touches non-conductive {@code GlassPane}/{@code Fence} blocks and
+     * applies them with {@code applyPhysics=false} (client render update only, no neighbour physics,
+     * no scheduled ticks), so redstone machine timing/state is unaffected. Each connection is set
+     * explicitly on both sides, so neighbour propagation is not needed.
+     */
+    private static void fixConnections(World world, List<BlockPos> positions) {
+        Set<BlockPos> processed = new HashSet<>();
+        int total = 0;
+        int fixed = 0;
+        for (BlockPos pos : positions) {
+            int[] result = recalcConnections(world.getBlockAt(pos.x(), pos.y(), pos.z()), processed);
+            total += result[0];
+            fixed += result[1];
+            for (BlockFace face : HORIZONTAL) {
+                result = recalcConnections(world.getBlockAt(pos.x() + face.getModX(),
+                        pos.y() + face.getModY(), pos.z() + face.getModZ()), processed);
+                total += result[0];
+                fixed += result[1];
+            }
+        }
+        if (fixed > 0) {
+            Bukkit.getLogger().info("[MaxFastBuild] Fixed connections for " + fixed + " / " + total + " connectable blocks");
+        }
+    }
+
+    /** @return [inspected, fixed] */
+    private static int[] recalcConnections(Block block, Set<BlockPos> processed) {
+        BlockPos key = new BlockPos(block.getX(), block.getY(), block.getZ());
+        if (!processed.add(key)) return new int[]{0, 0};
+        org.bukkit.block.BlockState state = block.getState();
+        BlockData data = state.getBlockData();
+        if (!(data instanceof MultipleFacing)) return new int[]{0, 0};
+        MultipleFacing mf = (MultipleFacing) data.clone();
+        boolean changed = false;
+        java.util.Set<BlockFace> allowed = mf.getAllowedFaces();
+        for (BlockFace face : HORIZONTAL) {
+            if (!allowed.contains(face)) continue;
+            Block neighbor = block.getRelative(face);
+            boolean should = shouldConnect(block, neighbor);
+            if (mf.hasFace(face) != should) {
+                mf.setFace(face, should);
+                changed = true;
+            }
+        }
+        if (changed) {
+            state.setBlockData(mf);
+            state.update(true, true);
+            return new int[]{1, 1};
+        }
+        return new int[]{1, 0};
+    }
+
+    private static boolean shouldConnect(Block self, Block neighbor) {
+        Material neighborType = neighbor.getType();
+        if (neighborType.isAir()) return false;
+        if (neighborType == self.getType()) return true;
+        return neighborType.isSolid() && neighborType.isOccluding();
     }
 
     @Override public String stateAt(String world, BlockPos position) {
