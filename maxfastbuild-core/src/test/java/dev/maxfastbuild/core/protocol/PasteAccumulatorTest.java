@@ -13,19 +13,22 @@ import static org.assertj.core.api.Assertions.*;
 class PasteAccumulatorTest {
     private static final int[] ORIGIN = {100, 64, -200};
     private static final List<String> PALETTE = List.of("minecraft:stone", "minecraft:oak_planks");
+    private static final List<PasteTransfer.Region> REGIONS = List.of(
+            new PasteTransfer.Region(100, 64, -200, 102, 64, -198));
 
     private static PasteAccumulator newAccumulator() {
         return new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(30));
     }
 
     private static PasteTransfer.Payload part(UUID player, String session, int part, int parts, List<String> blocks) {
-        return new PasteTransfer.Payload(session, part, parts, ORIGIN, PALETTE, blocks);
+        return new PasteTransfer.Payload(session, part, parts, ORIGIN, PALETTE, blocks,
+                false, List.of(), false, REGIONS);
     }
 
     private static PasteTransfer.Payload part(String session, int part, int parts, List<String> blocks,
                                               boolean skipContents) {
         return new PasteTransfer.Payload(session, part, parts, ORIGIN, PALETTE, blocks,
-                false, List.of(), skipContents);
+                false, List.of(), skipContents, REGIONS);
     }
 
     @Test void assemblesSinglePart() {
@@ -37,6 +40,7 @@ class PasteAccumulatorTest {
         assertThat(result.get().entries()).hasSize(2);
         assertThat(result.get().palette()).isEqualTo(PALETTE);
         assertThat(result.get().origin()).isEqualTo(ORIGIN);
+        assertThat(result.get().regions()).isEqualTo(REGIONS);
     }
 
     @Test void assemblesOutOfOrderParts() {
@@ -59,7 +63,7 @@ class PasteAccumulatorTest {
         UUID player = UUID.randomUUID();
         accumulator.accept(player, part(player, "s4", 0, 2, List.of("0,0,0:0")));
         PasteTransfer.Payload mismatched = new PasteTransfer.Payload("s4", 1, 2, ORIGIN,
-                List.of("minecraft:dirt"), List.of("0,0,0:0"));
+                List.of("minecraft:dirt"), List.of("0,0,0:0"), false, List.of(), false, REGIONS);
         assertThatThrownBy(() -> accumulator.accept(player, mismatched)).isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -90,9 +94,11 @@ class PasteAccumulatorTest {
     @Test void invalidPartRejected() {
         PasteAccumulator accumulator = newAccumulator();
         UUID player = UUID.randomUUID();
-        assertThatThrownBy(() -> accumulator.accept(player, new PasteTransfer.Payload("s6", 5, 3, ORIGIN, PALETTE, List.of("0,0,0:0"))))
+        assertThatThrownBy(() -> accumulator.accept(player, new PasteTransfer.Payload("s6", 5, 3, ORIGIN, PALETTE,
+                List.of("0,0,0:0"), false, List.of(), false, REGIONS)))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> accumulator.accept(player, new PasteTransfer.Payload("s6", 0, 1, new int[]{1, 2}, PALETTE, List.of("0,0,0:0"))))
+        assertThatThrownBy(() -> accumulator.accept(player, new PasteTransfer.Payload("s6", 0, 1, new int[]{1, 2}, PALETTE,
+                List.of("0,0,0:0"), false, List.of(), false, REGIONS)))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

@@ -49,12 +49,29 @@ public final class PasteSettingsScreen extends Screen {
         for (int i = 0; i < checked.length; i++) {
             drawRow(graphics, i, mouseX, mouseY);
         }
+        drawMetrics(graphics);
         // Pasting (instant or queued) can disrupt redstone machines; warn on every paste.
         graphics.centeredText(font, Component.translatable("maxfastbuild.paste.warning.redstone"),
                 width / 2, PasteSettingsLayout.WARNING_Y, 0xFFFF5A5A);
         drawButton(graphics, PasteSettingsLayout.confirm(width), "maxfastbuild.paste.settings.start", 0xFF8EE9FF, mouseX, mouseY);
         drawButton(graphics, PasteSettingsLayout.cancel(width), "maxfastbuild.paste.settings.cancel", 0xFFB8C2CE, mouseX, mouseY);
         super.extractRenderState(graphics, mouseX, mouseY, delta);
+    }
+
+    private void drawMetrics(GuiGraphicsExtractor graphics) {
+        PasteMetrics metrics = PasteController.pasteMetrics();
+        ServerCapabilities.Limits limits = ServerCapabilities.current();
+        if (limits == null) {
+            graphics.centeredText(font, Component.translatable("maxfastbuild.paste.limits.unavailable"),
+                    width / 2, PasteSettingsLayout.METRICS_Y, 0xFFFFC44D);
+            return;
+        }
+        graphics.centeredText(font, Component.translatable("maxfastbuild.paste.limits",
+                        limits.maxSizeX(), limits.maxSizeY(), limits.maxSizeZ(), limits.maxRegionBlocks(), limits.maxAffectedBlocks()),
+                width / 2, PasteSettingsLayout.METRICS_Y, 0xFFB8C2CE);
+        graphics.centeredText(font, Component.translatable("maxfastbuild.paste.current",
+                        metrics.sizeX(), metrics.sizeY(), metrics.sizeZ(), metrics.regionBlocks(), metrics.candidateBlocks()),
+                width / 2, PasteSettingsLayout.METRICS_SECOND_Y, 0xFF8EE9FF);
     }
 
     private void drawRow(GuiGraphicsExtractor graphics, int index, int mouseX, int mouseY) {

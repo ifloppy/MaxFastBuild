@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.*;
 
 class PasteTransferTest {
     private static final int[] ORIGIN = {100, 64, -200};
+    private static final PasteTransfer.Region REGION = new PasteTransfer.Region(100, 64, -200, 102, 64, -198);
 
     private static List<PasteTransfer.Entry> entries(int count) {
         List<PasteTransfer.Entry> entries = new ArrayList<>(count);
@@ -44,7 +45,7 @@ class PasteTransferTest {
                 "minecraft:chest_minecart", 1.5, 64, -2.5, "{Items:[]}");
         PasteTransfer.Payload payload = new PasteTransfer.Payload("abc123", 0, 2, ORIGIN,
                 List.of("minecraft:stone", "minecraft:oak_planks"), List.of("0,0,0:0", "1,0,0:1"),
-                true, List.of(entity), true);
+                true, List.of(entity), true, List.of(REGION));
         PasteTransfer.Payload decoded = PasteTransfer.decode(PasteTransfer.encode(payload));
         assertThat(decoded.pasteSessionId()).isEqualTo(payload.pasteSessionId());
         assertThat(decoded.part()).isEqualTo(payload.part());
@@ -55,6 +56,7 @@ class PasteTransferTest {
         assertThat(decoded.instant()).isTrue();
         assertThat(decoded.entities()).containsExactly(entity);
         assertThat(decoded.skipContents()).isTrue();
+        assertThat(decoded.regions()).containsExactly(REGION);
     }
 
     @Test void splitCapsPerPartAndRepeatsPalette() {
@@ -69,6 +71,14 @@ class PasteTransferTest {
         assertThat(parts.get(1).part()).isEqualTo(1);
         assertThat(parts.get(1).parts()).isEqualTo(2);
         assertThat(parts.get(0).origin()).isEqualTo(ORIGIN);
+    }
+
+    @Test void splitUsesServerAdvertisedPartLimits() {
+        List<PasteTransfer.Payload> parts = PasteTransfer.split("session", ORIGIN, List.of("minecraft:stone"),
+                entries(7), List.of(), false, false, List.of(REGION), 3, 3);
+        assertThat(parts).hasSize(3);
+        assertThat(parts).allSatisfy(part -> assertThat(part.blocks()).hasSizeBetween(1, 3));
+        assertThat(parts).allSatisfy(part -> assertThat(part.regions()).containsExactly(REGION));
     }
 
     @Test void splitRejectsHugePaste() {

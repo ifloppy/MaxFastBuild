@@ -18,12 +18,14 @@ final class PasteSettingsLayout {
     static final int ROWS_START = 66;
     static final int ROW_SPACING = 20;
     static final int ROW_HEIGHT = 18;
-    /** Y of the red instant-paste redstone warning line, drawn only while instant is checked. */
-    static final int WARNING_Y = ROWS_START + (Option.values().length - 1) * ROW_SPACING + ROW_HEIGHT + 4;
+    static final int METRICS_Y = ROWS_START + Option.values().length * ROW_SPACING + 4;
+    static final int METRICS_SECOND_Y = METRICS_Y + 12;
+    /** Y of the red redstone warning line. */
+    static final int WARNING_Y = METRICS_SECOND_Y + 17;
     static final int BOX = 14;
     static final int BUTTON_W = 76;
     static final int BUTTON_H = 20;
-    static final int BUTTON_Y = 216;
+    static final int BUTTON_Y = WARNING_Y + 22;
     static final int BUTTON_GAP = 8;
 
     private PasteSettingsLayout() {}

@@ -53,10 +53,15 @@ final class PasteController {
     static boolean instant() {
         return instant;
     }
+
+    static PasteMetrics pasteMetrics() {
+        return pasteMetrics;
+    }
+
     /** Server-advertised instant-paste price multiplier, formatted for the toggle message. */
     private static String instantMultiplier = "2";
-    /** Server-advertised instant-paste block cap (clamped to the transfer protocol cap). */
-    private static int instantMaxBlocks = PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART;
+    /** Metrics for the most recently collected placement, shown in the paste settings screen. */
+    private static PasteMetrics pasteMetrics = new PasteMetrics(0, 0, 0, 0, 0);
     private static final CommandChunkAssembler CHUNKS = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     private static List<PasteTransfer.Payload> parts;
     private static String pasteSessionId;
@@ -104,6 +109,12 @@ final class PasteController {
     }
 
     static void onHello(JsonObject object) {
+        if (object.has("instantMultiplier")) {
+            try {
+                instantMultiplier = object.get("instantMultiplier").getAsBigDecimal().stripTrailingZeros().toPlainString();
+            } catch (RuntimeException ignored) {
+            }
+        }
         if (state != State.PENDING_HELLO) return;
         if (!object.has("sessionId") || !object.has("secret")) {
             abort("maxfastbuild.paste.hello_failed");
@@ -116,30 +127,10 @@ final class PasteController {
             abort("maxfastbuild.paste.hello_failed");
             return;
         }
-        if (object.has("maxBlocks")) {
-            try {
-                LitematicaBridge.setMaxBlocks(object.get("maxBlocks").getAsInt());
-            } catch (IllegalStateException | NumberFormatException ignored) {
-            }
-        }
-        if (object.has("maxRegionVolume")) {
-            try {
-                LitematicaBridge.setMaxRegionVolume(object.get("maxRegionVolume").getAsInt());
-            } catch (IllegalStateException | NumberFormatException ignored) {
-            }
-        }
-        if (object.has("instantMultiplier")) {
-            try {
-                instantMultiplier = object.get("instantMultiplier").getAsBigDecimal().stripTrailingZeros().toPlainString();
-            } catch (RuntimeException ignored) {
-            }
-        }
-        if (object.has("instantMaxBlocks")) {
-            try {
-                int value = object.get("instantMaxBlocks").getAsInt();
-                if (value > 0) instantMaxBlocks = Math.min(value, PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART);
-            } catch (IllegalStateException | NumberFormatException ignored) {
-            }
+        ServerCapabilities.Limits capabilities = ServerCapabilities.current();
+        if (capabilities == null) {
+            abort("maxfastbuild.paste.hello_failed");
+            return;
         }
         List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
         if (blocks == null || blocks.isEmpty()) {
@@ -153,19 +144,9 @@ final class PasteController {
             notify(Component.translatable("maxfastbuild.paste.no_blocks_after_filters"));
             return;
         }
+        pasteMetrics = PasteMetrics.from(LitematicaBridge.lastRegions(), blocks);
         List<PasteEntity> rawEntities = LitematicaBridge.lastEntities();
         List<PasteEntity> entities = applyEntitySkip(rawEntities, settings);
-        int entityCap = instant ? PasteTransfer.MAX_INSTANT_ENTITIES : PasteTransfer.MAX_NORMAL_ENTITIES;
-        if (entities.size() > entityCap) {
-            resetSession();
-            notify(Component.translatable("maxfastbuild.paste.too_many_entities", entityCap));
-            return;
-        }
-        if (instant && blocks.size() > instantMaxBlocks) {
-            resetSession();
-            notify(Component.translatable("maxfastbuild.paste.instant_too_large", instantMaxBlocks));
-            return;
-        }
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         for (PasteBlock block : blocks) {
             minX = Math.min(minX, block.x());
@@ -189,7 +170,9 @@ final class PasteController {
         }
         pasteSessionId = UUID.randomUUID().toString();
         try {
-            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries, entityEntries, instant, settings.skipContents());
+            parts = PasteTransfer.split(pasteSessionId, new int[]{minX, minY, minZ}, palette, entries,
+                    entityEntries, instant, settings.skipContents(), LitematicaBridge.lastRegions(),
+                    capabilities.maxBlocksPerPart(), capabilities.maxPasteParts());
         } catch (IllegalArgumentException ex) {
             resetSession();
             notify(Component.translatable("maxfastbuild.paste.too_large"));
@@ -238,6 +221,7 @@ final class PasteController {
             notify(Component.translatable(reasonKey(LitematicaBridge.lastReason())));
             return;
         }
+        pasteMetrics = PasteMetrics.from(LitematicaBridge.lastRegions(), blocks);
         ClientPlatform.instance().openPasteSettings();
     }
 
@@ -254,7 +238,7 @@ final class PasteController {
         LitematicaBridge.setStripContainerItems(newSettings.skipContents());
         state = State.PENDING_HELLO;
         pendingSince = now();
-        send("__mfb hello");
+        send("__mfb hello " + ProtocolEnvelope.CURRENT_VERSION);
     }
 
     /**
@@ -337,6 +321,11 @@ final class PasteController {
         }
         PasteTransfer.Payload payload = parts.get(currentPart);
         byte[] zipped = PasteTransfer.gzip(PasteTransfer.encode(payload));
+        ServerCapabilities.Limits capabilities = ServerCapabilities.current();
+        if (capabilities == null || zipped.length > capabilities.maxPayloadBytes()) {
+            abort("maxfastbuild.paste.too_large");
+            return;
+        }
         String payloadB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(zipped);
         long seq = sequence++;
         String signingInput = ProtocolEnvelope.CURRENT_VERSION + "\n" + sessionId + "\n" + seq + "\n" + payloadB64;
@@ -391,7 +380,6 @@ final class PasteController {
             case ALL_DISABLED -> "maxfastbuild.paste.reason.all_disabled";
             case NO_CONTAINER -> "maxfastbuild.paste.reason.no_container";
             case ZERO_BLOCKS -> "maxfastbuild.paste.reason.zero_blocks";
-            case TOO_LARGE -> "maxfastbuild.paste.reason.too_large";
             case API_ERROR -> "maxfastbuild.paste.reason.api_error";
         };
     }

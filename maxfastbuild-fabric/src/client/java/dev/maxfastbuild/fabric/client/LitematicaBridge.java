@@ -37,28 +37,17 @@ import java.util.Map;
  * specific message instead of a generic "no placement".
  */
 public final class LitematicaBridge {
-    private static final int PROTOCOL_CAP = PasteTransfer.MAX_PARTS * PasteTransfer.MAX_BLOCKS_PER_PART;
-    /** Default guard on the per-sub-region bounding-box volume we will iterate (anti client freeze). */
-    private static final int DEFAULT_MAX_REGION_VOLUME = 8_000_000;
     private static final Logger LOGGER = LogUtils.getLogger();
 
-    /** Per-paste collection cap; refreshed from the server hello handshake. */
-    private static volatile int maxBlocks = PROTOCOL_CAP;
-    /**
-     * Bounding-box volume a single sub-region may span while being collected. This is separate from
-     * {@link #maxBlocks}: a large build (e.g. a furnace array) occupies a box whose volume far
-     * exceeds its block count because of the air in between, so the box is allowed as long as it is
-     * not pathologically huge. Refreshed from the server hello handshake.
-     */
-    private static volatile int maxRegionVolume = DEFAULT_MAX_REGION_VOLUME;
-
     public enum Reason {
-        NOT_LOADED, NO_PLACEMENT, ALL_DISABLED, NO_CONTAINER, ZERO_BLOCKS, TOO_LARGE, API_ERROR
+        NOT_LOADED, NO_PLACEMENT, ALL_DISABLED, NO_CONTAINER, ZERO_BLOCKS, API_ERROR
     }
 
     private static Reason lastReason = Reason.NOT_LOADED;
     /** Entities from the most recent successful {@link #collect()}, empty when none. */
     private static List<PasteEntity> lastEntities = List.of();
+    /** Selected regions from the most recent placement, including air. */
+    private static List<PasteTransfer.Region> lastRegions = List.of();
     /**
      * When true, the {@code Items} tag is removed from every container block-entity before it is
      * serialized, so the pasted container is empty and the server never bills its contents. Set by
@@ -91,18 +80,8 @@ public final class LitematicaBridge {
         return lastEntities;
     }
 
-    /** Server-advertised paste limit (clamped to what the transfer protocol can carry). */
-    public static void setMaxBlocks(int value) {
-        if (value > 0) maxBlocks = Math.min(value, PROTOCOL_CAP);
-    }
-
-    /** Server-advertised per-region bounding-volume guard. */
-    public static void setMaxRegionVolume(int value) {
-        if (value > 0) maxRegionVolume = value;
-    }
-
-    public static int maxBlocks() {
-        return maxBlocks;
+    public static List<PasteTransfer.Region> lastRegions() {
+        return lastRegions;
     }
 
     public static boolean available() {
@@ -126,10 +105,13 @@ public final class LitematicaBridge {
         if (!available()) {
             lastReason = Reason.NOT_LOADED;
             lastEntities = List.of();
+            lastRegions = List.of();
             return List.of();
         }
         try {
             lastReason = Reason.NO_PLACEMENT;
+            lastEntities = List.of();
+            lastRegions = List.of();
             Class<?> dataManager = Class.forName("fi.dy.masa.litematica.data.DataManager");
             Object manager = invokeStatic(dataManager, "getSchematicPlacementManager");
             if (manager == null) return List.of();
@@ -140,30 +122,33 @@ public final class LitematicaBridge {
                 if (!Boolean.TRUE.equals(invoke(placement, "isEnabled"))) continue;
                 sawEnabled = true;
                 List<PasteEntity> entities = new ArrayList<>();
-                List<PasteBlock> blocks = collectPlacement(placement, entities);
+                List<PasteTransfer.Region> regions = new ArrayList<>();
+                List<PasteBlock> blocks = collectPlacement(placement, entities, regions);
                 if (!blocks.isEmpty()) {
                     lastEntities = entities;
+                    lastRegions = List.copyOf(regions);
                     LOGGER.info("[MaxFastBuild] collected blocks=" + blocks.size() + " entities=" + entities.size()
                             + " strip=" + stripContainerItems + " debug=" + MaxFastBuildConfig.isDebugEnabled());
                     return blocks;
                 }
+                lastEntities = entities;
+                lastRegions = List.copyOf(regions);
             }
             if (!sawEnabled) lastReason = Reason.ALL_DISABLED;
             lastEntities = List.of();
-            return List.of();
-        } catch (TooLargeException ex) {
-            lastReason = Reason.TOO_LARGE;
-            lastEntities = List.of();
+            lastRegions = List.of();
             return List.of();
         } catch (ReflectiveOperationException | LinkageError | RuntimeException ex) {
             lastReason = Reason.API_ERROR;
             lastEntities = List.of();
+            lastRegions = List.of();
             LOGGER.warn("[MaxFastBuild] Failed to read the Litematica placement", ex);
             return List.of();
         }
     }
 
-    private static List<PasteBlock> collectPlacement(Object placement, List<PasteEntity> entitiesOut)
+    private static List<PasteBlock> collectPlacement(Object placement, List<PasteEntity> entitiesOut,
+            List<PasteTransfer.Region> regionsOut)
             throws ReflectiveOperationException {
         Object schematic = invoke(placement, "getSchematic");
         Object originObj = invoke(placement, "getOrigin");
@@ -181,15 +166,15 @@ public final class LitematicaBridge {
         for (Map.Entry<?, ?> entry : map.entrySet()) {
             Object container = invoke(schematic, "getSubRegionContainer", new Class<?>[]{String.class}, entry.getKey());
             if (container == null) continue;
-            collectSubRegion(result, entitiesOut, schematic, entry.getKey(), entry.getValue(), container, origin,
+            collectSubRegion(result, entitiesOut, regionsOut, schematic, entry.getKey(), entry.getValue(), container, origin,
                     placementMirror, placementRotation);
         }
         if (result.isEmpty()) lastReason = Reason.ZERO_BLOCKS;
-        if (result.size() > maxBlocks) throw new TooLargeException();
         return result;
     }
 
-    private static void collectSubRegion(List<PasteBlock> result, List<PasteEntity> entitiesOut, Object schematic,
+    private static void collectSubRegion(List<PasteBlock> result, List<PasteEntity> entitiesOut,
+            List<PasteTransfer.Region> regionsOut, Object schematic,
             Object name, Object subRegion, Object container, BlockPos origin, Mirror placementMirror,
             Rotation placementRotation) throws ReflectiveOperationException {
         Mirror subMirror = (Mirror) invoke(subRegion, "getMirror");
@@ -202,16 +187,13 @@ public final class LitematicaBridge {
         int h = Math.abs(size.getY());
         int l = Math.abs(size.getZ());
         if (w == 0 || h == 0 || l == 0) return;
-        // Bounding-box volume guard is independent of the block cap: large builds occupy a box far
-        // bigger than their block count (air in between). Only stop truly pathological boxes that
-        // would freeze the client; the real block cap is enforced while iterating below.
-        if ((long) w * h * l > maxRegionVolume) throw new TooLargeException();
-
         BlockPos end = subPos.offset(relativeEnd(size));
         BlockPos minCorner = minCorner(subPos, end);
         BlockPos boxT = getTransformedBlockPos(subPos, placementMirror, placementRotation);
         Rotation combined = placementRotation.getRotated(subRotation);
         Mirror subMirrorAdj = adjustedSubMirror(subMirror, placementRotation);
+        regionsOut.add(transformedRegion(origin, subPos, minCorner, w, h, l, placementMirror,
+                placementRotation, subMirror, subRotation, boxT));
 
         Map<String, Object> tileNbt = indexBlockEntityNbt(schematic, name);
 
@@ -249,11 +231,36 @@ public final class LitematicaBridge {
                         result.add(new PasteBlock(worldPos.getX(), worldPos.getY(), worldPos.getZ(), blockData));
                     } catch (IllegalArgumentException ignored) {
                     }
-                    if (result.size() > maxBlocks) throw new TooLargeException();
                 }
             }
         }
         collectEntities(entitiesOut, schematic, name, subRegion, origin, placementMirror, placementRotation);
+    }
+
+    private static PasteTransfer.Region transformedRegion(BlockPos origin, BlockPos subPos, BlockPos minCorner,
+            int width, int height, int length, Mirror placementMirror, Rotation placementRotation,
+            Mirror subMirror, Rotation subRotation, BlockPos boxT) {
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        int[] xs = {0, width - 1};
+        int[] ys = {0, height - 1};
+        int[] zs = {0, length - 1};
+        for (int x : xs) for (int y : ys) for (int z : zs) {
+            BlockPos relative = new BlockPos(
+                    minCorner.getX() + x - subPos.getX(),
+                    minCorner.getY() + y - subPos.getY(),
+                    minCorner.getZ() + z - subPos.getZ());
+            BlockPos transformed = getTransformedBlockPos(
+                    getTransformedBlockPos(relative, placementMirror, placementRotation), subMirror, subRotation);
+            BlockPos world = origin.offset(boxT).offset(transformed);
+            minX = Math.min(minX, world.getX());
+            minY = Math.min(minY, world.getY());
+            minZ = Math.min(minZ, world.getZ());
+            maxX = Math.max(maxX, world.getX());
+            maxY = Math.max(maxY, world.getY());
+            maxZ = Math.max(maxZ, world.getZ());
+        }
+        return new PasteTransfer.Region(minX, minY, minZ, maxX, maxY, maxZ);
     }
 
     /**
@@ -492,7 +499,4 @@ public final class LitematicaBridge {
         return target.getClass().getMethod(name, parameterTypes).invoke(target, args);
     }
 
-    private static final class TooLargeException extends RuntimeException {
-        private TooLargeException() {}
-    }
 }

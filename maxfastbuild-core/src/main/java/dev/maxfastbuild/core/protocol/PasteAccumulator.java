@@ -26,12 +26,25 @@ public final class PasteAccumulator {
 
     private final Clock clock;
     private final Duration timeout;
+    private final int maxParts;
+    private final int maxBlocksPerPart;
+    private final int maxTotalBlocks;
     private final Map<Key, Session> sessions = new ConcurrentHashMap<>();
     private final AtomicInteger totalBlocks = new AtomicInteger(0);
 
     public PasteAccumulator(Clock clock, Duration timeout) {
+        this(clock, timeout, PasteTransfer.MAX_PARTS, PasteTransfer.MAX_BLOCKS_PER_PART, MAX_TOTAL_BLOCKS);
+    }
+
+    public PasteAccumulator(Clock clock, Duration timeout, int maxParts, int maxBlocksPerPart, int maxTotalBlocks) {
+        if (maxParts < 1 || maxBlocksPerPart < 1 || maxTotalBlocks < 1) {
+            throw new IllegalArgumentException("invalid_paste_limits");
+        }
         this.clock = clock;
         this.timeout = timeout;
+        this.maxParts = maxParts;
+        this.maxBlocksPerPart = maxBlocksPerPart;
+        this.maxTotalBlocks = maxTotalBlocks;
     }
 
     /**
@@ -41,27 +54,31 @@ public final class PasteAccumulator {
     public Optional<Assembled> accept(UUID playerId, PasteTransfer.Payload payload) {
         Objects.requireNonNull(playerId);
         purgeExpired();
-        if (payload.parts() < 1 || payload.parts() > PasteTransfer.MAX_PARTS
+        if (payload.parts() < 1 || payload.parts() > maxParts
                 || payload.part() < 0 || payload.part() >= payload.parts()
                 || payload.blocks().isEmpty()
-                || payload.blocks().size() > PasteTransfer.MAX_BLOCKS_PER_PART
+                || payload.blocks().size() > maxBlocksPerPart
                 || payload.origin().length != 3
-                || payload.palette().isEmpty()) {
+                || payload.palette().isEmpty()
+                || payload.regions().isEmpty()) {
             throw new IllegalArgumentException("invalid_paste_part");
         }
         int inMemory = totalBlocks.get();
-        if (inMemory >= MAX_TOTAL_BLOCKS) throw new IllegalArgumentException("too_many_paste_blocks");
+        if ((long) inMemory + payload.blocks().size() > maxTotalBlocks) {
+            throw new IllegalArgumentException("too_many_paste_blocks");
+        }
 
         Key key = new Key(playerId, payload.pasteSessionId());
         int[] addedBlockCount = {0};
         Session session = sessions.compute(key, (ignored, current) -> {
             if (current == null) {
                 current = new Session(payload.parts(), payload.palette(), payload.origin(), payload.instant(),
-                        payload.entities(), payload.skipContents(), clock.millis());
+                        payload.entities(), payload.skipContents(), payload.regions(), clock.millis());
             } else if (!current.palette.equals(payload.palette()) || !Arrays.equals(current.origin, payload.origin())
                     || current.instant != payload.instant()
                     || current.skipContents != payload.skipContents()
-                    || !current.entities.equals(payload.entities())) {
+                    || !current.entities.equals(payload.entities())
+                    || !current.regions.equals(payload.regions())) {
                 throw new IllegalArgumentException("paste_part_mismatch");
             }
             if (current.put(payload.part(), payload.blocks())) throw new IllegalArgumentException("duplicate_paste_part");
@@ -85,7 +102,8 @@ public final class PasteAccumulator {
                 entries.add(entry);
             }
         }
-        return Optional.of(new Assembled(payload.pasteSessionId(), session.origin, session.palette, entries, session.entities, session.instant, session.skipContents));
+        return Optional.of(new Assembled(payload.pasteSessionId(), session.origin, session.palette, entries,
+                session.entities, session.instant, session.skipContents, session.regions));
     }
 
     /** Drop all in-flight paste sessions (plugin disable / hot-reload). */
@@ -106,21 +124,24 @@ public final class PasteAccumulator {
     }
 
     public record Assembled(String pasteSessionId, int[] origin, List<String> palette, List<PasteTransfer.Entry> entries,
-                            List<PasteTransfer.EntityEntry> entities, boolean instant, boolean skipContents) {
+                            List<PasteTransfer.EntityEntry> entities, boolean instant, boolean skipContents,
+                            List<PasteTransfer.Region> regions) {
         public Assembled {
             Objects.requireNonNull(pasteSessionId);
             Objects.requireNonNull(palette);
             Objects.requireNonNull(entries);
             Objects.requireNonNull(entities);
+            Objects.requireNonNull(regions);
             origin = origin == null ? new int[0] : origin.clone();
             palette = List.copyOf(palette);
             entries = List.copyOf(entries);
             entities = List.copyOf(entities);
+            regions = List.copyOf(regions);
         }
 
         /** Backward-compatible constructor with no entities and no skip flag. */
         public Assembled(String pasteSessionId, int[] origin, List<String> palette, List<PasteTransfer.Entry> entries, boolean instant) {
-            this(pasteSessionId, origin, palette, entries, List.of(), instant, false);
+            this(pasteSessionId, origin, palette, entries, List.of(), instant, false, List.of());
         }
 
         @Override
@@ -138,18 +159,21 @@ public final class PasteAccumulator {
         private final boolean instant;
         private final boolean skipContents;
         private final List<PasteTransfer.EntityEntry> entities;
+        private final List<PasteTransfer.Region> regions;
         private final long createdAt;
         private final Map<Integer, List<String>> blocks = new HashMap<>();
         private int blockCount;
 
         private Session(int parts, List<String> palette, int[] origin, boolean instant,
-                        List<PasteTransfer.EntityEntry> entities, boolean skipContents, long createdAt) {
+                        List<PasteTransfer.EntityEntry> entities, boolean skipContents,
+                        List<PasteTransfer.Region> regions, long createdAt) {
             this.parts = parts;
             this.palette = List.copyOf(palette);
             this.origin = origin.clone();
             this.instant = instant;
             this.skipContents = skipContents;
             this.entities = entities == null ? List.of() : List.copyOf(entities);
+            this.regions = regions == null ? List.of() : List.copyOf(regions);
             this.createdAt = createdAt;
         }
 

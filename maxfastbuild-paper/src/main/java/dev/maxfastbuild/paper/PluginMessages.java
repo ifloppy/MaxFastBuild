@@ -83,7 +83,8 @@ final class PluginMessages {
         if (data == null) data = Map.of();
         return switch (messageKey) {
             case "maxfastbuild.task.accepted" ->
-                    component("task-accepted", data.get("blocks"), data.get("charge"));
+                    component("task-accepted", data.get("blocks"), data.get("regionBlocks"),
+                            data.get("sizeX"), data.get("sizeY"), data.get("sizeZ"), data.get("charge"));
             case "maxfastbuild.paste.blocks_skipped" ->
                     component("blocks-skipped", data.get("skipped"), data.get("entitySkipped"), data.get("planned"));
             case "maxfastbuild.error.paste_precheck_failed" ->
@@ -113,6 +114,16 @@ final class PluginMessages {
                     component("no-permission-key", data.get("permission"));
             case "maxfastbuild.error.shape_too_large" ->
                     component("shape-too-large", data.get("limit"));
+            case "maxfastbuild.error.region_axis_too_large" ->
+                    component("region-axis-too-large", data.get("axis"), data.get("actual"), data.get("limit"));
+            case "maxfastbuild.error.region_too_large" ->
+                    component("region-too-large", data.get("actual"), data.get("limit"));
+            case "maxfastbuild.error.affected_too_large" ->
+                    component("affected-too-large", data.get("actual"), data.get("limit"));
+            case "maxfastbuild.paste.too_many_entities" ->
+                    component("too-many-entities", data.get("limit"));
+            case "maxfastbuild.paste.too_many_entities_per_chunk" ->
+                    component("too-many-entities-per-chunk", data.get("limit"));
             case "maxfastbuild.error.protected" ->
                     component("protected", data.get("position"), data.get("reason"));
             case "maxfastbuild.error.payment_failed" ->

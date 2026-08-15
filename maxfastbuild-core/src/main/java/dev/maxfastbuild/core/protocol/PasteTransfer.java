@@ -63,31 +63,57 @@ public final class PasteTransfer {
         }
     }
 
+    /** A selected Litematica sub-region after placement transforms, including air. */
+    public record Region(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+        public Region {
+            if (minX > maxX || minY > maxY || minZ > maxZ) {
+                throw new IllegalArgumentException("invalid_paste_region");
+            }
+        }
+
+        public long sizeX() { return (long) maxX - minX + 1; }
+        public long sizeY() { return (long) maxY - minY + 1; }
+        public long sizeZ() { return (long) maxZ - minZ + 1; }
+        public long volume() {
+            return Math.multiplyExact(Math.multiplyExact(sizeX(), sizeY()), sizeZ());
+        }
+    }
+
     /** One part of a paste transfer. */
-    public record Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities, boolean skipContents) {
+    public record Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette,
+                          List<String> blocks, boolean instant, List<EntityEntry> entities,
+                          boolean skipContents, List<Region> regions) {
         public Payload {
             Objects.requireNonNull(pasteSessionId);
             Objects.requireNonNull(palette);
             Objects.requireNonNull(blocks);
             Objects.requireNonNull(entities);
+            Objects.requireNonNull(regions);
             palette = List.copyOf(palette);
             blocks = List.copyOf(blocks);
             entities = List.copyOf(entities);
+            regions = List.copyOf(regions);
         }
 
         /** Backward-compatible constructor defaulting {@code instant} to false (legacy/non-instant). */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of(), false);
+            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of(), false, List.of());
         }
 
         /** Backward-compatible constructor with no entities. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of(), false);
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of(), false, List.of());
         }
 
         /** Backward-compatible constructor with entities but no skip flag. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, false);
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, false, List.of());
+        }
+
+        /** Backward-compatible constructor with no region metadata. */
+        public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette,
+                       List<String> blocks, boolean instant, List<EntityEntry> entities, boolean skipContents) {
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, skipContents, List.of());
         }
 
         @Override
@@ -176,21 +202,32 @@ public final class PasteTransfer {
      * @throws IllegalArgumentException when the paste exceeds {@link #MAX_PARTS}.
      */
     public static List<Payload> split(String pasteSessionId, int[] origin, List<String> palette, List<Entry> entries,
-                                      List<EntityEntry> entities, boolean instant, boolean skipContents) {
+                                       List<EntityEntry> entities, boolean instant, boolean skipContents) {
+        return split(pasteSessionId, origin, palette, entries, entities, instant, skipContents, List.of(),
+                MAX_BLOCKS_PER_PART, MAX_PARTS);
+    }
+
+    /** Split using the effective paste limits advertised by the server. */
+    public static List<Payload> split(String pasteSessionId, int[] origin, List<String> palette, List<Entry> entries,
+                                      List<EntityEntry> entities, boolean instant, boolean skipContents,
+                                      List<Region> regions, int maxBlocksPerPart, int maxParts) {
         if (origin == null || origin.length != 3) throw new IllegalArgumentException("invalid_origin");
-        int totalParts = Math.max(1, (entries.size() + MAX_BLOCKS_PER_PART - 1) / MAX_BLOCKS_PER_PART);
-        if (totalParts > MAX_PARTS) throw new IllegalArgumentException("request_too_large");
+        if (maxBlocksPerPart < 1 || maxParts < 1) throw new IllegalArgumentException("invalid_paste_limits");
+        int totalParts = Math.max(1, (entries.size() + maxBlocksPerPart - 1) / maxBlocksPerPart);
+        if (totalParts > maxParts) throw new IllegalArgumentException("request_too_large");
         List<EntityEntry> entityList = entities == null ? List.of() : entities;
+        List<Region> regionList = regions == null ? List.of() : regions;
         int[] originCopy = origin.clone();
         List<Payload> result = new ArrayList<>(totalParts);
         for (int part = 0; part < totalParts; part++) {
-            int from = part * MAX_BLOCKS_PER_PART;
-            int to = Math.min(entries.size(), from + MAX_BLOCKS_PER_PART);
+            int from = part * maxBlocksPerPart;
+            int to = Math.min(entries.size(), from + maxBlocksPerPart);
             List<String> blockEntries = new ArrayList<>(to - from);
             for (int i = from; i < to; i++) {
                 blockEntries.add(formatEntry(entries.get(i)));
             }
-            result.add(new Payload(pasteSessionId, part, totalParts, originCopy, palette, blockEntries, instant, entityList, skipContents));
+            result.add(new Payload(pasteSessionId, part, totalParts, originCopy, palette, blockEntries,
+                    instant, entityList, skipContents, regionList));
         }
         return result;
     }
