@@ -4,8 +4,12 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "maxfastbuild-fabric/src/main/resources/assets/maxfastbuild/textures/gui/modes"
 DOCS = ROOT / "docs/assets/modes"
+DOCS_PNG = DOCS / "png"
 OUT.mkdir(parents=True, exist_ok=True)
 DOCS.mkdir(parents=True, exist_ok=True)
+DOCS_PNG.mkdir(parents=True, exist_ok=True)
+
+DOCS_ICON_SIZE = 64
 
 INK = (158, 203, 255, 255)
 BG = (14, 20, 28, 255)
@@ -111,6 +115,9 @@ def make():
 
     for name, img in modes.items():
         img.save(OUT / f"{name}.png")
+        img.resize((DOCS_ICON_SIZE, DOCS_ICON_SIZE), Image.Resampling.LANCZOS).save(
+            DOCS_PNG / f"{name}.png"
+        )
         svg = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">\n'
             '  <rect width="32" height="32" rx="4" fill="#0e141c"/>\n'
