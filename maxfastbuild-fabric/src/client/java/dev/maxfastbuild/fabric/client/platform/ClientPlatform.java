@@ -70,6 +70,9 @@ public abstract class ClientPlatform {
     /** Whether Ctrl (left or right) is physically pressed. Works while a Screen is open. */
     public abstract boolean isCtrlKeyDown();
 
+    /** Whether Alt (left or right) is physically pressed. Works while a Screen is open. */
+    public abstract boolean isAltKeyDown();
+
     /** Hook hotbar-scroll cancellation while a selection is active (no-op where unsupported). */
     public abstract void registerHotbarScrollHook();
 

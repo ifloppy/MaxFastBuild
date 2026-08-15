@@ -3,6 +3,8 @@ package dev.maxfastbuild.paper;
 import com.google.gson.Gson;
 import dev.maxfastbuild.api.*;
 import dev.maxfastbuild.core.billing.BillingPolicy;
+import dev.maxfastbuild.core.limit.RequestLimitValidator;
+import dev.maxfastbuild.core.limit.ServerLimits;
 import dev.maxfastbuild.core.limit.TokenBucket;
 import dev.maxfastbuild.core.protocol.*;
 import dev.maxfastbuild.core.shape.DefaultShapeGenerator;
@@ -44,7 +46,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     /** Reassembles multi-part Litematica paste payloads (session per player+id, 120s window). */
-    private final PasteAccumulator pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120));
+    private PasteAccumulator pastes;
+    /** Effective server limits, replaced atomically on reload. */
+    private volatile ServerLimits serverLimits;
     private SecureProtocol protocol;
     private SqliteDatabase database;
     private TaskRepository tasks;
@@ -66,12 +70,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         active = false;
         saveDefaultConfig();
         mergeConfigDefaults();
+        serverLimits = loadServerLimits();
+        pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120),
+                serverLimits.maxPasteParts(), serverLimits.maxBlocksPerPart(), serverLimits.maxPasteTotalBlocks());
         refreshDebugFlags();
         SeedCatalog.reload(getConfig());
         messages = new PluginMessages(this);
         messages.reload();
         try {
-            protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), getConfig().getInt("protocol.max-payload-bytes", 16384));
+            protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), serverLimits.maxPayloadBytes());
             database = new SqliteDatabase(getDataFolder().toPath().resolve("maxfastbuild.db"));
             SqliteTaskRepository sqliteTasks = new SqliteTaskRepository(database);
             sqliteTasks.initialize();
@@ -241,7 +248,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             lastPasteNeeds.clear();
             commandQueues.clear();
             try { chunks.clear(); } catch (RuntimeException ignored) { }
-            try { pastes.clear(); } catch (RuntimeException ignored) { }
+            try { if (pastes != null) pastes.clear(); } catch (RuntimeException ignored) { }
             if (tasks != null) {
                 try { tasks.closeQuietly(); } catch (RuntimeException ex) {
                     getLogger().warning("SQLite close failed: " + ex.getMessage());
@@ -319,7 +326,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     }
                     CompactPlaceCommand.Intent intent = CompactPlaceCommand.parse(message);
                     handleClientRequest(player, new ClientRequest("place", intent.mode().name().toLowerCase(Locale.ROOT),
-                            intent.first(), intent.second(), intent.hollow(), intent.material()));
+                            intent.first(), intent.second(), intent.third(), intent.hollow(),
+                            intent.spacingX(), intent.spacingY(), intent.spacingZ(), intent.material()));
                 }
                 case "break" -> {
                     if (!player.hasPermission("maxfastbuild.use")) {
@@ -328,7 +336,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     }
                     CompactBreakCommand.Intent intent = CompactBreakCommand.parse(message);
                     handleClientRequest(player, new ClientRequest("break", intent.mode().name().toLowerCase(Locale.ROOT),
-                            intent.first(), intent.second(), intent.hollow(), "minecraft:air"));
+                            intent.first(), intent.second(), intent.third(), intent.hollow(),
+                            intent.spacingX(), intent.spacingY(), intent.spacingZ(), "minecraft:air"));
                 }
                 case "p" -> {
                     if (parts.length < 6) {
@@ -438,6 +447,26 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 selections.put(player.getUniqueId(), selection.withSecond(pos).withWorld(player.getWorld().getName()));
                 messages.send(player, "pos2-set", formatPos(pos));
             }
+            case "pos3" -> {
+                BlockPos pos = at(player);
+                selections.put(player.getUniqueId(), selection.withThird(pos).withWorld(player.getWorld().getName()));
+                messages.send(player, "pos3-set", formatPos(pos));
+            }
+            case "array-spacing" -> {
+                if (args.length < 4) {
+                    messages.send(player, "array-spacing-usage");
+                    return;
+                }
+                try {
+                    int x = parseArraySpacing(args[1]);
+                    int y = parseArraySpacing(args[2]);
+                    int z = parseArraySpacing(args[3]);
+                    selections.put(player.getUniqueId(), selection.withArraySpacing(x, y, z));
+                    messages.send(player, "array-spacing-set", x, y, z);
+                } catch (NumberFormatException ex) {
+                    messages.send(player, "array-spacing-invalid", String.join(" ", args[1], args[2], args[3]));
+                }
+            }
             case "hollow" -> {
                 int hollow;
                 if (args.length < 2) {
@@ -483,11 +512,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 String missing = plain(messages.raw("status-pos-missing"));
                 String p1 = current.first() == null ? missing : formatPos(current.first());
                 String p2 = current.second() == null ? missing : formatPos(current.second());
+                String p3 = current.third() == null ? missing : formatPos(current.third());
                 messages.send(player, "status-selection",
                         modeDisplayName(current.mode()),
                         current.hollow(),
                         current.material());
-                messages.send(player, "status-pos", p1, p2);
+                messages.send(player, "status-pos", p1, p2, p3);
                 messages.send(player, "status-tasks", executor.activeCount(player.getUniqueId()));
                 messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
@@ -503,6 +533,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         messages.send(player, "help-line-mode");
         messages.send(player, "help-line-pos1");
         messages.send(player, "help-line-pos2");
+        messages.send(player, "help-line-pos3");
+        messages.send(player, "help-line-array-spacing");
         messages.send(player, "help-line-material");
         messages.send(player, "help-line-hollow");
         messages.send(player, "help-line-apply");
@@ -532,8 +564,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         String clientMaterial = request.material() == null ? "minecraft:stone" : request.material();
         String clientProperties = extractBlockProperties(clientMaterial);
         String baseMaterial = stripBlockProperties(clientMaterial);
-        Selection anchors = new Selection(mode, request.first(), request.second(), request.hollow(),
-                baseMaterial, player.getWorld().getName());
+        Selection anchors = new Selection(mode, request.first(), request.second(), request.third(), request.hollow(),
+                request.spacingX(), request.spacingY(), request.spacingZ(), baseMaterial, player.getWorld().getName());
         submitFromHand(player, anchors, false, clientProperties);
     }
 
@@ -821,6 +853,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
                 "taskId", taskId.toString(),
                 "blocks", 1,
+                "affectedBlocks", 1,
+                "regionBlocks", 1,
+                "sizeX", 1,
+                "sizeY", 1,
+                "sizeZ", 1,
                 "charge", charge.total().toPlainString()));
         messages.send(player, "setblock-success", formatPos(position), blockState);
     }
@@ -832,6 +869,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return base + delta;
         }
         return Integer.parseInt(arg);
+    }
+
+    private static int parseArraySpacing(String raw) {
+        int value = Integer.parseInt(raw);
+        if (value < 1 || value > 64) throw new NumberFormatException("array_spacing");
+        return value;
     }
 
     private void handleValidationError(Player player, BlockPos position, WorldAccess.ValidationResult validation, String before) {
@@ -879,7 +922,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
             return;
         }
-        if (selection.first() == null || selection.second() == null) {
+        if (selection.first() == null || selection.second() == null
+                || (selection.mode() == BuildMode.ARC && selection.third() == null)) {
             sendProtocol(player, "error", "maxfastbuild.error.positions_required", Map.of());
             return;
         }
@@ -920,8 +964,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (!rateLimit(player)) return;
         QueuedCommand next = queue.poll();
         if (next == null) return;
-        int max = getConfig().getInt("execution.max-region-blocks", 100000);
-        pendingBuilds.put(playerId, new PendingBuild(player, next.selection(), next.operation(), max, next.filter(), next.keepOnly()));
+        ServerLimits limits = limits();
+        Optional<RequestLimitValidator.Violation> violation = RequestLimitValidator.region(
+                shapeRequest(next.selection()).bounds(), limits);
+        if (violation.isPresent()) {
+            sendLimitError(player, violation.get());
+            return;
+        }
+        pendingBuilds.put(playerId, new PendingBuild(player, next.selection(), next.operation(),
+                limits.maxRegionBlocks(), limits.maxAffectedBlocks(), next.filter(), next.keepOnly()));
         sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", player.getWorld().getName()));
     }
 
@@ -1021,8 +1072,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             if (pending.positions == null) {
                 try {
-                    pending.positions = new DefaultShapeGenerator().generate(
-                            new ShapeRequest(pending.selection.mode(), pending.selection.first(), pending.selection.second(), pending.selection.hollow()), pending.maxBlocks);
+                    pending.positions = new DefaultShapeGenerator().generate(shapeRequest(pending.selection),
+                            shapeGenerationLimit(pending.maxBlocks));
                     pending.totalPositions = pending.positions.size();
                     pending.iterator = pending.positions.iterator();
                 } catch (ShapeLimitException ex) {
@@ -1097,6 +1148,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 if (operation == OperationKind.PLACE && PaperWorldAccess.requiresBreakToReplace(before)) {
                     pending.replaceBreakCount++;
                 }
+                if (pending.mutations.size() > pending.maxAffectedBlocks) {
+                    return new PlanningError("maxfastbuild.error.affected_too_large",
+                            Map.of("actual", pending.mutations.size(), "limit", pending.maxAffectedBlocks));
+                }
             }
         }
         return null;
@@ -1151,8 +1206,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
 
-        BuildPlan plan = new BuildPlan(selection.world(), operation,
-                new Bounds(selection.first(), selection.second()), mutations);
+        Bounds selectionBounds = shapeRequest(selection).bounds();
+        BuildPlan plan = new BuildPlan(selection.world(), operation, selectionBounds, mutations);
         // Place-over-solid: charge per-block for place + for each required break.
         BillingPolicy.Charge charge = billing().quote(plan, operation == OperationKind.PLACE ? pending.replaceBreakCount : 0);
         boolean requireMaterials = operation == OperationKind.PLACE
@@ -1232,12 +1287,39 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
                 "taskId", taskId.toString(),
                 "blocks", mutations.size(),
+                "affectedBlocks", mutations.size(),
+                "regionBlocks", selectionBounds.volume(),
+                "sizeX", selectionBounds.sizeX(),
+                "sizeY", selectionBounds.sizeY(),
+                "sizeZ", selectionBounds.sizeZ(),
                 "charge", charge.total().toPlainString()));
     }
 
     /** Gzip magic bytes (0x1f 0x8b) — paste envelopes are gzipped JSON, legacy envelopes are plain JSON. */
     private static boolean isGzipPayload(byte[] bytes) {
         return bytes.length >= 2 && (bytes[0] & 0xFF) == 0x1F && (bytes[1] & 0xFF) == 0x8B;
+    }
+
+    private static PasteRegionMetrics pasteRegionMetrics(List<PasteTransfer.Region> regions) {
+        if (regions == null || regions.isEmpty()) throw new IllegalArgumentException("missing_region_metadata");
+        int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;
+        long volume = 0;
+        for (PasteTransfer.Region region : regions) {
+            minX = Math.min(minX, region.minX());
+            minY = Math.min(minY, region.minY());
+            minZ = Math.min(minZ, region.minZ());
+            maxX = Math.max(maxX, region.maxX());
+            maxY = Math.max(maxY, region.maxY());
+            maxZ = Math.max(maxZ, region.maxZ());
+            try {
+                volume = Math.addExact(volume, region.volume());
+            } catch (ArithmeticException ex) {
+                volume = Long.MAX_VALUE;
+            }
+        }
+        return new PasteRegionMetrics(new Bounds(new BlockPos(minX, minY, minZ), new BlockPos(maxX, maxY, maxZ)),
+                volume, List.copyOf(regions));
     }
 
     /**
@@ -1248,6 +1330,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void handlePastePayload(Player player, PasteTransfer.Payload payload) {
         if (!player.hasPermission("maxfastbuild.use")) {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
+            return;
+        }
+        int entityLimit = payload.instant() ? limits().maxInstantEntities() : limits().maxNormalEntities();
+        if (payload.entities().size() > entityLimit) {
+            sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities", Map.of("limit", entityLimit));
             return;
         }
         Optional<PasteAccumulator.Assembled> assembled = pastes.accept(player.getUniqueId(), payload);
@@ -1263,13 +1350,25 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
      */
     private void submitPaste(Player player, PasteAccumulator.Assembled assembled) {
         String worldName = player.getWorld().getName();
-        int maxBlocks = getConfig().getInt("execution.max-region-blocks", 100000);
+        ServerLimits limits = limits();
         boolean instant = assembled.instant();
         boolean skipContents = assembled.skipContents();
-        int instantMax = instantMaxBlocks();
+        PasteRegionMetrics regionMetrics;
+        try {
+            regionMetrics = pasteRegionMetrics(assembled.regions());
+        } catch (RuntimeException ex) {
+            sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "invalid_region_metadata"));
+            return;
+        }
+        Optional<RequestLimitValidator.Violation> regionViolation = RequestLimitValidator.region(
+                regionMetrics.sizeX(), regionMetrics.sizeY(), regionMetrics.sizeZ(), regionMetrics.volume(), limits);
+        if (regionViolation.isPresent()) {
+            sendLimitError(player, regionViolation.get());
+            return;
+        }
         int[] origin = assembled.origin();
         List<String> palette = assembled.palette();
-        List<PastePos> positions = new ArrayList<>(assembled.entries().size());
+        Map<BlockPos, PastePos> positionMap = new LinkedHashMap<>();
         for (PasteTransfer.Entry entry : assembled.entries()) {
             if (entry.paletteIndex() >= palette.size()) {
                 debugLog("paste rejected player=" + player.getName() + " reason=palette_index_out_of_range");
@@ -1303,23 +1402,25 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (material.isAir() || !material.isBlock() || RestrictedMaterials.isForbiddenPlace(material)) {
                 continue;
             }
-            positions.add(new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target, targetNbt));
+            PastePos pastePos = new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target, targetNbt);
+            if (!regionMetrics.contains(pastePos.position())) {
+                sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "entry_outside_region"));
+                return;
+            }
+            PastePos previous = positionMap.putIfAbsent(pastePos.position(), pastePos);
+            if (previous != null && !previous.equals(pastePos)) {
+                sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "conflicting_duplicate_position"));
+                return;
+            }
         }
+        List<PastePos> positions = new ArrayList<>(positionMap.values());
         if (positions.isEmpty()) {
             debugLog("paste rejected player=" + player.getName() + " reason=no_placeable_blocks");
             sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
             return;
         }
-        if (instant && positions.size() > instantMax) {
-            debugLog("paste rejected player=" + player.getName()
-                    + " reason=instant_too_large blocks=" + positions.size() + " limit=" + instantMax);
-            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", instantMax));
-            return;
-        }
-        if (positions.size() > maxBlocks) {
-            debugLog("paste rejected player=" + player.getName()
-                    + " reason=too_large blocks=" + positions.size() + " limit=" + maxBlocks);
-            sendProtocol(player, "error", "maxfastbuild.error.shape_too_large", Map.of("limit", maxBlocks));
+        if (regionMetrics.volume() != Long.MAX_VALUE && positions.size() > regionMetrics.volume()) {
+            sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "entries_exceed_region"));
             return;
         }
         if (getConfig().getBoolean("coreprotect.required", true) && !audit.available()) {
@@ -1360,7 +1461,27 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-        PendingPaste pending = new PendingPaste(player, worldName, instant, positions, entities);
+        int entityLimit = instant ? limits.maxInstantEntities() : limits.maxNormalEntities();
+        if (entities.size() > entityLimit) {
+            sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities", Map.of("limit", entityLimit));
+            return;
+        }
+        int entityChunkLimit = instant ? limits.maxInstantEntitiesPerChunk() : limits.maxNormalEntitiesPerChunk();
+        if (entityChunkLimit > 0) {
+            Map<String, Integer> chunkCounts = new HashMap<>();
+            for (PendingEntity entity : entities) {
+                String chunk = Math.floorDiv((int) Math.floor(entity.x()), 16) + ","
+                        + Math.floorDiv((int) Math.floor(entity.z()), 16);
+                int count = chunkCounts.merge(chunk, 1, Integer::sum);
+                if (count > entityChunkLimit) {
+                    sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities_per_chunk",
+                            Map.of("limit", entityChunkLimit));
+                    return;
+                }
+            }
+        }
+        PendingPaste pending = new PendingPaste(player, worldName, instant, positions, entities,
+                regionMetrics.bounds(), regionMetrics.volume(), limits.maxAffectedBlocks());
         pending.issues.addAll(entityIssues);
         pendingPastes.put(player.getUniqueId(), pending);
         debugLog("paste assembled player=" + player.getName()
@@ -1460,6 +1581,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             pending.mutations.add(mutation);
             if (PaperWorldAccess.requiresBreakToReplace(before)) {
                 pending.replaceBreakCount++;
+            }
+            if (pending.mutations.size() > pending.maxAffectedBlocks) {
+                return new PlanningError("maxfastbuild.error.affected_too_large",
+                        Map.of("actual", pending.mutations.size(), "limit", pending.maxAffectedBlocks));
             }
         }
         return null;
@@ -1702,6 +1827,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
                 "taskId", taskId.toString(),
                 "blocks", mutations.size(),
+                "affectedBlocks", mutations.size(),
+                "regionBlocks", pending.regionBlocks,
+                "sizeX", pending.regionBounds.sizeX(),
+                "sizeY", pending.regionBounds.sizeY(),
+                "sizeZ", pending.regionBounds.sizeZ(),
                 "entities", pending.entities.size(),
                 "charge", charge.total().toPlainString()));
     }
@@ -1941,9 +2071,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             reloadConfig();
             mergeConfigDefaults();
             reloadConfig();
+            serverLimits = loadServerLimits();
+            if (pastes != null) pastes.clear();
+            pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120),
+                    serverLimits.maxPasteParts(), serverLimits.maxBlocksPerPart(), serverLimits.maxPasteTotalBlocks());
+            protocol = new SecureProtocol(Clock.systemUTC(),
+                    Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)),
+                    serverLimits.maxPayloadBytes());
+            sessions.clear();
+            globalBudgetPerTick = Math.max(0, getConfig().getInt("execution.global-blocks-per-tick", 4));
+            planningGlobalBudgetPerTick = Math.max(0, getConfig().getInt("execution.planning.global-blocks-per-tick", 2000));
             refreshDebugFlags();
             SeedCatalog.reload(getConfig());
             messages.reload();
+            for (Player online : Bukkit.getOnlinePlayers()) issueSession(online);
             sender.sendMessage(messages.component("reloaded"));
             getLogger().info("Reloaded config; CLI language=" + messages.language());
         } else if (args[0].equalsIgnoreCase("recovery")) {
@@ -2250,16 +2391,30 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         return new BigDecimal(String.valueOf(getConfig().get("instant-paste.multiplier", 2))).max(BigDecimal.ZERO);
     }
 
-    /**
-     * Instant-paste block cap. {@code 0} = unlimited (still bounded by
-     * {@code execution.max-region-blocks} and the transfer protocol ceiling).
-     */
-    private int instantMaxBlocks() {
-        int configured = getConfig().getInt("instant-paste.max-blocks", 0);
-        return configured <= 0 ? Integer.MAX_VALUE : configured;
+    private ServerLimits loadServerLimits() {
+        return new ServerLimits(
+                getConfig().getLong("execution.max-region-blocks", 100000),
+                getConfig().getLong("execution.max-affected-blocks", 100000),
+                getConfig().getLong("execution.max-region-size.x", 200),
+                getConfig().getLong("execution.max-region-size.y", 200),
+                getConfig().getLong("execution.max-region-size.z", 200),
+                getConfig().getInt("protocol.paste.max-parts", PasteTransfer.MAX_PARTS),
+                getConfig().getInt("protocol.paste.max-blocks-per-part", PasteTransfer.MAX_BLOCKS_PER_PART),
+                getConfig().getInt("protocol.paste.max-total-blocks", PasteAccumulator.MAX_TOTAL_BLOCKS),
+                getConfig().getInt("protocol.max-payload-bytes", 131072),
+                instantMaxEntities(),
+                instantMaxEntitiesPerChunk(),
+                PasteTransfer.MAX_NORMAL_ENTITIES,
+                PasteTransfer.MAX_NORMAL_ENTITIES_PER_CHUNK);
     }
 
-    /** Hard instant-paste entity cap (whole paste). */
+    private ServerLimits limits() {
+        ServerLimits value = serverLimits;
+        if (value == null) throw new IllegalStateException("server limits unavailable");
+        return value;
+    }
+
+    /** Effective instant-paste entity cap, advertised to clients and enforced on the server. */
     private int instantMaxEntities() {
         int configured = Math.max(0, getConfig().getInt("instant-paste.max-entities", 64));
         return Math.min(configured, PasteTransfer.MAX_INSTANT_ENTITIES);
@@ -2780,13 +2935,12 @@ if (data.billableItem() != null) {
         sendMarked(player, GSON.toJson(Map.of(
                 "mfb", 1,
                 "type", "hello",
+                "protocolVersion", ProtocolEnvelope.CURRENT_VERSION,
                 "sessionId", session.id(),
                 "secret", Base64.getUrlEncoder().withoutPadding().encodeToString(session.secret()),
                 "expiresAt", session.expiresAt().toString(),
-                "maxBlocks", getConfig().getInt("execution.max-region-blocks", 100000),
-                "maxRegionVolume", getConfig().getInt("execution.max-region-volume", 8000000),
                 "instantMultiplier", instantMultiplier().stripTrailingZeros().toPlainString(),
-                "instantMaxBlocks", instantMaxBlocks())));
+                "limits", limits())));
     }
 
     /**
@@ -2809,6 +2963,17 @@ if (data.billableItem() != null) {
     private void sendMarked(Player player, String json) {
         player.sendMessage(Component.text(ProtocolEnvelope.MESSAGE_MARKER + json));
     }
+
+    private void sendLimitError(Player player, RequestLimitValidator.Violation violation) {
+        switch (violation.kind()) {
+            case AXIS -> sendProtocol(player, "error", "maxfastbuild.error.region_axis_too_large",
+                    Map.of("axis", violation.axis(), "actual", violation.actual(), "limit", violation.limit()));
+            case REGION_BLOCKS -> sendProtocol(player, "error", "maxfastbuild.error.region_too_large",
+                    Map.of("actual", violation.actual(), "limit", violation.limit()));
+            case AFFECTED_BLOCKS -> sendProtocol(player, "error", "maxfastbuild.error.affected_too_large",
+                    Map.of("actual", violation.actual(), "limit", violation.limit()));
+        }
+    }
     private static BlockPos at(Player player) { Location p = player.getLocation(); return new BlockPos(p.getBlockX(), p.getBlockY(), p.getBlockZ()); }
 
     /** 0 in config = unlimited (Integer.MAX_VALUE); otherwise the configured value. */
@@ -2816,22 +2981,64 @@ if (data.billableItem() != null) {
         return budget <= 0 ? Integer.MAX_VALUE : budget;
     }
 
-    private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, int hollow, String material) {}
+    private static int shapeGenerationLimit(long limit) {
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(1, limit));
+    }
+
+    private static ShapeRequest shapeRequest(Selection selection) {
+        return new ShapeRequest(selection.mode(), selection.first(), selection.second(), selection.third(),
+                selection.hollow(), selection.spacingX(), selection.spacingY(), selection.spacingZ());
+    }
+
+    private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, BlockPos third,
+                                 int hollow, int spacingX, int spacingY, int spacingZ, String material) {}
     private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
-    private record Selection(BuildMode mode, BlockPos first, BlockPos second, int hollow, String material, String world) {
-        Selection withMode(BuildMode value) { return new Selection(value, first, second, hollow, material, world); }
-        Selection withFirst(BlockPos value) { return new Selection(mode, value, second, hollow, material, world); }
-        Selection withSecond(BlockPos value) { return new Selection(mode, first, value, hollow, material, world); }
-        Selection withHollow(int value) { return new Selection(mode, first, second, value, material, world); }
-        Selection withMaterial(String value) { return new Selection(mode, first, second, hollow, value, world); }
-        Selection withWorld(String value) { return new Selection(mode, first, second, hollow, material, value); }
+    private record Selection(BuildMode mode, BlockPos first, BlockPos second, BlockPos third, int hollow,
+                             int spacingX, int spacingY, int spacingZ, String material, String world) {
+        Selection(BuildMode mode, BlockPos first, BlockPos second, int hollow, String material, String world) {
+            this(mode, first, second, null, hollow, 1, 1, 1, material, world);
+        }
+
+        Selection withMode(BuildMode value) {
+            return new Selection(value, first, second, value == BuildMode.ARC ? third : null,
+                    hollow, spacingX, spacingY, spacingZ, material, world);
+        }
+
+        Selection withFirst(BlockPos value) {
+            return new Selection(mode, value, second, third, hollow, spacingX, spacingY, spacingZ, material, world);
+        }
+
+        Selection withSecond(BlockPos value) {
+            return new Selection(mode, first, value, third, hollow, spacingX, spacingY, spacingZ, material, world);
+        }
+
+        Selection withThird(BlockPos value) {
+            return new Selection(mode, first, second, value, hollow, spacingX, spacingY, spacingZ, material, world);
+        }
+
+        Selection withHollow(int value) {
+            return new Selection(mode, first, second, third, value, spacingX, spacingY, spacingZ, material, world);
+        }
+
+        Selection withArraySpacing(int x, int y, int z) {
+            return new Selection(mode, first, second, third, hollow, x, y, z, material, world);
+        }
+
+        Selection withMaterial(String value) {
+            return new Selection(mode, first, second, third, hollow, spacingX, spacingY, spacingZ, value, world);
+        }
+
+        Selection withWorld(String value) {
+            return new Selection(mode, first, second, third, hollow, spacingX, spacingY, spacingZ, material, value);
+        }
     }
 
     /** In-progress region planning for a player. Planning runs over multiple server ticks to avoid freezing the main thread. */
     private static final class PendingBuild {        final Player player;
         final OperationKind operation;
         final Selection selection;
-        final int maxBlocks;
+        final long maxBlocks;
+        final long maxAffectedBlocks;
         final long startedAt;
         final Material filter;
         final boolean keepOnly;
@@ -2845,15 +3052,18 @@ if (data.billableItem() != null) {
         Iterator<BlockPos> iterator;
         boolean notified = false;
 
-        PendingBuild(Player player, Selection selection, OperationKind operation, int maxBlocks) {
-            this(player, selection, operation, maxBlocks, null, false);
+        PendingBuild(Player player, Selection selection, OperationKind operation, long maxBlocks,
+                     long maxAffectedBlocks) {
+            this(player, selection, operation, maxBlocks, maxAffectedBlocks, null, false);
         }
 
-        PendingBuild(Player player, Selection selection, OperationKind operation, int maxBlocks, Material filter, boolean keepOnly) {
+        PendingBuild(Player player, Selection selection, OperationKind operation, long maxBlocks,
+                     long maxAffectedBlocks, Material filter, boolean keepOnly) {
             this.player = player;
             this.selection = selection;
             this.operation = operation;
             this.maxBlocks = maxBlocks;
+            this.maxAffectedBlocks = maxAffectedBlocks;
             this.filter = filter;
             this.keepOnly = keepOnly;
             this.startedAt = System.currentTimeMillis();
@@ -2862,6 +3072,23 @@ if (data.billableItem() != null) {
 
     /** Absolute position and its palette target state (client-supplied, re-validated per tick). */
     private record PastePos(BlockPos position, String targetState, String targetNbt) {}
+
+    private record PasteRegionMetrics(Bounds bounds, long volume, List<PasteTransfer.Region> regions) {
+        long sizeX() { return bounds.sizeX(); }
+        long sizeY() { return bounds.sizeY(); }
+        long sizeZ() { return bounds.sizeZ(); }
+
+        boolean contains(BlockPos position) {
+            for (PasteTransfer.Region region : regions) {
+                if (position.x() >= region.minX() && position.x() <= region.maxX()
+                        && position.y() >= region.minY() && position.y() <= region.maxY()
+                        && position.z() >= region.minZ() && position.z() <= region.maxZ()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
 
     /** A validated pasted entity and its absolute spawn position. */
     private record PendingEntity(PaperEntityHelper.EntityData data, double x, double y, double z) {}
@@ -2881,6 +3108,9 @@ if (data.billableItem() != null) {
         final Iterator<PastePos> iterator;
         final List<BlockMutation> mutations = new ArrayList<>();
         final List<PendingEntity> entities;
+        final Bounds regionBounds;
+        final long regionBlocks;
+        final long maxAffectedBlocks;
         final List<PastePrecheckIssue> issues = new ArrayList<>();
         PaperInventoryHelper.RemovalLedger removals;
         PasteMaterials needs;
@@ -2888,12 +3118,17 @@ if (data.billableItem() != null) {
         long processed = 0;
         long planningSkipped = 0;
 
-        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions, List<PendingEntity> entities) {
+        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions,
+                     List<PendingEntity> entities, Bounds regionBounds, long regionBlocks,
+                     long maxAffectedBlocks) {
             this.player = player;
             this.world = world;
             this.instant = instant;
             this.iterator = positions.iterator();
             this.entities = entities == null ? List.of() : List.copyOf(entities);
+            this.regionBounds = regionBounds;
+            this.regionBlocks = regionBlocks;
+            this.maxAffectedBlocks = maxAffectedBlocks;
         }
     }
 }

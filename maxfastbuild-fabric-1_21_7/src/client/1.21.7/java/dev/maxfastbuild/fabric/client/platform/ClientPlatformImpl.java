@@ -103,6 +103,15 @@ public final class ClientPlatformImpl extends ClientPlatform {
                 || GLFW.glfwGetKey(h, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
     }
 
+    @Override
+    public boolean isAltKeyDown() {
+        Minecraft client = Minecraft.getInstance();
+        if (client.getWindow() == null) return false;
+        long h = client.getWindow().getWindow();
+        return GLFW.glfwGetKey(h, GLFW.GLFW_KEY_LEFT_ALT) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(h, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS;
+    }
+
     /** fabric-api for 1.21.7 has no hotbar-scroll event — radial scroll lock is unavailable. */
     @Override
     public void registerHotbarScrollHook() {

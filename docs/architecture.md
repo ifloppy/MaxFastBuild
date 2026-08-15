@@ -4,7 +4,7 @@ MaxFastBuild treats the server as the only authority. A client submits shape int
 
 There is **no durable inventory escrow** in the current release: place materials and economy fees are taken when the task is accepted. Unused materials and unfinished variable fees are returned on completion, cancel, or failure settlement. `EscrowStore` exists in the storage module for a future durable-reservation path and is not wired into Paper.
 
-Transforms (`mirror` / `array`) exist in `maxfastbuild-core` but are **not** applied on the Paper submit path.
+The Paper submit path regenerates `arc` and `array` shapes from their anchors and spacing parameters. The older standalone transform helpers remain separate utilities and are not part of request processing.
 
 The one channel where the client submits a block list is the **Litematica bulk paste** (`/__mfb p` with a gzipped paste envelope). It skips only shape generation: every pasted mutation still goes through world-state, protection, tool, material and economy validation and is persisted as a normal task. See `docs/protocol.md`.
 
@@ -12,7 +12,7 @@ The one channel where the client submits a block list is the **Litematica bulk p
 
 1. Intercept `/__mfb` (not registered in Brigadier). Primary intents are single-line `place` / `break`. Optional legacy path: `hello` session + chunked `p` envelopes with HMAC (still accepted; not required for compact commands).
 2. Check `maxfastbuild.use`, request rate limit, and concurrent task limits.
-3. Generate the shape on the server (bounding volume must not exceed `execution.max-region-blocks` before cell enumeration).
+3. Validate the selected region volume (including air) and X/Y/Z dimensions, then generate the shape on the server. The planned unique mutations must also stay within `execution.max-affected-blocks`.
 4. Reject invalid materials, forbidden place/break blocks, and coordinates outside world height.
 5. Local protection checks only during planning (no synthetic `BlockBreakEvent`/`BlockPlaceEvent` — those multi-logged in CoreProtect).  
    **Execute with vanilla APIs:** break = `breakNaturally` (CP records one break); place = `setBlockData`. Soft cells skip break. Per-block fees charge place + each replace-break.

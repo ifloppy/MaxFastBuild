@@ -42,6 +42,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             }
             // Hold-to-open: use physical key (Screen opens → KeyMapping.releaseAll clears isDown).
             if (isRadialKeyPhysicallyDown()
+                    && !ClientPlatform.instance().isCtrlKeyDown()
                     && client.player != null
                     && client.level != null
                     && !ClientPlatform.instance().isScreenOpen(client)) {
@@ -56,7 +57,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         UseItemCallback.EVENT.register(BuildSelectionController::onUseItem);
         ClientPreAttackCallback.EVENT.register((client, player, clickCount) ->
                 BuildSelectionController.cancelOnAttack(client, clickCount));
-        // Selection active + Shift: scroll adjusts look distance instead of hotbar.
+        // Selection modifiers consume scroll for depth, thickness, and array spacing instead of hotbar changes.
         ClientPlatform.instance().registerHotbarScrollHook();
 
         ClientPlatform.instance().registerHud();
@@ -80,6 +81,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             JsonObject object = JsonParser.parseString(text.substring(ProtocolEnvelope.MESSAGE_MARKER.length())).getAsJsonObject();
             String type = object.has("type") ? object.get("type").getAsString() : "response";
             if ("hello".equals(type)) {
+                ServerCapabilities.update(object);
                 PasteController.onHello(object);
                 notifyHandshakeOk();
                 return false;
@@ -195,6 +197,10 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             return "MaxFastBuild: complete " + args[0] + "/" + args[1] + ", cost " + args[2] + ", refund " + args[3];
         }
         if ("maxfastbuild.task.accepted".equals(key) && args.length >= 2) {
+            if (args.length >= 6) {
+                return "MaxFastBuild: accepted " + args[0] + " affected blocks, region " + args[1]
+                        + " (" + args[2] + "x" + args[3] + "x" + args[4] + "), cost " + args[5];
+            }
             return "MaxFastBuild: accepted " + args[0] + " blocks, cost " + args[1];
         }
         if ("maxfastbuild.paste.blocks_skipped".equals(key) && args.length >= 3) {
@@ -218,7 +224,9 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         JsonObject data = object.getAsJsonObject("data");
         return switch (key) {
             case "maxfastbuild.task.accepted" ->
-                    new Object[]{jsonString(data, "blocks"), jsonString(data, "charge")};
+                    new Object[]{jsonString(data, "affectedBlocks"), jsonString(data, "regionBlocks"),
+                            jsonString(data, "sizeX"), jsonString(data, "sizeY"), jsonString(data, "sizeZ"),
+                            jsonString(data, "charge")};
             case "maxfastbuild.paste.blocks_skipped" ->
                     new Object[]{jsonString(data, "skipped"), jsonString(data, "entitySkipped"), jsonString(data, "planned")};
             case "maxfastbuild.error.paste_precheck_failed" ->
@@ -241,6 +249,12 @@ public final class MaxFastBuildClient implements ClientModInitializer {
             case "maxfastbuild.error.no_permission" ->
                     new Object[]{jsonString(data, "permission")};
             case "maxfastbuild.error.shape_too_large" ->
+                    new Object[]{jsonString(data, "limit")};
+            case "maxfastbuild.error.region_axis_too_large" ->
+                    new Object[]{jsonString(data, "axis"), jsonString(data, "actual"), jsonString(data, "limit")};
+            case "maxfastbuild.error.region_too_large", "maxfastbuild.error.affected_too_large" ->
+                    new Object[]{jsonString(data, "actual"), jsonString(data, "limit")};
+            case "maxfastbuild.paste.too_many_entities_per_chunk", "maxfastbuild.paste.too_many_entities" ->
                     new Object[]{jsonString(data, "limit")};
             case "maxfastbuild.error.protected" ->
                     data.has("position")

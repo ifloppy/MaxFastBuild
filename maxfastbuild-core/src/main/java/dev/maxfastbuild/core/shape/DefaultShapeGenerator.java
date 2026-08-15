@@ -13,8 +13,10 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
         LinkedHashSet<BlockPos> result = new LinkedHashSet<>();
         switch (request.mode()) {
             case SINGLE -> add(result, request.first(), limit);
-            case LINE, DIAGONAL_LINE -> line(result, request.first(), request.second(), limit);
-            case WALL, DIAGONAL_WALL -> wall(result, request, limit);
+            case LINE -> line(result, request.first(), request.second(), limit);
+            case WALL -> wall(result, request, limit);
+            case ARC -> arc(result, request, limit);
+            case ARRAY -> array(result, request, limit);
             case SLOPE_FLOOR -> slopeFloor(result, request, limit);
             case FLOOR, CUBE -> {
                 LinkedHashSet<BlockPos> solid = new LinkedHashSet<>();
@@ -65,6 +67,100 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
                     a.y() + Math.round((float) dy * i / steps),
                     a.z() + Math.round((float) dz * i / steps)), limit);
         }
+    }
+
+    /** Draws the circular arc from the first point through the second point to the third point. */
+    private static void arc(Set<BlockPos> out, ShapeRequest request, int limit) {
+        BlockPos a = request.first();
+        BlockPos through = request.second();
+        BlockPos b = request.third();
+        if (b == null) throw new IllegalArgumentException("arc requires three points");
+
+        Vec3 start = Vec3.from(a);
+        Vec3 middle = Vec3.from(through);
+        Vec3 end = Vec3.from(b);
+        Vec3 ab = middle.subtract(start);
+        Vec3 ac = end.subtract(start);
+        Vec3 normal = ab.cross(ac);
+        double normalLengthSquared = normal.dot(normal);
+        if (normalLengthSquared < 1.0e-9) {
+            // A degenerate CAD arc has no unique circle; a straight fallback is deterministic.
+            line(out, a, through, limit);
+            line(out, through, b, limit);
+            return;
+        }
+
+        Vec3 centerOffset = ac.cross(normal).scale(ab.dot(ab))
+                .add(normal.cross(ab).scale(ac.dot(ac)))
+                .scale(1.0 / (2.0 * normalLengthSquared));
+        Vec3 center = start.add(centerOffset);
+        Vec3 radiusVector = start.subtract(center);
+        double radius = Math.sqrt(radiusVector.dot(radiusVector));
+        Vec3 axisX = radiusVector.scale(1.0 / radius);
+        Vec3 axisY = normal.scale(1.0 / Math.sqrt(normalLengthSquared)).cross(axisX);
+        double middleAngle = angle(middle.subtract(center), axisX, axisY);
+        double endAngle = angle(end.subtract(center), axisX, axisY);
+        double ccwEnd = positiveAngle(endAngle);
+        double ccwMiddle = positiveAngle(middleAngle);
+        boolean counterClockwise = ccwMiddle <= ccwEnd + 1.0e-9;
+        double firstSweep = counterClockwise ? ccwMiddle : -(Math.PI * 2 - ccwMiddle);
+        double secondSweep = ccwEnd - ccwMiddle;
+
+        appendArcSegment(out, center, axisX, axisY, radius, 0, firstSweep, a, through, limit);
+        appendArcSegment(out, center, axisX, axisY, radius, middleAngle, secondSweep, through, b, limit);
+    }
+
+    /** An array is a regular 3D lattice bounded by the two selected corners. */
+    private static void array(Set<BlockPos> out, ShapeRequest request, int limit) {
+        Bounds bounds = request.bounds();
+        for (long x = bounds.min().x(); x <= bounds.max().x(); x += request.spacingX()) {
+            for (long y = bounds.min().y(); y <= bounds.max().y(); y += request.spacingY()) {
+                for (long z = bounds.min().z(); z <= bounds.max().z(); z += request.spacingZ()) {
+                    add(out, new BlockPos((int) x, (int) y, (int) z), limit);
+                }
+            }
+        }
+    }
+
+    private static void appendArcSegment(Set<BlockPos> out, Vec3 center, Vec3 axisX, Vec3 axisY,
+                                         double radius, double startAngle, double sweep,
+                                         BlockPos start, BlockPos end, int limit) {
+        double estimatedSamples = Math.abs(sweep) * radius * 2.0;
+        if (!Double.isFinite(estimatedSamples)
+                || estimatedSamples > (double) limit * 2.0
+                || estimatedSamples > Integer.MAX_VALUE) {
+            throw new ShapeLimitException(limit);
+        }
+        int steps = Math.max(1, (int) Math.ceil(estimatedSamples));
+        BlockPos previous = start;
+        add(out, previous, limit);
+        for (int i = 1; i <= steps; i++) {
+            double angle = startAngle + sweep * i / steps;
+            Vec3 point = center.add(axisX.scale(Math.cos(angle) * radius))
+                    .add(axisY.scale(Math.sin(angle) * radius));
+            BlockPos current = i == steps ? end : rounded(point);
+            line(out, previous, current, limit);
+            previous = current;
+        }
+    }
+
+    private static double angle(Vec3 vector, Vec3 axisX, Vec3 axisY) {
+        return Math.atan2(vector.dot(axisY), vector.dot(axisX));
+    }
+
+    private static double positiveAngle(double angle) {
+        double value = angle % (Math.PI * 2);
+        return value < 0 ? value + Math.PI * 2 : value;
+    }
+
+    private static BlockPos rounded(Vec3 point) {
+        long x = Math.round(point.x), y = Math.round(point.y), z = Math.round(point.z);
+        if (x < Integer.MIN_VALUE || x > Integer.MAX_VALUE
+                || y < Integer.MIN_VALUE || y > Integer.MAX_VALUE
+                || z < Integer.MIN_VALUE || z > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("arc coordinate overflow");
+        }
+        return new BlockPos((int) x, (int) y, (int) z);
     }
 
     private static void wall(Set<BlockPos> out, ShapeRequest request, int limit) {
@@ -232,5 +328,18 @@ public final class DefaultShapeGenerator implements ShapeGenerator {
     private static void add(Set<BlockPos> out, BlockPos pos, int limit) {
         out.add(pos);
         if (out.size() > limit) throw new ShapeLimitException(limit);
+    }
+
+    private record Vec3(double x, double y, double z) {
+        static Vec3 from(BlockPos pos) { return new Vec3(pos.x(), pos.y(), pos.z()); }
+        Vec3 add(Vec3 other) { return new Vec3(x + other.x, y + other.y, z + other.z); }
+        Vec3 subtract(Vec3 other) { return new Vec3(x - other.x, y - other.y, z - other.z); }
+        Vec3 scale(double factor) { return new Vec3(x * factor, y * factor, z * factor); }
+        double dot(Vec3 other) { return x * other.x + y * other.y + z * other.z; }
+        Vec3 cross(Vec3 other) {
+            return new Vec3(y * other.z - z * other.y,
+                    z * other.x - x * other.z,
+                    x * other.y - y * other.x);
+        }
     }
 }

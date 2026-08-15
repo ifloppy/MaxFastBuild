@@ -18,6 +18,18 @@ class CompactBreakCommandTest {
         assertThat(parsed.hollow()).isEqualTo(0);
     }
 
+    @Test void roundTripsArcAndArrayParameters() {
+        CompactBreakCommand.Intent arc = CompactBreakCommand.parse(
+                "__mfb break arc 0 64 0 2 66 0 0 4 64 0");
+        assertThat(arc.third()).isEqualTo(new BlockPos(4, 64, 0));
+
+        CompactBreakCommand.Intent array = CompactBreakCommand.parse(
+                "__mfb break array 0 0 0 4 2 4 0 2 1 2");
+        assertThat(array.spacingX()).isEqualTo(2);
+        assertThat(array.spacingY()).isEqualTo(1);
+        assertThat(array.spacingZ()).isEqualTo(2);
+    }
+
     @Test void rejectsWrongArity() {
         assertThatThrownBy(() -> CompactBreakCommand.parse("__mfb break floor 0 0 0 1 1 1"))
                 .hasMessage("break_arity");

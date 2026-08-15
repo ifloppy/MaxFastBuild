@@ -31,10 +31,10 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 ### Selection
 
 1. Pick a shape from the radial menu.
-2. **Right-click** first corner, **right-click** second corner to submit.
+2. Normal shapes use two **right-clicks** for the start and end; a **three-point arc** uses start, through, and end points.
 3. **Left-click** cancels the selection.
 4. Corners may be in air; against a solid block, place uses vanilla replaceable/adjacent rules.
-5. **Shift+scroll** sets look depth **1–64**; plain scroll still changes the hotbar.
+5. **Shift+scroll** sets look depth **1–64**; volume thickness/solid/hollow uses **Ctrl+scroll**; plain scroll still changes the hotbar.
 6. Preview shows only the shape **shell** plus a bounds outline.
 
 ### Costs and materials (server-defined)
@@ -48,7 +48,9 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 
 ## Shapes
 
-Single, line, wall, floor, cube, diagonal line, diagonal wall, slope floor, circle, cylinder, sphere, pyramid, cone.
+Single, line, wall, floor, cube, three-point arc, array, slope floor, circle, cylinder, sphere, pyramid, cone.
+
+The three-point arc uses CAD-style start, through, and end points. Array fills the selected two-point range on an X/Y/Z lattice; use Ctrl+scroll for X, Ctrl+Shift+scroll for Y, and Ctrl+Alt+scroll for Z on the client.
 
 ## Without the client mod
 
@@ -59,6 +61,8 @@ Public server commands (permission `maxfastbuild.use`). Use `/mfb` or `/mfb help
 /mfb mode line
 /mfb pos1
 /mfb pos2
+/mfb pos3
+/mfb array-spacing 2 1 2
 /mfb hollow false
 /mfb apply
 /mfb status
@@ -78,8 +82,8 @@ With the client mod and **Litematica** both installed, the current active placem
 Notes:
 
 - Block entities (chests, signs, lecterns, …) keep their **contents/text**: a container paste deducts **one plain container block item** plus **every item inside its stored contents** (exact match), from the inventory or nearby containers.
-- Optional **instant paste**: bind the "**Toggle instant paste**" key (default unbound), press it to arm the mode (HUD indicator), then paste. Instant pastes are charged at the server's `instant-paste.multiplier` (default 2×) and execute immediately instead of waiting in the queue; they are capped by `instant-paste.max-blocks` (default 5000). Materials and tool durability are still required.
-- A single paste is bounded by the server's `execution.max-region-blocks` limit (default 100000); split larger schematics.
+- Optional **instant paste**: bind the "**Toggle instant paste**" key (default unbound), press it to arm the mode (HUD indicator), then paste. Instant pastes are charged at the server's `instant-paste.multiplier` (default 2×) and execute immediately instead of waiting in the queue; they share `execution.max-affected-blocks` with queued pastes. Materials and tool durability are still required.
+- A single paste is bounded by `execution.max-region-blocks` (selected volume including air), `execution.max-affected-blocks` (unique coordinates planned to change), and the X/Y/Z size limits. The client shows server limits and current schematic metrics; split larger schematics.
 - As with normal placement, survival deducts **per block type** from the inventory and applies world-protection, tool-durability and economy checks.
 - Without Litematica the key does nothing; creative mode still goes through the same validation.
 

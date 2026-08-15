@@ -11,10 +11,10 @@ import java.util.Locale;
 final class RadialLayout {
     static final BuildMode[] OUTER = {
             BuildMode.SINGLE, BuildMode.LINE, BuildMode.WALL, BuildMode.FLOOR,
-            BuildMode.CUBE, BuildMode.DIAGONAL_LINE, BuildMode.CIRCLE, BuildMode.CYLINDER
+            BuildMode.CUBE, BuildMode.ARC, BuildMode.CIRCLE, BuildMode.CYLINDER
     };
     static final BuildMode[] INNER = {
-            BuildMode.SPHERE, BuildMode.DIAGONAL_WALL, BuildMode.SLOPE_FLOOR,
+            BuildMode.SPHERE, BuildMode.ARRAY, BuildMode.SLOPE_FLOOR,
             BuildMode.PYRAMID, BuildMode.CONE
     };
 

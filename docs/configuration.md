@@ -8,7 +8,9 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 |-----|---------|--------------|
 | `execution.ticks-per-block` | Scheduler period (ticks) | yes |
 | `execution.blocks-per-step` | Mutations attempted per tick step | yes |
-| `execution.max-region-blocks` | Hard cap on bounding volume / generated shape size | yes |
+| `execution.max-region-blocks` | Maximum selected region volume, including air | yes |
+| `execution.max-affected-blocks` | Maximum unique coordinates planned to change in one request; replacement break + place counts once (default 100000) | yes |
+| `execution.max-region-size.x` / `.y` / `.z` | Maximum inclusive selection size on each axis (default 200 each) | yes |
 | `execution.max-concurrent-tasks-per-player` | Active tasks per player | yes |
 | `execution.pause-when-player-offline` | Present in default config; offline pause is always applied in code | no (behavior hard-coded) |
 | `default-language` | Paper CLI message pack (`messages_<lang>.yml`), default `zh_cn` | yes |
@@ -24,10 +26,16 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `economy.per-area.enabled` / `.price` | Fee from max bounding plane area | yes |
 | `economy.per-block.enabled` / `.price` | Fee per planned mutation | yes |
 | `instant-paste.multiplier` | Instant paste charge multiplier (default 2; 0 = free aside from materials) | yes |
-| `instant-paste.max-blocks` | Instant paste block cap (default 5000; 0 = protocol cap) | yes |
+| `instant-paste.max-entities` / `.max-entities-per-chunk` | Instant paste entity limits | yes |
 | `coreprotect.required` | Reject builds if CoreProtect is missing | yes |
 | `protocol.session-minutes` | Lifetime for optional legacy HMAC sessions | yes |
-| `protocol.max-payload-bytes` | Max decoded legacy payload size | yes |
+| `protocol.max-payload-bytes` | Max decoded authenticated payload part size | yes |
+| `protocol.paste.max-parts` | Maximum parts in one bulk paste, advertised to clients | yes |
+| `protocol.paste.max-blocks-per-part` | Maximum entries in one bulk paste part, advertised to clients | yes |
+| `protocol.paste.max-total-blocks` | Maximum in-flight bulk-paste entries across players | yes |
+
+Protocol v4 no longer reads the old `instant-paste.max-blocks` key. Instant and queued requests share
+`execution.max-affected-blocks`; an old key left in an existing config file can be removed.
 
 ## Permissions
 
@@ -58,4 +66,4 @@ Prefer a full server restart after upgrading the jar when possible. Soft-depend 
 - `applied_count` is persisted so restarts do not over-refund.
 - Creative mode does not consume place materials.
 - Container pastes deduct **one plain block item per container** plus **every item inside its NBT contents** (exact match: same type + meta). Container contents are validated for forbidden/undecodable items before any charge; a paste whose NBT cannot be parsed/read is rejected outright rather than placed empty.
-- Instant paste runs the mutations synchronously (no queue wait) at `instant-paste.multiplier` × the normal quote; it still requires materials, tool durability, CoreProtect, and economy unless bypassed. Partial failure refunds proportional fees and returns unused materials like a normal task.
+- Instant paste runs the mutations synchronously (no queue wait) at `instant-paste.multiplier` × the normal quote; it uses the same `execution.max-affected-blocks` limit as queued paste and still requires materials, tool durability, CoreProtect, and economy unless bypassed. Partial failure refunds proportional fees and returns unused materials like a normal task.

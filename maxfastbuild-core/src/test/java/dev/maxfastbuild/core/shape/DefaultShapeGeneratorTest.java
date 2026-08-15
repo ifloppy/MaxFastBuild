@@ -7,9 +7,19 @@ import static org.assertj.core.api.Assertions.*;
 class DefaultShapeGeneratorTest {
     private final DefaultShapeGenerator generator = new DefaultShapeGenerator();
 
-    @Test void createsInclusiveDiagonalLine() {
-        var blocks = generator.generate(new ShapeRequest(BuildMode.DIAGONAL_LINE, new BlockPos(0, 0, 0), new BlockPos(4, 2, 0), 0), 100);
-        assertThat(blocks).contains(new BlockPos(0, 0, 0), new BlockPos(2, 1, 0), new BlockPos(4, 2, 0)).hasSize(5);
+    @Test void createsThreePointArcThroughMiddleAnchor() {
+        var blocks = generator.generate(new ShapeRequest(BuildMode.ARC,
+                new BlockPos(0, 0, 0), new BlockPos(2, 2, 0), new BlockPos(4, 0, 0), 0), 100);
+        assertThat(blocks).contains(new BlockPos(0, 0, 0), new BlockPos(2, 2, 0), new BlockPos(4, 0, 0));
+        assertThat(blocks).allMatch(block -> block.z() == 0);
+    }
+
+    @Test void createsArrayWithIndependentAxisSteps() {
+        var blocks = generator.generate(new ShapeRequest(BuildMode.ARRAY,
+                new BlockPos(0, 0, 0), new BlockPos(4, 2, 4), 0, 2, 1, 2), 100);
+        assertThat(blocks).hasSize(27)
+                .contains(new BlockPos(0, 0, 0), new BlockPos(4, 2, 4))
+                .doesNotContain(new BlockPos(1, 0, 0));
     }
 
     @Test void solidCubeIsFull() {

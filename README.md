@@ -41,7 +41,7 @@
 | | | | |
 |:---:|:---:|:---:|:---:|
 | ![single](docs/assets/modes/png/single.png) Single | ![line](docs/assets/modes/png/line.png) Line | ![wall](docs/assets/modes/png/wall.png) Wall | ![floor](docs/assets/modes/png/floor.png) Floor |
-| ![cube](docs/assets/modes/png/cube.png) Cube | ![d-line](docs/assets/modes/png/diagonal_line.png) D-Line | ![d-wall](docs/assets/modes/png/diagonal_wall.png) D-Wall | ![slope](docs/assets/modes/png/slope_floor.png) Slope |
+| ![cube](docs/assets/modes/png/cube.png) Cube | ![arc](docs/assets/modes/arc.svg) Arc | ![array](docs/assets/modes/array.svg) Array | ![slope](docs/assets/modes/png/slope_floor.png) Slope |
 | ![circle](docs/assets/modes/png/circle.png) Circle | ![cylinder](docs/assets/modes/png/cylinder.png) Cylinder | ![sphere](docs/assets/modes/png/sphere.png) Sphere | ![pyramid](docs/assets/modes/png/pyramid.png) Pyramid |
 | ![cone](docs/assets/modes/png/cone.png) Cone | | | |
 

@@ -108,6 +108,15 @@ public final class ClientPlatformImpl extends ClientPlatform {
     }
 
     @Override
+    public boolean isAltKeyDown() {
+        Minecraft client = Minecraft.getInstance();
+        if (client.getWindow() == null) return false;
+        long h = client.getWindow().handle();
+        return GLFW.glfwGetKey(h, GLFW.GLFW_KEY_LEFT_ALT) == GLFW.GLFW_PRESS
+                || GLFW.glfwGetKey(h, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS;
+    }
+
+    @Override
     public void registerHotbarScrollHook() {
         ClientHotbarScrollEvents.ALLOW.register((inventory, selected, next, horizontal, vertical) ->
                 !BuildSelectionController.onHotbarScroll(vertical));

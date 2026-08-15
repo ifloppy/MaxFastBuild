@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
 
 final class PublicCommand implements TabExecutor {
     static final List<String> ROOT = List.of(
-            "help", "about", "mode", "pos1", "pos2", "apply", "cancel", "status", "hollow", "material", "setblock");
+            "help", "about", "mode", "pos1", "pos2", "pos3", "array-spacing", "apply", "cancel", "status", "hollow", "material", "setblock");
     private static final List<String> BOOLS = List.of("true", "false");
     private static final List<String> MODES = Arrays.stream(BuildMode.values())
             .map(v -> v.name().toLowerCase(Locale.ROOT))
@@ -38,6 +38,7 @@ final class PublicCommand implements TabExecutor {
                 case "mode" -> matching(MODES, args[1]);
                 case "hollow" -> matching(BOOLS, args[1]);
                 case "material" -> materialSuggestions(args[1]);
+                case "array-spacing" -> List.of("1", "2", "4", "8");
                 default -> List.of();
             };
         }

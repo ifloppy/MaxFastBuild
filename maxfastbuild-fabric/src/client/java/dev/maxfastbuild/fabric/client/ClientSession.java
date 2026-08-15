@@ -16,17 +16,29 @@ final class ClientSession {
 
     /** Compact single-command place intent. Server regenerates the shape. */
     static void sendPlace(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow, String material) {
+        sendPlace(mode, x1, y1, z1, x2, y2, z2, hollow, material, null, 1, 1, 1);
+    }
+
+    static void sendPlace(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow, String material,
+                          BlockPos third, int spacingX, int spacingY, int spacingZ) {
         CompactPlaceCommand.Intent intent = new CompactPlaceCommand.Intent(
                 BuildMode.valueOf(mode.toUpperCase(Locale.ROOT)),
-                new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow, material);
+                new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow, material,
+                third, spacingX, spacingY, spacingZ);
         send(CompactPlaceCommand.format(intent));
     }
 
     /** Compact single-command break intent. Server regenerates the shape. */
     static void sendBreak(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow) {
+        sendBreak(mode, x1, y1, z1, x2, y2, z2, hollow, null, 1, 1, 1);
+    }
+
+    static void sendBreak(String mode, int x1, int y1, int z1, int x2, int y2, int z2, int hollow,
+                          BlockPos third, int spacingX, int spacingY, int spacingZ) {
         CompactBreakCommand.Intent intent = new CompactBreakCommand.Intent(
                 BuildMode.valueOf(mode.toUpperCase(Locale.ROOT)),
-                new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow);
+                new BlockPos(x1, y1, z1), new BlockPos(x2, y2, z2), hollow,
+                third, spacingX, spacingY, spacingZ);
         send(CompactBreakCommand.format(intent));
     }
 

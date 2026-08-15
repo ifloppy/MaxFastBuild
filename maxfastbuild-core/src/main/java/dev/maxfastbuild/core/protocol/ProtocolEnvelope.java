@@ -3,7 +3,7 @@ package dev.maxfastbuild.core.protocol;
 import java.util.Objects;
 
 public record ProtocolEnvelope(int version, String sessionId, long sequence, String payload, String mac) {
-    public static final int CURRENT_VERSION = 2;
+    public static final int CURRENT_VERSION = 4;
     public static final String INTERNAL_COMMAND = "/__mfb";
     public static final String MESSAGE_MARKER = "\u2063MFB1:";
 
