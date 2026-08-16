@@ -69,6 +69,8 @@ Public server commands (permission `maxfastbuild.use`). Use `/mfb` or `/mfb help
 /mfb cancel
 ```
 
+After `pos1` and `pos2` (and `pos3` for an arc), the server sends green-glass block updates visible only to that player. These are previews and never modify real server blocks. Changing points, `hollow`, or array steps refreshes the preview; `apply` or `cancel` restores the real block display. Preview and apply use the same shape-coordinate generator, so their positions match.
+
 `apply` matches the client: main-hand block = place/replace, mining tool = break, empty hand = reject (material comes from the held block).
 
 ## Litematica bulk paste

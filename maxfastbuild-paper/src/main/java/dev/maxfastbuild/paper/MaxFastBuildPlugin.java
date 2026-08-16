@@ -34,7 +34,10 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private static final Gson GSON = new Gson();
+    private static final Material PREVIEW_MATERIAL = Material.GREEN_STAINED_GLASS;
     private final Map<UUID, Selection> selections = new ConcurrentHashMap<>();
+    /** Block positions currently replaced by client-only preview packets. */
+    private final Map<UUID, PreviewState> previews = new ConcurrentHashMap<>();
     private final Map<UUID, TokenBucket> limits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
@@ -240,6 +243,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (executor != null) {
                 try { executor.clear(); } catch (RuntimeException ignored) { }
             }
+            clearAllPreviews();
             selections.clear();
             limits.clear();
             sessions.clear();
@@ -372,6 +376,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent event) {
+        clearSelectionPreview(event.getPlayer());
         if (!active || tasks == null || executor == null) return;
         UUID playerId = event.getPlayer().getUniqueId();
         pendingBuilds.remove(playerId);
@@ -396,6 +401,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Failed to pause task " + task.id() + " on quit: " + ex.getMessage());
             }
         }
+    }
+
+    @EventHandler public void onWorldChange(PlayerChangedWorldEvent event) {
+        // A block-change packet only belongs to the old world. Drop it before the next
+        // selection command so an old preview can never be mistaken for a new one.
+        clearSelectionPreview(event.getPlayer());
     }
 
     @EventHandler public void onJoin(PlayerJoinEvent event) {
@@ -425,6 +436,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             case "mode" -> {
                 if (args.length < 2) {
                     messages.send(player, "mode-usage");
+                    sendModeHelp(player);
                     return;
                 }
                 BuildMode mode;
@@ -432,24 +444,33 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     mode = BuildMode.valueOf(args[1].toUpperCase(Locale.ROOT));
                 } catch (IllegalArgumentException ex) {
                     messages.send(player, "mode-invalid", args[1], modeListLocalized());
+                    sendModeHelp(player);
                     return;
                 }
-                selections.put(player.getUniqueId(), selection.withMode(mode));
-                messages.send(player, "mode-set", modeDisplayName(mode));
+                Selection next = selection.withMode(mode);
+                selections.put(player.getUniqueId(), next);
+                refreshSelectionPreview(player, next);
+                messages.send(player, "mode-set", modeDisplayName(mode), modeEffect(mode));
             }
             case "pos1" -> {
                 BlockPos pos = at(player);
-                selections.put(player.getUniqueId(), selection.withFirst(pos).withWorld(player.getWorld().getName()));
+                Selection next = selection.withFirst(pos).withWorld(player.getWorld().getName());
+                selections.put(player.getUniqueId(), next);
+                refreshSelectionPreview(player, next);
                 messages.send(player, "pos1-set", formatPos(pos));
             }
             case "pos2" -> {
                 BlockPos pos = at(player);
-                selections.put(player.getUniqueId(), selection.withSecond(pos).withWorld(player.getWorld().getName()));
+                Selection next = selection.withSecond(pos).withWorld(player.getWorld().getName());
+                selections.put(player.getUniqueId(), next);
+                refreshSelectionPreview(player, next);
                 messages.send(player, "pos2-set", formatPos(pos));
             }
             case "pos3" -> {
                 BlockPos pos = at(player);
-                selections.put(player.getUniqueId(), selection.withThird(pos).withWorld(player.getWorld().getName()));
+                Selection next = selection.withThird(pos).withWorld(player.getWorld().getName());
+                selections.put(player.getUniqueId(), next);
+                refreshSelectionPreview(player, next);
                 messages.send(player, "pos3-set", formatPos(pos));
             }
             case "array-spacing" -> {
@@ -461,7 +482,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     int x = parseArraySpacing(args[1]);
                     int y = parseArraySpacing(args[2]);
                     int z = parseArraySpacing(args[3]);
-                    selections.put(player.getUniqueId(), selection.withArraySpacing(x, y, z));
+                    Selection next = selection.withArraySpacing(x, y, z);
+                    selections.put(player.getUniqueId(), next);
+                    refreshSelectionPreview(player, next);
                     messages.send(player, "array-spacing-set", x, y, z);
                 } catch (NumberFormatException ex) {
                     messages.send(player, "array-spacing-invalid", String.join(" ", args[1], args[2], args[3]));
@@ -479,7 +502,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         hollow = "true".equalsIgnoreCase(args[1]) || "1".equals(args[1]) || "on".equalsIgnoreCase(args[1]) ? 1 : 0;
                     }
                 }
-                selections.put(player.getUniqueId(), selection.withHollow(hollow));
+                Selection next = selection.withHollow(hollow);
+                selections.put(player.getUniqueId(), next);
+                refreshSelectionPreview(player, next);
                 messages.send(player, "hollow-set", hollow);
             }
             case "material" -> {
@@ -541,8 +566,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         messages.send(player, "help-line-status");
         messages.send(player, "help-line-cancel");
         messages.send(player, "help-line-about");
+        messages.send(player, "help-line-setblock");
         messages.send(player, "help-modes");
+        sendModeHelp(player);
+        messages.send(player, "help-line-preview");
         messages.send(player, "help-tip");
+    }
+
+    private void sendModeHelp(Player player) {
+        messages.send(player, "mode-list-header");
+        for (BuildMode mode : BuildMode.values()) {
+            String id = mode.name().toLowerCase(Locale.ROOT);
+            messages.send(player, "mode-list-entry", id, modeDisplayName(mode), modeEffect(mode));
+        }
     }
 
     private int queueSize(UUID playerId) {
@@ -913,6 +949,79 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         return sb.toString();
     }
 
+    private String modeEffect(BuildMode mode) {
+        String raw = messages == null ? null : messages.raw("mode-effect-" + mode.name().toLowerCase(Locale.ROOT));
+        return raw == null || raw.isBlank() ? "-" : plain(raw);
+    }
+
+    /**
+     * Send a client-only green-glass preview. The generated positions deliberately use the same
+     * request object as the executor, so /mfb apply cannot drift from what the player saw.
+     */
+    private void refreshSelectionPreview(Player player, Selection selection) {
+        clearSelectionPreview(player);
+        if (selection == null || selection.first() == null) return;
+
+        LinkedHashSet<BlockPos> positions = new LinkedHashSet<>();
+        positions.add(selection.first());
+        if (selection.second() != null) {
+            if (selection.mode() == BuildMode.ARC && selection.third() == null) {
+                // The middle point is not enough to generate an arc, but both selected anchors
+                // are still useful feedback while the player is choosing the third point.
+                positions.add(selection.second());
+            } else {
+                ShapeRequest request = shapeRequest(selection);
+                Optional<RequestLimitValidator.Violation> violation = RequestLimitValidator.region(
+                        request.bounds(), limits());
+                if (violation.isPresent()) {
+                    sendLimitError(player, violation.get());
+                    return;
+                }
+                try {
+                    positions = new LinkedHashSet<>(new DefaultShapeGenerator().generate(request,
+                            shapeGenerationLimit(limits().maxRegionBlocks())));
+                } catch (ShapeLimitException ex) {
+                    messages.send(player, "preview-too-large", limits().maxRegionBlocks());
+                    return;
+                } catch (RuntimeException ex) {
+                    messages.send(player, "preview-unavailable");
+                    return;
+                }
+            }
+        }
+
+        World world = player.getWorld();
+        for (BlockPos pos : positions) {
+            if (pos.y() < world.getMinHeight() || pos.y() >= world.getMaxHeight()) {
+                messages.send(player, "preview-invalid-height");
+                return;
+            }
+        }
+        BlockData previewData = Bukkit.createBlockData(PREVIEW_MATERIAL);
+        for (BlockPos pos : positions) {
+            player.sendBlockChange(new Location(world, pos.x(), pos.y(), pos.z()), previewData);
+        }
+        previews.put(player.getUniqueId(), new PreviewState(world.getName(), Set.copyOf(positions)));
+    }
+
+    /** Restore the current real block state after a client-only preview. */
+    private void clearSelectionPreview(Player player) {
+        if (player == null) return;
+        PreviewState preview = previews.remove(player.getUniqueId());
+        if (preview == null) return;
+        World world = Bukkit.getWorld(preview.world());
+        if (world == null || !world.getName().equals(player.getWorld().getName())) return;
+        for (BlockPos pos : preview.positions()) {
+            player.sendBlockChange(new Location(world, pos.x(), pos.y(), pos.z()),
+                    world.getBlockAt(pos.x(), pos.y(), pos.z()).getBlockData());
+        }
+    }
+
+    private void clearAllPreviews() {
+        for (Player player : Bukkit.getOnlinePlayers()) clearSelectionPreview(player);
+        previews.clear();
+    }
+
     private void submit(Player player, Selection selection, OperationKind operation) {
         submit(player, selection, operation, null, false);
     }
@@ -951,6 +1060,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
         queue.add(command);
+        // The command is now authoritative. Remove client-only blocks before the
+        // asynchronous planner starts so the player never sees stale positions.
+        clearSelectionPreview(player);
         sendProtocol(player, "info", "maxfastbuild.task.queued", Map.of("position", queue.size()));
         tryDrainQueue(player);
     }
@@ -2263,6 +2375,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void cancelPlayerTasks(Player player) {
+        clearSelectionPreview(player);
         if (!active || tasks == null || executor == null) return;
         int cancelled = 0;
         if (pendingBuilds.remove(player.getUniqueId()) != null) {
@@ -2986,7 +3099,8 @@ if (data.billableItem() != null) {
     }
 
     private static ShapeRequest shapeRequest(Selection selection) {
-        return new ShapeRequest(selection.mode(), selection.first(), selection.second(), selection.third(),
+        return new ShapeRequest(selection.mode(), selection.first(), selection.second(),
+                selection.mode() == BuildMode.ARC ? selection.third() : null,
                 selection.hollow(), selection.spacingX(), selection.spacingY(), selection.spacingZ());
     }
 
@@ -2995,6 +3109,10 @@ if (data.billableItem() != null) {
     private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
     private record Selection(BuildMode mode, BlockPos first, BlockPos second, BlockPos third, int hollow,
                              int spacingX, int spacingY, int spacingZ, String material, String world) {
+        Selection {
+            if (mode != BuildMode.ARC) third = null;
+        }
+
         Selection(BuildMode mode, BlockPos first, BlockPos second, int hollow, String material, String world) {
             this(mode, first, second, null, hollow, 1, 1, 1, material, world);
         }
@@ -3013,7 +3131,8 @@ if (data.billableItem() != null) {
         }
 
         Selection withThird(BlockPos value) {
-            return new Selection(mode, first, second, value, hollow, spacingX, spacingY, spacingZ, material, world);
+            return new Selection(mode, first, second, mode == BuildMode.ARC ? value : null,
+                    hollow, spacingX, spacingY, spacingZ, material, world);
         }
 
         Selection withHollow(int value) {
@@ -3032,6 +3151,8 @@ if (data.billableItem() != null) {
             return new Selection(mode, first, second, third, hollow, spacingX, spacingY, spacingZ, material, value);
         }
     }
+
+    private record PreviewState(String world, Set<BlockPos> positions) {}
 
     /** In-progress region planning for a player. Planning runs over multiple server ticks to avoid freezing the main thread. */
     private static final class PendingBuild {        final Player player;

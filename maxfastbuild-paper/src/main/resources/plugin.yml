@@ -9,7 +9,7 @@ softdepend: [Vault, CoreProtect, Prism]
 commands:
   mfb:
     description: MaxFastBuild 建造指令（/mfb help）
-    usage: /mfb <help|mode|pos1|pos2|material|hollow|apply|status|cancel>  (apply 由主手决定放置/破坏)
+    usage: /mfb <help|mode|pos1|pos2|pos3|array-spacing|material|hollow|apply|status|cancel>  (apply 由主手决定放置/破坏)
     permission: maxfastbuild.use
   mfbsetblock:
     description: 兼容 /setblock 的单方块放置指令

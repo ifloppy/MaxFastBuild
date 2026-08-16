@@ -6,6 +6,8 @@ There is **no durable inventory escrow** in the current release: place materials
 
 The Paper submit path regenerates `arc` and `array` shapes from their anchors and spacing parameters. The older standalone transform helpers remain separate utilities and are not part of request processing.
 
+The public `/mfb` selector sends green-glass block-change packets only to the selecting player. It never writes those blocks to the world; preview and apply both use the shared shape generator, and clearing the selection restores the current real block states.
+
 The one channel where the client submits a block list is the **Litematica bulk paste** (`/__mfb p` with a gzipped paste envelope). It skips only shape generation: every pasted mutation still goes through world-state, protection, tool, material and economy validation and is persisted as a normal task. See `docs/protocol.md`.
 
 ## Request pipeline (Paper)

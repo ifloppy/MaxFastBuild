@@ -11,6 +11,9 @@ public record ShapeRequest(BuildMode mode, BlockPos first, BlockPos second, Bloc
         if (spacingX < 0 || spacingY < 0 || spacingZ < 0) {
             throw new IllegalArgumentException("array spacing must not be negative");
         }
+        // Only ARC consumes a third anchor. Keeping it null for every other mode makes
+        // bounds calculation identical for the CLI, client protocol, preview and executor.
+        if (mode != BuildMode.ARC) third = null;
         // Zero is the omitted value used by older JSON requests; one is the natural default.
         spacingX = spacingX == 0 ? 1 : spacingX;
         spacingY = spacingY == 0 ? 1 : spacingY;

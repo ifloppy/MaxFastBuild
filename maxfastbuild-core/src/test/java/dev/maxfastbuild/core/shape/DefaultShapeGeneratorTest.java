@@ -22,6 +22,16 @@ class DefaultShapeGeneratorTest {
                 .doesNotContain(new BlockPos(1, 0, 0));
     }
 
+    @Test void ignoresThirdAnchorOutsideArcMode() {
+        var request = new ShapeRequest(BuildMode.ARRAY,
+                new BlockPos(0, 0, 0), new BlockPos(4, 0, 4), new BlockPos(100, 100, 100),
+                0, 2, 1, 2);
+
+        assertThat(request.third()).isNull();
+        assertThat(request.bounds()).isEqualTo(new Bounds(
+                new BlockPos(0, 0, 0), new BlockPos(4, 0, 4)));
+    }
+
     @Test void solidCubeIsFull() {
         var blocks = generator.generate(new ShapeRequest(BuildMode.CUBE, new BlockPos(0, 0, 0), new BlockPos(2, 2, 2), 0), 100);
         assertThat(blocks).hasSize(27);
