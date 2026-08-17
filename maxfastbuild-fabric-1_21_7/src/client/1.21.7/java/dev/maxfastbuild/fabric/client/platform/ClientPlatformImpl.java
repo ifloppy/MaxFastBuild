@@ -86,6 +86,9 @@ public final class ClientPlatformImpl extends ClientPlatform {
 
     @Override
     public boolean isKeyPhysicalDown(InputConstants.Key key) {
+        // Unbound KeyMappings use GLFW_KEY_UNKNOWN (-1). Passing that to glfwGetKey()
+        // sets GLFW_INVALID_ENUM, which Minecraft later reports as a noisy "GL ERROR".
+        if (key == null || key.getValue() == GLFW.GLFW_KEY_UNKNOWN) return false;
         Minecraft client = Minecraft.getInstance();
         if (client.getWindow() == null) return false;
         if (key.getType() == InputConstants.Type.MOUSE) {
