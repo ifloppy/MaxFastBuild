@@ -201,6 +201,12 @@ final class PluginMessages {
                 if (!config.contains(key)) {
                     config.set(key, defaults.get(key));
                     changed = true;
+                } else if ("status-pos".equals(key)
+                        && defaults.getString(key, "").contains("{2}")
+                        && !config.getString(key, "").contains("{2}")) {
+                    // Migrate the old two-point status line so point 3 is visible after upgrades.
+                    config.set(key, defaults.get(key));
+                    changed = true;
                 }
             }
             if (changed) {
