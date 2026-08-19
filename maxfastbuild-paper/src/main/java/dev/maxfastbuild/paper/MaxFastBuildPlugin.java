@@ -413,9 +413,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (!active || tasks == null || executor == null) return;
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(event.getPlayer().getUniqueId())) continue;
-            if (task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) continue;
+            if (task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN
+                    && task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
             if (executor.isActive(task.id())) continue;
-            executor.enqueue(task.transition(TaskStatus.QUEUED, Instant.now()));
+            BuildTask queued = task.status() == TaskStatus.QUEUED
+                    ? task
+                    : task.transition(TaskStatus.QUEUED, Instant.now());
+            executor.enqueue(queued);
         }
     }
 
