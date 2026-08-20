@@ -550,7 +550,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "status-tasks", executor.activeCount(player.getUniqueId()));
                 messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
-            case "cancel" -> cancelPlayerTasks(player);
+            case "cancel" -> clearPendingQueue(player);
             case "about" -> messages.send(player, "about");
             default -> messages.send(player, "unknown-subcommand", args[0]);
         }
@@ -2378,43 +2378,20 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void cancelPlayerTasks(Player player) {
+    /** Clear commands that have not yet become durable BuildTasks. Running tasks cannot be cancelled. */
+    private void clearPendingQueue(Player player) {
         clearSelectionPreview(player);
         if (!active || tasks == null || executor == null) return;
-        int cancelled = 0;
-        if (pendingBuilds.remove(player.getUniqueId()) != null) {
-            cancelled++;
-        }
-        if (pendingPastes.remove(player.getUniqueId()) != null) {
-            cancelled++;
-        }
-        if (commandQueues.remove(player.getUniqueId()) != null) {
-            cancelled++;
-        }
-        for (BuildTask task : tasks.recoverable()) {
-            if (!task.playerId().equals(player.getUniqueId())) continue;
-            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
-                    && task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) continue;
-            try {
-                TaskExecutor.TickResult aborted = executor.abort(task.id());
-                settlePartial(aborted);
-                cancelled++;
-            } catch (RuntimeException ex) {
-                try {
-                    BuildTask cancelling = task.transition(TaskStatus.CANCELLING, Instant.now());
-                    tasks.save(cancelling);
-                    int applied = task.appliedCount();
-                    settlePartial(new TaskExecutor.TickResult(
-                            cancelling.transition(TaskStatus.CANCELLED, Instant.now()), 0, 0, applied, true));
-                    cancelled++;
-                } catch (RuntimeException inner) {
-                    getLogger().warning("Cancel settle failed for " + task.id() + ": " + inner.getMessage());
-                }
-            }
-        }
+        UUID playerId = player.getUniqueId();
+        int cleared = 0;
+        if (pendingBuilds.remove(playerId) != null) cleared++;
+        if (pendingPastes.remove(playerId) != null) cleared++;
+        lastPasteNeeds.remove(playerId);
+        Queue<QueuedCommand> queued = commandQueues.remove(playerId);
+        if (queued != null) cleared += queued.size();
         if (messages != null) {
-            if (cancelled == 0) messages.send(player, "cancel-none");
-            else messages.send(player, "cancel-done", cancelled);
+            if (cleared == 0) messages.send(player, "cancel-none");
+            else messages.send(player, "cancel-done", cleared);
         }
     }
 

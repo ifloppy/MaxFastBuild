@@ -157,12 +157,6 @@ public final class BuildSelectionController {
         return confirmPick(player, level);
     }
 
-    static boolean cancelOnAttack(Minecraft client, int clickCount) {
-        if (!active || clickCount == 0) return false;
-        cancel();
-        return true;
-    }
-
     static void tick(Minecraft client) {
         if (!active || client.player == null || client.level == null) return;
         clampLookDistance(client);
@@ -232,13 +226,9 @@ public final class BuildSelectionController {
                         "maxfastbuild.selection.aim_hud",
                         lookDistance, MAX_LOOK_DISTANCE),
                 center, y + 24, 0xFFB7C0CC);
-        canvas.centeredText(client.font, Component.translatable(
-                        breaking ? "maxfastbuild.selection.cancel_hint_break"
-                                : (placing ? "maxfastbuild.selection.cancel_hint" : "maxfastbuild.selection.cancel_hint_none")),
-                center, y + 36, 0xFFB7C0CC);
         Component sm = submodeLabel();
         if (sm != null) {
-            canvas.centeredText(client.font, sm, center, y + 50, 0xFFA0A0A0);
+            canvas.centeredText(client.font, sm, center, y + 36, 0xFFA0A0A0);
         }
         ServerCapabilities.Limits limits = ServerCapabilities.current();
         if (first != null && hovered != null) {
@@ -481,16 +471,6 @@ public final class BuildSelectionController {
         active = false;
         cachedFull = Set.of();
         cachedFaces = List.of();
-    }
-
-    private static void cancel() {
-        first = null;
-        arcSecond = null;
-        hovered = null;
-        active = false;
-        cachedFull = Set.of();
-        cachedFaces = List.of();
-        notify(Component.translatable("maxfastbuild.selection.cancelled"));
     }
 
     private static boolean isVolumeMode(BuildMode m) {
