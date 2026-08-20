@@ -58,11 +58,24 @@ public final class AsyncTaskRepository implements TaskRepository {
     }
 
     @Override public void flush() {
+        if (!running) {
+            drainSynchronously();
+            return;
+        }
+        CountDownLatch barrier = new CountDownLatch(1);
+        try {
+            queue.put(barrier::countDown);
+            barrier.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while flushing async task repository", e);
+        }
+    }
+
+    private void drainSynchronously() {
         List<Runnable> pending = new ArrayList<>();
         queue.drainTo(pending);
-        for (Runnable r : pending) {
-            r.run();
-        }
+        for (Runnable r : pending) r.run();
     }
 
     @Override public Optional<BuildTask> find(UUID id) {

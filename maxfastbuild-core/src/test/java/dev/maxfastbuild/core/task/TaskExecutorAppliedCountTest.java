@@ -39,7 +39,9 @@ class TaskExecutorAppliedCountTest {
 
         BuildTask paused = repo.find(id).orElseThrow().transition(TaskStatus.PAUSED_SHUTDOWN, now);
         repo.save(paused);
-        executor.detach(id);
+        BuildTask snapshot = executor.detachSnapshot(id);
+        assertThat(snapshot.cursor()).isEqualTo(2);
+        assertThat(snapshot.appliedCount()).isEqualTo(2);
         assertThat(executor.isActive(id)).isFalse();
 
         BuildTask resumed = repo.find(id).orElseThrow().transition(TaskStatus.QUEUED, now);

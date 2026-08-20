@@ -215,10 +215,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 // Prefer executor memory (fresh applied_count), then any remaining DB-active rows.
                 for (UUID id : executor.activeIds()) {
                     try {
-                        BuildTask latest = tasks.find(id).orElse(null);
-                        executor.detach(id);
+                        BuildTask latest = executor.detachSnapshot(id);
+                        if (latest == null) latest = tasks.find(id).orElse(null);
                         if (latest == null) continue;
-                        latest = tasks.find(id).orElse(latest);
                         if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
                             tasks.save(latest.transition(TaskStatus.PAUSED_SHUTDOWN, now));
                         }
@@ -227,10 +226,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     }
                 }
                 try {
+                    // Make the in-memory pause writes visible before scanning the database for
+                    // active rows, otherwise the fallback scan can enqueue an older snapshot over
+                    // the freshly paused task when async persistence is enabled.
+                    tasks.flush();
                     for (BuildTask task : tasks.recoverable()) {
                         if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
-                        if (executor != null) executor.detach(task.id());
-                        BuildTask latest = tasks.find(task.id()).orElse(task);
+                        BuildTask latest = executor == null ? null : executor.detachSnapshot(task.id());
+                        if (latest == null) latest = task;
                         if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
                             tasks.save(latest.transition(TaskStatus.PAUSED_SHUTDOWN, now));
                         }
@@ -381,21 +384,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         UUID playerId = event.getPlayer().getUniqueId();
         pendingBuilds.remove(playerId);
         commandQueues.remove(playerId);
-        pendingPastes.remove(playerId);
         lastPasteNeeds.remove(playerId);
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(playerId)) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
             try {
                 // Prefer in-memory snapshot (has latest applied_count) when present.
-                BuildTask latest = tasks.find(task.id()).orElse(task);
-                if (executor.isActive(task.id())) {
-                    // Detach first so a concurrent tick cannot race; applied already flushed each tick.
-                    executor.detach(task.id());
-                    latest = tasks.find(task.id()).orElse(task);
-                }
+                BuildTask latest = executor.detachSnapshot(task.id());
+                if (latest == null) latest = tasks.find(task.id()).orElse(task);
                 if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
                     tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, Instant.now()));
+                    tasks.flush();
                 }
             } catch (RuntimeException ex) {
                 getLogger().warning("Failed to pause task " + task.id() + " on quit: " + ex.getMessage());
@@ -411,6 +410,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     @EventHandler public void onJoin(PlayerJoinEvent event) {
         if (!active || tasks == null || executor == null) return;
+        PendingPaste pendingPaste = pendingPastes.get(event.getPlayer().getUniqueId());
+        if (pendingPaste != null) {
+            pendingPaste.rebind(event.getPlayer());
+            debugLog("resuming paste planning player=" + event.getPlayer().getName()
+                    + " processed=" + pendingPaste.processed);
+        }
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(event.getPlayer().getUniqueId())) continue;
             if (task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN
@@ -1685,10 +1690,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             Map.Entry<UUID, PendingPaste> entry = it.next();
             PendingPaste pending = entry.getValue();
             Player player = Bukkit.getPlayer(entry.getKey());
-            if (player == null || !player.getWorld().getName().equals(pending.world)) {
-                it.remove();
-                continue;
-            }
+            // Paste precheck is in-memory but must pause across a player disconnect just like a
+            // durable BuildTask. Keep the assembled payload and resume it after onJoin rebinds the
+            // fresh Player instance; removing it here used to make a disconnect silently lose the
+            // paste with neither completion nor cancellation.
+            if (player == null || !player.getWorld().getName().equals(pending.world)) continue;
+            pending.rebind(player);
             int perPlayer = Math.min(batch, globalRemaining);
             int before = (int) pending.processed;
             PlanningError error;
@@ -3304,7 +3311,7 @@ if (data.billableItem() != null) {
 
     /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
     private static final class PendingPaste {
-        final Player player;
+        Player player;
         final String world;
         final boolean instant;
         final Iterator<PastePos> iterator;
@@ -3331,6 +3338,10 @@ if (data.billableItem() != null) {
             this.regionBounds = regionBounds;
             this.regionBlocks = regionBlocks;
             this.maxAffectedBlocks = maxAffectedBlocks;
+        }
+
+        void rebind(Player next) {
+            this.player = next;
         }
     }
 }

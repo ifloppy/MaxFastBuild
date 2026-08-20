@@ -44,8 +44,14 @@ public final class TaskExecutor {
 
     /** Drop memory entry without changing DB status (e.g. after persisting PAUSED_*). */
     public void detach(UUID id) {
+        detachSnapshot(id);
+    }
+
+    /** Remove and return the latest in-memory task snapshot for durable pause/close handling. */
+    public BuildTask detachSnapshot(UUID id) {
         BuildTask removed = running.remove(id);
         if (removed != null) decrementPlayerCount(removed.playerId());
+        return removed;
     }
 
     /** Snapshot of in-memory task ids (for safe shutdown / PlugMan unload). */
