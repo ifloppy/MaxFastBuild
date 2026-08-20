@@ -9,6 +9,7 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.event.client.player.ClientPreAttackCallback;
 import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.fabricmc.fabric.api.event.player.UseItemCallback;
 import net.minecraft.client.KeyMapping;
@@ -54,6 +55,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         ClientReceiveMessageEvents.ALLOW_GAME.register((message, overlay) -> consumeProtocol(message));
         UseBlockCallback.EVENT.register(BuildSelectionController::onUseBlock);
         UseItemCallback.EVENT.register(BuildSelectionController::onUseItem);
+        ClientPreAttackCallback.EVENT.register((client, player, clickCount) ->
+                BuildSelectionController.cancelOnAttack(client, clickCount));
         // Selection modifiers consume scroll for depth, thickness, and array spacing instead of hotbar changes.
         ClientPlatform.instance().registerHotbarScrollHook();
 

@@ -2,6 +2,18 @@
 
 All notable changes to MaxFastBuild are documented here.
 
+## [0.1.2] - 2026-08-20
+
+### Added
+
+- Pending-command cancellation without cancelling accepted build tasks.
+- `/mfb replace` with single or multiple excluded blocks.
+- Radial-menu action modes for place/break and selection-only workflows.
+
+### Fixed
+
+- Preserved selection-only mode across radial-menu openings and restored left-click selection cancellation.
+
 ## [0.1.1] - 2026-08-16
 
 ### Added

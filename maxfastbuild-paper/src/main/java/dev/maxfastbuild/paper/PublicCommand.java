@@ -11,7 +11,7 @@ import java.util.stream.Collectors;
 
 final class PublicCommand implements TabExecutor {
     static final List<String> ROOT = List.of(
-            "help", "about", "mode", "pos1", "pos2", "pos3", "array-spacing", "apply", "cancel", "status", "hollow", "material", "setblock");
+            "help", "about", "mode", "pos1", "pos2", "pos3", "array-spacing", "apply", "cancel", "clearpos", "replace", "status", "hollow", "material", "setblock");
     private static final List<String> BOOLS = List.of("true", "false");
     private static final List<String> MODES = Arrays.stream(BuildMode.values())
             .map(v -> v.name().toLowerCase(Locale.ROOT))
@@ -38,9 +38,13 @@ final class PublicCommand implements TabExecutor {
                 case "mode" -> matching(MODES, args[1]);
                 case "hollow" -> matching(BOOLS, args[1]);
                 case "material" -> materialSuggestions(args[1]);
+                case "replace" -> replaceMaterialSuggestions(args[1], true);
                 case "array-spacing" -> List.of("1", "2", "4", "8");
                 default -> List.of();
             };
+        }
+        if ("replace".equals(sub) && (args.length == 3 || args.length >= 4)) {
+            return replaceMaterialSuggestions(args[args.length - 1], args.length >= 4);
         }
         if ("setblock".equals(sub)) {
             if (!(sender instanceof Player player)) return List.of();
@@ -55,10 +59,27 @@ final class PublicCommand implements TabExecutor {
     }
 
     static List<String> materialSuggestions(String prefix) {
+        return materialSuggestions(prefix, false);
+    }
+
+    private static List<String> replaceMaterialSuggestions(String prefix, boolean includeAir) {
+        String value = prefix == null ? "" : prefix;
+        int comma = value.lastIndexOf(',');
+        String before = comma >= 0 ? value.substring(0, comma + 1) : "";
+        String token = comma >= 0 ? value.substring(comma + 1) : value;
+        String opening = token.startsWith("[") ? "[" : "";
+        if (!opening.isEmpty()) token = token.substring(1);
+        String continuation = before + opening;
+        return materialSuggestions(token, includeAir).stream()
+                .map(suggestion -> continuation + suggestion)
+                .toList();
+    }
+
+    private static List<String> materialSuggestions(String prefix, boolean includeAir) {
         String lower = prefix.toLowerCase(Locale.ROOT);
         List<String> out = new ArrayList<>();
         for (Material material : Material.values()) {
-            if (!material.isBlock() || material.isAir()) continue;
+            if (!material.isBlock() || (!includeAir && material.isAir())) continue;
             String key = material.getKey().toString();
             if (key.startsWith(lower) || material.name().toLowerCase(Locale.ROOT).startsWith(lower)) {
                 out.add(key);

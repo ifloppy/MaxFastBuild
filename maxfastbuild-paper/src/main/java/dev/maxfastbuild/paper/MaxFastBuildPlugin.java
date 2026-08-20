@@ -457,21 +457,24 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "mode-set", modeDisplayName(mode), modeEffect(mode));
             }
             case "pos1" -> {
-                BlockPos pos = at(player);
+                BlockPos pos = commandPosition(player, args);
+                if (pos == null) return;
                 Selection next = selection.withFirst(pos).withWorld(player.getWorld().getName());
                 selections.put(player.getUniqueId(), next);
                 refreshSelectionPreview(player, next);
                 messages.send(player, "pos1-set", formatPos(pos));
             }
             case "pos2" -> {
-                BlockPos pos = at(player);
+                BlockPos pos = commandPosition(player, args);
+                if (pos == null) return;
                 Selection next = selection.withSecond(pos).withWorld(player.getWorld().getName());
                 selections.put(player.getUniqueId(), next);
                 refreshSelectionPreview(player, next);
                 messages.send(player, "pos2-set", formatPos(pos));
             }
             case "pos3" -> {
-                BlockPos pos = at(player);
+                BlockPos pos = commandPosition(player, args);
+                if (pos == null) return;
                 Selection next = selection.withThird(pos).withWorld(player.getWorld().getName());
                 selections.put(player.getUniqueId(), next);
                 refreshSelectionPreview(player, next);
@@ -535,6 +538,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
                 submitFromHand(player, current);
             }
+            case "replace" -> handleReplaceCommand(player, selection, args);
             case "setblock" -> submitSetBlock(player, args);
             case "status" -> {
                 Selection current = selections.getOrDefault(player.getUniqueId(), selection);
@@ -551,6 +555,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
             case "cancel" -> clearPendingQueue(player);
+            case "clearpos" -> clearSelectionPoints(player);
             case "about" -> messages.send(player, "about");
             default -> messages.send(player, "unknown-subcommand", args[0]);
         }
@@ -567,8 +572,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         messages.send(player, "help-line-material");
         messages.send(player, "help-line-hollow");
         messages.send(player, "help-line-apply");
+        messages.send(player, "help-line-replace");
         messages.send(player, "help-line-status");
         messages.send(player, "help-line-cancel");
+        messages.send(player, "help-line-clearpos");
         messages.send(player, "help-line-about");
         messages.send(player, "help-line-setblock");
         messages.send(player, "help-modes");
@@ -1027,10 +1034,15 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     private void submit(Player player, Selection selection, OperationKind operation) {
-        submit(player, selection, operation, null, false);
+        submit(player, selection, operation, null, false, Set.of());
     }
 
     private void submit(Player player, Selection selection, OperationKind operation, Material filter, boolean keepOnly) {
+        submit(player, selection, operation, filter, keepOnly, Set.of());
+    }
+
+    private void submit(Player player, Selection selection, OperationKind operation, Material filter,
+                        boolean keepOnly, Set<Material> excluded) {
         if (!player.hasPermission("maxfastbuild.use")) {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
             return;
@@ -1053,7 +1065,63 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.economy_unavailable", Map.of());
             return;
         }
-        enqueueCommand(player, new QueuedCommand(selection, operation, filter, keepOnly));
+        enqueueCommand(player, new QueuedCommand(selection, operation, filter, keepOnly, excluded));
+    }
+
+    /** Replace matching blocks inside the current pos1/pos2 cuboid. */
+    private void handleReplaceCommand(Player player, Selection current, String[] args) {
+        if (args.length < 3 || current.first() == null || current.second() == null) {
+            messages.send(player, "replace-usage");
+            return;
+        }
+        Material origin = resolveBlockArgument(args[1], true);
+        Material replacement = resolveBlockArgument(args[2]);
+        if (origin == null) {
+            messages.send(player, "replace-invalid-origin", args[1]);
+            return;
+        }
+        if (replacement == null || PaperWorldAccess.isForbiddenPlaceMaterial(replacement)) {
+            messages.send(player, "replace-invalid-new", args[2]);
+            return;
+        }
+        try {
+            Set<Material> excluded = parseExceptMaterials(args, 3);
+            Selection region = current.withMaterial(replacement.getKey().toString())
+                    .withWorld(player.getWorld().getName());
+            submit(player, region, OperationKind.PLACE, origin, false, excluded);
+        } catch (IllegalArgumentException ex) {
+            messages.send(player, "replace-invalid-except", ex.getMessage());
+        }
+    }
+
+    private static Material resolveBlockArgument(String raw) {
+        return resolveBlockArgument(raw, false);
+    }
+
+    private static Material resolveBlockArgument(String raw, boolean allowAir) {
+        if (raw == null) return null;
+        String key = raw.contains(":") ? raw : "minecraft:" + raw;
+        Material material = Material.matchMaterial(key, false);
+        if (material == null) material = Material.matchMaterial(raw, false);
+        return material != null && material.isBlock() && (allowAir || !material.isAir()) ? material : null;
+    }
+
+    /** Parse one material, comma-separated materials, or bracketed material arrays. */
+    static Set<Material> parseExceptMaterials(String[] args, int start) {
+        if (args == null || start >= args.length) return Set.of();
+        String raw = String.join(",", Arrays.copyOfRange(args, start, args.length)).trim();
+        if (raw.startsWith("[")) raw = raw.substring(1);
+        if (raw.endsWith("]")) raw = raw.substring(0, raw.length() - 1);
+        if (raw.isBlank()) return Set.of();
+        Set<Material> result = EnumSet.noneOf(Material.class);
+        for (String token : raw.split("[,\\s]+")) {
+            if (token.isBlank()) continue;
+            token = token.replaceAll("^[\\\"']|[\\\"']$", "");
+            Material material = resolveBlockArgument(token, true);
+            if (material == null) throw new IllegalArgumentException(token);
+            result.add(material);
+        }
+        return Set.copyOf(result);
     }
 
     private void enqueueCommand(Player player, QueuedCommand command) {
@@ -1088,7 +1156,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
         pendingBuilds.put(playerId, new PendingBuild(player, next.selection(), next.operation(),
-                limits.maxRegionBlocks(), limits.maxAffectedBlocks(), next.filter(), next.keepOnly()));
+                limits.maxRegionBlocks(), limits.maxAffectedBlocks(), next.filter(), next.keepOnly(), next.excluded()));
         sendProtocol(player, "info", "maxfastbuild.task.planning_started", Map.of("world", player.getWorld().getName()));
     }
 
@@ -1243,6 +1311,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (pending.filter != null) {
                 Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
                 if (beforeMaterial != pending.filter) continue;
+            }
+            if (!pending.excluded.isEmpty()) {
+                Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
+                if (pending.excluded.contains(beforeMaterial)) continue;
             }
             BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : pending.selection.material());
             WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
@@ -2380,7 +2452,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     /** Clear commands that have not yet become durable BuildTasks. Running tasks cannot be cancelled. */
     private void clearPendingQueue(Player player) {
-        clearSelectionPreview(player);
         if (!active || tasks == null || executor == null) return;
         UUID playerId = player.getUniqueId();
         int cleared = 0;
@@ -2393,6 +2464,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             if (cleared == 0) messages.send(player, "cancel-none");
             else messages.send(player, "cancel-done", cleared);
         }
+    }
+
+    /** Clear all server-side selection anchors and the client-only preview. */
+    private void clearSelectionPoints(Player player) {
+        selections.remove(player.getUniqueId());
+        clearSelectionPreview(player);
+        if (messages != null) messages.send(player, "clearpos-done");
     }
 
     /** Total mining hits available across inventory tools (respects durability floor). */
@@ -3070,6 +3148,21 @@ if (data.billableItem() != null) {
     }
     private static BlockPos at(Player player) { Location p = player.getLocation(); return new BlockPos(p.getBlockX(), p.getBlockY(), p.getBlockZ()); }
 
+    /** Accept either the traditional feet position or an explicit client-picked x y z anchor. */
+    private BlockPos commandPosition(Player player, String[] args) {
+        if (args.length == 1) return at(player);
+        if (args.length != 4) {
+            messages.send(player, "pos-usage");
+            return null;
+        }
+        try {
+            return new BlockPos(Integer.parseInt(args[1]), Integer.parseInt(args[2]), Integer.parseInt(args[3]));
+        } catch (NumberFormatException ex) {
+            messages.send(player, "pos-invalid", String.join(" ", Arrays.copyOfRange(args, 1, args.length)));
+            return null;
+        }
+    }
+
     /** 0 in config = unlimited (Integer.MAX_VALUE); otherwise the configured value. */
     private static int globalBudgetCap(int budget) {
         return budget <= 0 ? Integer.MAX_VALUE : budget;
@@ -3087,7 +3180,12 @@ if (data.billableItem() != null) {
 
     private record ClientRequest(String operation, String mode, BlockPos first, BlockPos second, BlockPos third,
                                  int hollow, int spacingX, int spacingY, int spacingZ, String material) {}
-    private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly) {}
+    private record QueuedCommand(Selection selection, OperationKind operation, Material filter, boolean keepOnly,
+                                 Set<Material> excluded) {
+        QueuedCommand {
+            excluded = excluded == null ? Set.of() : Set.copyOf(excluded);
+        }
+    }
     private record Selection(BuildMode mode, BlockPos first, BlockPos second, BlockPos third, int hollow,
                              int spacingX, int spacingY, int spacingZ, String material, String world) {
         Selection {
@@ -3144,6 +3242,7 @@ if (data.billableItem() != null) {
         final long startedAt;
         final Material filter;
         final boolean keepOnly;
+        final Set<Material> excluded;
         final List<BlockMutation> mutations = new ArrayList<>();
         long replaceBreakCount = 0;
         long totalPositions = -1;
@@ -3156,11 +3255,11 @@ if (data.billableItem() != null) {
 
         PendingBuild(Player player, Selection selection, OperationKind operation, long maxBlocks,
                      long maxAffectedBlocks) {
-            this(player, selection, operation, maxBlocks, maxAffectedBlocks, null, false);
+            this(player, selection, operation, maxBlocks, maxAffectedBlocks, null, false, Set.of());
         }
 
         PendingBuild(Player player, Selection selection, OperationKind operation, long maxBlocks,
-                     long maxAffectedBlocks, Material filter, boolean keepOnly) {
+                     long maxAffectedBlocks, Material filter, boolean keepOnly, Set<Material> excluded) {
             this.player = player;
             this.selection = selection;
             this.operation = operation;
@@ -3168,6 +3267,7 @@ if (data.billableItem() != null) {
             this.maxAffectedBlocks = maxAffectedBlocks;
             this.filter = filter;
             this.keepOnly = keepOnly;
+            this.excluded = excluded == null ? Set.of() : Set.copyOf(excluded);
             this.startedAt = System.currentTimeMillis();
         }
     }

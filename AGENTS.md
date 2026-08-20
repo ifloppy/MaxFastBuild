@@ -5,6 +5,8 @@
 - **Git repo (this project):** `MaxFastBuild/` (Gradle multi-module)
 - **Local Leaf test server (dev only, not in git):** sibling directory `../test-server-leaf/`
 - **Release jars:** `release/MaxFastBuild-Paper-*.jar`, `release/MaxFastBuild-Fabric-26.2-*.jar`, `release/MaxFastBuild-Fabric-1.21.7-*.jar`
+- **Flatpak Prism Launcher client:** `/home/iruanp/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/Fabulously Optimized/minecraft/`
+- **Client mods directory:** `/home/iruanp/.var/app/org.prismlauncher.PrismLauncher/data/PrismLauncher/instances/Fabulously Optimized/minecraft/mods/`
 
 ## Build & deploy to Leaf test server
 
@@ -26,6 +28,11 @@ Deploy target:
 ```text
 ../test-server-leaf/plugins/MaxFastBuild.jar
 ```
+
+For every substantial feature update, update both sides before testing: copy the matching
+Fabric client jar into the configured Prism Launcher instance and deploy the Paper jar to the
+Leaf test server. If the Leaf server is already running, stop it gracefully and restart it so the
+new MaxFastBuild jar is actually loaded by the JVM.
 
 ## Modules
 

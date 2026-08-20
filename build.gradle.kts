@@ -13,7 +13,7 @@ val java21Modules = setOf(
 
 allprojects {
     group = "dev.maxfastbuild"
-    version = "0.1.1"
+version = "0.1.2"
 
     repositories {
         mavenCentral()

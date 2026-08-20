@@ -19,11 +19,13 @@ public final class RadialBuildScreen extends Screen {
     private BuildMode hovered;
     /** True after left-click selected a mode; release should not re-select. */
     private boolean selectedByClick;
+    private boolean selectionOnly;
     /** Current ring diameter in GUI pixels (recomputed every frame from screen size). */
     private int ringPx = RadialLayout.BASE_RING_PX;
 
     RadialBuildScreen() {
         super(Component.translatable("maxfastbuild.radial.title"));
+        selectionOnly = BuildSelectionController.selectionOnly();
     }
 
     @Override
@@ -37,6 +39,7 @@ public final class RadialBuildScreen extends Screen {
         // Physical key: KeyMapping.isDown() is false after setScreen → releaseAll().
         if (!MaxFastBuildClient.isRadialKeyPhysicallyDown()) {
             if (!selectedByClick && hovered != null) {
+                BuildSelectionController.setSelectionOnly(selectionOnly);
                 BuildSelectionController.selectMode(hovered);
             }
             onClose();
@@ -76,6 +79,7 @@ public final class RadialBuildScreen extends Screen {
         int headingY = top - Math.max(12, RadialLayout.HEADING_RESERVE - 4);
         if (headingY < 2) headingY = 2;
         graphics.centeredText(font, Component.translatable("maxfastbuild.radial.heading"), cx, headingY, 0xFF8EE9FF);
+        drawActionModeMenu(graphics, mouseX, mouseY);
         super.extractRenderState(graphics, mouseX, mouseY, delta);
     }
 
@@ -93,15 +97,54 @@ public final class RadialBuildScreen extends Screen {
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubled) {
         if (event.button() == 0) {
+            if (actionModeButton(0, event.x(), event.y())) {
+                selectionOnly = false;
+                BuildSelectionController.setSelectionOnly(false);
+                onClose();
+                return true;
+            }
+            if (actionModeButton(1, event.x(), event.y())) {
+                selectionOnly = true;
+                BuildSelectionController.setSelectionOnly(true);
+                onClose();
+                return true;
+            }
             BuildMode selected = RadialLayout.hit(event.x(), event.y(), width, height, ringPx);
             if (selected != null) {
                 selectedByClick = true;
+                BuildSelectionController.setSelectionOnly(selectionOnly);
                 BuildSelectionController.selectMode(selected);
                 onClose();
                 return true;
             }
         }
         return super.mouseClicked(event, doubled);
+    }
+
+    private void drawActionModeMenu(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
+        int x = 8;
+        int y = 8;
+        graphics.centeredText(font, Component.translatable("maxfastbuild.radial.action_mode"), x + 66, y, 0xFF8EE9FF);
+        drawActionModeButton(graphics, 0, x, y + 12, mouseX, mouseY,
+                Component.translatable("maxfastbuild.radial.action_build"));
+        drawActionModeButton(graphics, 1, x, y + 34, mouseX, mouseY,
+                Component.translatable("maxfastbuild.radial.action_select"));
+    }
+
+    private void drawActionModeButton(GuiGraphicsExtractor graphics, int index, int x, int y,
+                                     int mouseX, int mouseY, Component label) {
+        int w = 132;
+        int h = 18;
+        boolean selected = selectionOnly == (index == 1);
+        boolean hovered = mouseX >= x && mouseX < x + w && mouseY >= y && mouseY < y + h;
+        graphics.fill(x, y, x + w, y + h, selected ? 0xFF674C86 : (hovered ? 0xFF3C4249 : 0xFF2A2E33));
+        graphics.outline(x, y, w, h, selected ? 0xFFD1B8FF : 0xFF687481);
+        graphics.centeredText(font, label, x + w / 2, y + 5, selected || hovered ? 0xFFFFFFFF : 0xFFE7EEF7);
+    }
+
+    private boolean actionModeButton(int index, double mouseX, double mouseY) {
+        int y = 20 + index * 22;
+        return mouseX >= 8 && mouseX < 140 && mouseY >= y && mouseY < y + 18;
     }
 
     private void drawIconsAndLabels(GuiGraphicsExtractor graphics, int cx, int cy, BuildMode[] modes, double iconR, double labelR) {

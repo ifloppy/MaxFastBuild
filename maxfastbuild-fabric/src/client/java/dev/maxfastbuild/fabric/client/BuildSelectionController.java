@@ -58,6 +58,8 @@ public final class BuildSelectionController {
     private static BlockPos arcSecond;
     private static BlockPos hovered;
     private static boolean active;
+    /** True when picking anchors only, without submitting a place/break task. */
+    private static boolean selectionOnly;
     /** Blocks along look ray used when the ray misses (floating pick). */
     private static int lookDistance = 5;
     /** Full shape set (for neighbor tests / cuboid detect). */
@@ -98,6 +100,26 @@ public final class BuildSelectionController {
 
     static boolean active() {
         return active;
+    }
+
+    static void setSelectionOnly(boolean value) {
+        selectionOnly = value;
+    }
+
+    static boolean selectionOnly() {
+        return selectionOnly;
+    }
+
+    static boolean cancelOnAttack(Minecraft client, int clickCount) {
+        if (!active) return false;
+        first = null;
+        arcSecond = null;
+        hovered = null;
+        active = false;
+        cachedFull = Set.of();
+        cachedFaces = List.of();
+        notify(Component.translatable("maxfastbuild.selection.cancelled"));
+        return true;
     }
 
     static BuildMode mode() {
@@ -171,7 +193,7 @@ public final class BuildSelectionController {
         if (client.player == null) return null;
         boolean breaking = isBreakIntent(client.player);
         boolean placing = isPlaceIntent(client.player);
-        if (!breaking && !placing && hovered == null) return null;
+        if (!breaking && !placing) return null;
         BlockPos end = hovered != null ? hovered : first;
         Bounds b = first != null && end != null ? previewBounds(end) : null;
         AABB box = b != null
@@ -195,14 +217,16 @@ public final class BuildSelectionController {
         // Kept clear of the vanilla actionbar area (which sits just above the hotbar and carries
         // MFB feedback such as "preview too large"), so error text is never covered by this box.
         int y = canvas.guiHeight() - 108;
-        int outline = !breaking && !placing ? 0xCCB7C0CC : (breaking ? 0xCCFF8A4D : 0xCC65D9FF);
-        int titleColor = !breaking && !placing ? 0xFFB7C0CC : (breaking ? 0xFFFF8A4D : 0xFF8EE9FF);
+        int outline = selectionOnly ? 0xCCB78CFF : (!breaking && !placing ? 0xCCB7C0CC : (breaking ? 0xCCFF8A4D : 0xCC65D9FF));
+        int titleColor = selectionOnly ? 0xFFD1B8FF : (!breaking && !placing ? 0xFFB7C0CC : (breaking ? 0xFFFF8A4D : 0xFF8EE9FF));
         canvas.fill(center - 170, y - 5, center + 170, y + 92, 0xB018202A);
         canvas.outline(center - 170, y - 5, 340, 97, outline);
-        Component title = !breaking && !placing
+        Component title = selectionOnly
+                ? Component.translatable("maxfastbuild.selection.title_selection", modeName())
+                : (!breaking && !placing
                 ? Component.translatable("maxfastbuild.selection.title_none", modeName())
                 : Component.translatable(
-                        breaking ? "maxfastbuild.selection.title_break" : "maxfastbuild.selection.title", modeName());
+                        breaking ? "maxfastbuild.selection.title_break" : "maxfastbuild.selection.title", modeName()));
         canvas.centeredText(client.font, title, center, y, titleColor);
         if (!breaking && !placing) {
             canvas.centeredText(client.font, Component.translatable("maxfastbuild.selection.hold_block_or_tool"),
@@ -257,6 +281,7 @@ public final class BuildSelectionController {
     }
 
     private static InteractionResult confirmPick(Player player, Level level) {
+        if (selectionOnly) return confirmSelectionPick(player, level);
         boolean breaking = isBreakIntent(player);
         boolean placing = isPlaceIntent(player);
         if (!breaking && !placing) {
@@ -279,6 +304,48 @@ public final class BuildSelectionController {
             submit(player, selected, breaking);
         }
         return InteractionResult.FAIL;
+    }
+
+    private static InteractionResult confirmSelectionPick(Player player, Level level) {
+        boolean breaking = isBreakIntent(player);
+        boolean placing = isPlaceIntent(player);
+        if (!breaking && !placing) {
+            notify(Component.translatable("maxfastbuild.selection.hold_block_or_tool"));
+            return InteractionResult.FAIL;
+        }
+        BlockPos selected = resolveTarget(player, level, breaking);
+        if (selected == null) {
+            notify(Component.translatable("maxfastbuild.selection.no_target"));
+            return InteractionResult.FAIL;
+        }
+        if (first == null) {
+            first = selected;
+            hovered = selected;
+            notify(Component.translatable("maxfastbuild.selection.anchor_first", coordinates(selected)));
+        } else if (mode == BuildMode.ARC && arcSecond == null) {
+            arcSecond = selected;
+            hovered = selected;
+            invalidatePreviewCache();
+        } else {
+            sendCompletedSelection(selected);
+            notify(Component.translatable("maxfastbuild.selection.anchor_complete"));
+            finishSelection();
+        }
+        return InteractionResult.FAIL;
+    }
+
+    private static void syncServerSelectionSettings() {
+        if (!selectionOnly) return;
+        ClientSession.sendSelectionMode(mode.name().toLowerCase(Locale.ROOT));
+        ClientSession.sendSelectionHollow(currentHollow);
+        ClientSession.sendSelectionSpacing(arraySpacingX, arraySpacingY, arraySpacingZ);
+    }
+
+    private static void sendCompletedSelection(BlockPos selected) {
+        syncServerSelectionSettings();
+        ClientSession.sendSelectionPosition(1, first);
+        if (mode == BuildMode.ARC) ClientSession.sendSelectionPosition(2, arcSecond);
+        ClientSession.sendSelectionPosition(mode == BuildMode.ARC ? 3 : 2, selected);
     }
 
     private static void refreshHovered(Minecraft client) {
@@ -465,6 +532,15 @@ public final class BuildSelectionController {
                     request.third(), request.spacingX(), request.spacingY(), request.spacingZ());
             notify(Component.translatable("maxfastbuild.selection.submitted", count));
         }
+        first = null;
+        arcSecond = null;
+        hovered = null;
+        active = false;
+        cachedFull = Set.of();
+        cachedFaces = List.of();
+    }
+
+    private static void finishSelection() {
         first = null;
         arcSecond = null;
         hovered = null;

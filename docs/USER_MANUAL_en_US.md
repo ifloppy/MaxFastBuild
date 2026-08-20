@@ -17,8 +17,9 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 ## Radial menu
 
 1. **Hold** the bind (default **Left Alt**, rebind under Options → Controls → MaxFastBuild); **release to close**.
-2. Move over a sector to highlight; **release** or **left-click** to select.
-3. The menu is transparent so the world stays visible.
+2. Choose an action in the upper-left menu: default **Place / Break**, or **Selection only** for `/mfb replace`.
+3. Move over a sector to highlight; **release** or **left-click** to select the shape.
+4. The menu is transparent so the world stays visible.
 
 ## Place and break
 
@@ -32,8 +33,8 @@ Put the client jar and Fabric API in the instance `mods` folder, then join a ser
 
 1. Pick a shape from the radial menu.
 2. Normal shapes use two **right-clicks** for the start and end; a **three-point arc** uses start, through, and end points.
-3. **Left-click** cancels the selection.
-4. Corners may be in air; against a solid block, place uses vanilla replaceable/adjacent rules.
+3. In **Selection only** mode, right-clicks save anchors without submitting a place/break task; after selecting, use `/mfb replace <origin> <new> [except]`.
+4. Corners may be in air; in normal **Place / Break** mode, placement against a block uses vanilla replaceable/adjacent rules.
 5. **Shift+scroll** sets look depth **1–64**; volume thickness/solid/hollow uses **Ctrl+scroll**; plain scroll still changes the hotbar.
 6. Preview shows only the shape **shell** plus a bounds outline.
 
@@ -67,11 +68,14 @@ Public server commands (permission `maxfastbuild.use`). Use `/mfb` or `/mfb help
 /mfb apply
 /mfb status
 /mfb cancel
+/mfb replace stone glass [dirt,grass_block]
 ```
 
-After `pos1` and `pos2` (and `pos3` for an arc), the server sends green-glass block updates visible only to that player. These are previews and never modify real server blocks. Changing points, `hollow`, or array steps refreshes the preview; `apply` or `/mfb cancel` restores the real block display. `/mfb cancel` only clears commands that have not started executing; it does not cancel accepted or running tasks. Preview and apply use the same shape-coordinate generator, so their positions match.
+After `pos1` and `pos2` (and `pos3` for an arc), the server sends green-glass block updates visible only to that player. These are previews and never modify real server blocks. Changing points, `hollow`, or array steps refreshes the preview; `apply` or `/mfb clearpos` restores the real block display. `/mfb cancel` only clears commands that have not started executing; it does not cancel accepted or running tasks. Preview and apply use the same shape-coordinate generator, so their positions match.
 
 `apply` matches the client: main-hand block = place/replace, mining tool = break, empty hand = reject (material comes from the held block).
+
+`/mfb replace <origin> <new> [except]` uses the current selection shape to replace origin blocks with the new block between `pos1` and `pos2` (and `pos3` for arcs). `except` is optional and accepts one block, a comma-separated list, or a bracketed list, such as `dirt`, `dirt,grass_block`, or `[dirt,grass_block]`.
 
 ## Litematica bulk paste
 

@@ -42,6 +42,26 @@ final class ClientSession {
         send(CompactBreakCommand.format(intent));
     }
 
+    /** Store the radial selection mode in the server-side /mfb selection. */
+    static void sendSelectionMode(String mode) {
+        if (mode == null || mode.isBlank()) return;
+        send("mfb mode " + mode);
+    }
+
+    static void sendSelectionHollow(int hollow) {
+        send("mfb hollow " + hollow);
+    }
+
+    static void sendSelectionSpacing(int x, int y, int z) {
+        send("mfb array-spacing " + x + " " + y + " " + z);
+    }
+
+    /** Store a client-picked anchor in the server-side /mfb selection. */
+    static void sendSelectionPosition(int index, BlockPos position) {
+        if (index < 1 || index > 3 || position == null) return;
+        send("mfb pos" + index + " " + position.x() + " " + position.y() + " " + position.z());
+    }
+
     private static void send(String command) {
         if (command.length() > CommandChunkAssembler.MAX_COMMAND_LENGTH) {
             Minecraft client = Minecraft.getInstance();
