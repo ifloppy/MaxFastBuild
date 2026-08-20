@@ -204,7 +204,7 @@ public final class BuildSelectionController {
     }
 
     private static boolean isSimpleCuboidPreview(BuildMode m) {
-        return m == BuildMode.CUBE || m == BuildMode.FLOOR || m == BuildMode.SINGLE;
+        return m == BuildMode.CUBE || m == BuildMode.SINGLE;
     }
 
     public static void renderHud(HudCanvas canvas) {
@@ -463,6 +463,10 @@ public final class BuildSelectionController {
     }
 
     private static Bounds previewBounds(BlockPos end) {
+        if (mode == BuildMode.FLOOR) {
+            int y = Math.min(first.y(), end.y());
+            return new Bounds(new BlockPos(first.x(), y, first.z()), new BlockPos(end.x(), y, end.z()));
+        }
         if (mode == BuildMode.ARC && arcSecond != null) {
             return new ShapeRequest(mode, first, arcSecond, end, currentHollow,
                     arraySpacingX, arraySpacingY, arraySpacingZ).bounds();
