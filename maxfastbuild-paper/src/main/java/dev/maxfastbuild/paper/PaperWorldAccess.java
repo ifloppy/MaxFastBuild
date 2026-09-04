@@ -11,7 +11,11 @@ import org.bukkit.block.data.type.Fence;
 import org.bukkit.block.data.type.Gate;
 import org.bukkit.block.data.type.GlassPane;
 import org.bukkit.entity.Player;
+import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
+
+import java.lang.reflect.Proxy;
 
 import java.util.HashSet;
 import java.util.List;
@@ -19,16 +23,15 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Real block changes use vanilla/Paper APIs only:
+ * Real block changes follow player-facing Paper APIs wherever one exists:
  * <ul>
- *   <li>break: {@link Block#breakNaturally(ItemStack, boolean)} (drops + tool interaction)</li>
- *   <li>place: {@link Block#setBlockData(BlockData, boolean)}</li>
+ *   <li>break: {@link Player#breakBlock(Block)} so the normal player {@code BlockBreakEvent}, drops,
+ *       enchantments, protection hooks and audit listeners all run;</li>
+ *   <li>place: a standard {@link BlockPlaceEvent} is dispatched before the final
+ *       {@link Block#setBlockData(BlockData, boolean)} mutation.</li>
  * </ul>
- * CoreProtect recording:
- *   • BREAK: audit calls {@code logRemoval()} once (breakNaturally may not fire BlockBreakEvent on Leaf).
- *   • PLACE: audit calls {@code logPlacement()} once.
- *   • PLACE-over-solid: audit calls {@code logRemoval()} (for old block) + {@code logPlacement()} (for new block).
- * No synthetic BlockBreak/Place events are fired during planning.
+ * Audit backends only use their direct API as a fallback when the corresponding player event path
+ * did not already notify them, preventing duplicate replacement removal/placement records.
  */
 final class PaperWorldAccess implements WorldAccess {
     /**
@@ -263,7 +266,7 @@ final class PaperWorldAccess implements WorldAccess {
             return new MutationResult(false, "already_target_state");
         }
 
-        Material occupant = block.getType();
+        Material occupant = currentData.getMaterial();
         boolean preserveInPlace = canPreserveContentsInPlace(
                 currentData.getAsString(), mutation.targetState(), mutation.preserveContents());
         if (preserveInPlace && validatedNbt != null) {
@@ -275,6 +278,30 @@ final class PaperWorldAccess implements WorldAccess {
         }
 
         boolean replacedSolid = !stateAlreadyMatches && !preserveInPlace && !isReplaceableOccupant(occupant);
+
+        // Fire one player-style placement event at execution time. The event receives a read-through
+        // virtual Block whose type/data are the target state, while the real world is still untouched.
+        // For a solid replacement MFB models two vanilla player actions: break the old block, then
+        // place into the resulting air. Therefore BlockPlaceEvent#getBlockReplacedState MUST be AIR,
+        // not the old solid block. Passing the old block here makes audit plugins such as CoreProtect
+        // record a second removal in addition to Player#breakBlock's BlockBreakEvent.
+        // Directly replaceable occupants (grass, snow, fluids, etc.) keep their real replaced state.
+        boolean placeEventFired = false;
+        if (!stateAlreadyMatches) {
+            Block placedView = placementView(block, targetData);
+            org.bukkit.block.BlockState replacedState = replacedSolid
+                    ? dataState(block, Material.AIR.createBlockData())
+                    : dataState(block, currentData);
+            BlockPlaceEvent placeEvent = new BlockPlaceEvent(
+                    placedView, replacedState, placementAgainst(block),
+                    new ItemStack(targetMaterial), player, true, EquipmentSlot.HAND);
+            Bukkit.getPluginManager().callEvent(placeEvent);
+            placeEventFired = true;
+            if (placeEvent.isCancelled() || !placeEvent.canBuild()) {
+                return new MutationResult(false, "protected");
+            }
+        }
+
         boolean naturalBreakLogged = false;
         if (replacedSolid) {
             MutationResult broken = breakVanilla(player, block);
@@ -284,7 +311,6 @@ final class PaperWorldAccess implements WorldAccess {
             naturalBreakLogged = broken.breakAlreadyLogged();
         }
 
-        // If the state already matches we only need to update the block-entity data.
         if (!stateAlreadyMatches) {
             block.setBlockData(targetData, !deferPhysics);
         }
@@ -298,7 +324,47 @@ final class PaperWorldAccess implements WorldAccess {
         if (naturalBreakLogged) {
             flags = flags.isEmpty() ? "break_logged" : flags + ",break_logged";
         }
+        if (placeEventFired) {
+            flags = flags.isEmpty() ? "place_event" : flags + ",place_event";
+        }
         return new MutationResult(true, flags);
+    }
+
+    /** Virtual placed block used only while dispatching BlockPlaceEvent. */
+    private static Block placementView(Block real, BlockData targetData) {
+        BlockData frozen = targetData.clone();
+        return (Block) Proxy.newProxyInstance(
+                Block.class.getClassLoader(),
+                new Class<?>[]{Block.class},
+                (proxy, method, args) -> switch (method.getName()) {
+                    case "getType" -> frozen.getMaterial();
+                    case "getBlockData" -> frozen.clone();
+                    case "getState" -> {
+                        org.bukkit.block.BlockState snapshot = real.getState();
+                        snapshot.setBlockData(frozen);
+                        yield snapshot;
+                    }
+                    case "isEmpty" -> frozen.getMaterial().isAir();
+                    case "isLiquid" -> frozen.getMaterial() == Material.WATER || frozen.getMaterial() == Material.LAVA;
+                    case "equals" -> proxy == (args == null ? null : args[0]);
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "toString" -> "MaxFastBuildPlacementView{" + real.getLocation() + ", " + frozen.getAsString() + "}";
+                    default -> method.invoke(real, args);
+                });
+    }
+
+    private static org.bukkit.block.BlockState dataState(Block block, BlockData data) {
+        org.bukkit.block.BlockState snapshot = block.getState();
+        snapshot.setBlockData(data);
+        return snapshot;
+    }
+
+    private static Block placementAgainst(Block target) {
+        for (BlockFace face : new BlockFace[]{BlockFace.DOWN, BlockFace.UP, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.WEST, BlockFace.EAST}) {
+            Block candidate = target.getRelative(face);
+            if (!candidate.getType().isAir()) return candidate;
+        }
+        return target;
     }
 
     static boolean isReplaceableOccupant(Material material) {
@@ -358,8 +424,10 @@ final class PaperWorldAccess implements WorldAccess {
     }
 
     /**
-     * One vanilla break via {@code breakNaturally}. CoreProtect records this once.
-     * Audit service now does nothing for BREAK (no duplicate logRemoval).
+     * One real player break through Paper's {@link Player#breakBlock(Block)} path. This dispatches
+     * the normal {@code BlockBreakEvent}, so protection/audit plugins (including NKVD/CoreProtect)
+     * see the same player attribution as a manual break. A successful call is marked
+     * {@code break_logged} so the audit API does not add a duplicate removal record afterwards.
      */
     private static MutationResult breakVanilla(Player player, Block block) {
         Material type = block.getType();
@@ -368,8 +436,8 @@ final class PaperWorldAccess implements WorldAccess {
             return new MutationResult(false, "unbreakable_block");
         }
         if (player.getGameMode() == GameMode.CREATIVE) {
-            boolean changed = block.breakNaturally(true);
-            return new MutationResult(changed, changed ? "" : "break_failed");
+            boolean changed = player.breakBlock(block);
+            return new MutationResult(changed, changed ? "break_logged" : "break_failed");
         }
         BreakToolHelper.Selection tool = BreakToolHelper.findTool(player, block);
         if (tool == null) {
@@ -379,7 +447,7 @@ final class PaperWorldAccess implements WorldAccess {
             return new MutationResult(false, "insufficient_tool");
         }
         boolean changed = BreakToolHelper.breakWithTool(player, block, tool);
-        return new MutationResult(changed, changed ? "" : "break_failed");
+        return new MutationResult(changed, changed ? "break_logged" : "break_failed");
     }
 
     static boolean isForbiddenPlaceMaterial(Material material) {

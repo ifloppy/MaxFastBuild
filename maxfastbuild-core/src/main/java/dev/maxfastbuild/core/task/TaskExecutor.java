@@ -154,7 +154,8 @@ public final class TaskExecutor {
                         changed++;
                         applied++;
                         changedPositions.add(mutation.position());
-                        audit.record(playerId, playerName, worldName, mutation, operation, result.breakAlreadyLogged());
+                        audit.record(playerId, playerName, worldName, mutation, operation,
+                                result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
                     } else {
                         if ("player_offline".equals(result.reason())) break;
                         skipped++;

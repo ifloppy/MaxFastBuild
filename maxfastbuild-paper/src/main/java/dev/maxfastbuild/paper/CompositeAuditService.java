@@ -43,6 +43,15 @@ final class CompositeAuditService implements AuditService {
     }
 
     @Override
+    public void record(UUID playerId, String playerName, String world, BlockMutation mutation,
+                       OperationKind kind, boolean breakAlreadyLogged, boolean placeEventAlreadyLogged) {
+        for (AuditService service : services) {
+            if (service.available()) service.record(playerId, playerName, world, mutation, kind,
+                    breakAlreadyLogged, placeEventAlreadyLogged);
+        }
+    }
+
+    @Override
     public void beforeContainerMutation(UUID playerId, String playerName, String world, BlockPos pos) {
         for (AuditService service : services) {
             if (service.available()) service.beforeContainerMutation(playerId, playerName, world, pos);

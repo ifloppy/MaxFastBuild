@@ -32,5 +32,9 @@ public interface WorldAccess {
         public boolean breakAlreadyLogged() {
             return reason != null && reason.contains("break_logged");
         }
+
+        public boolean placeEventAlreadyLogged() {
+            return reason != null && reason.contains("place_event");
+        }
     }
 }

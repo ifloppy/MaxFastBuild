@@ -125,7 +125,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickPastePlanners(); tickTasks(); processCommandQueues(); }, period, period);
             active = true;
             getLogger().info("CLI messages language: " + messages.language());
-            getLogger().info("CoreProtect mode: vanilla breakNaturally + one API logPlacement; no synthetic break events / no double logRemoval");
+            getLogger().info("Compatibility mode: Player.breakBlock + BlockPlaceEvent; CoreProtect API is fallback-only (no duplicate replacement logs)");
             ensureSqliteDriver();
         } catch (RuntimeException ex) {
             getLogger().severe("MaxFastBuild failed to enable: " + ex.getMessage());
@@ -3068,7 +3068,8 @@ if (data.billableItem() != null) {
                     continue;
                 }
                 applied++;
-                audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE, result.breakAlreadyLogged());
+                audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE,
+                        result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
             }
         } finally {
             world.endDeferredPhysics();

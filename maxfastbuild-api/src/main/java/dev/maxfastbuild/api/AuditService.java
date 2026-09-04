@@ -17,6 +17,15 @@ public interface AuditService {
     }
 
     /**
+     * @param placeEventAlreadyLogged true when a real BlockPlaceEvent was dispatched for this
+     *                                mutation, allowing event-based audit backends to skip duplicates
+     */
+    default void record(UUID playerId, String playerName, String world, BlockMutation mutation,
+                        OperationKind kind, boolean breakAlreadyLogged, boolean placeEventAlreadyLogged) {
+        record(playerId, playerName, world, mutation, kind, breakAlreadyLogged);
+    }
+
+    /**
      * Called immediately before MaxFastBuild mutates a container block's inventory (chest, barrel,
      * placed shulker box). Backends that snapshot-and-diff container contents (CoreProtect's
      * {@code logContainerTransaction}) use this to capture the change caused by our direct

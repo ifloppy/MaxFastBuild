@@ -63,12 +63,22 @@ final class PrismAuditService implements AuditService {
     @Override
     public void record(UUID playerId, String playerName, String world, BlockMutation mutation,
                        OperationKind kind, boolean breakAlreadyLogged) {
+        record(playerId, playerName, world, mutation, kind, breakAlreadyLogged, false);
+    }
+
+    @Override
+    public void record(UUID playerId, String playerName, String world, BlockMutation mutation,
+                       OperationKind kind, boolean breakAlreadyLogged, boolean placeEventAlreadyLogged) {
         if (api == null || playerName == null || playerName.isBlank()) return;
         World bukkitWorld = Bukkit.getWorld(world);
         if (bukkitWorld == null) return;
         try {
             if (kind == OperationKind.BREAK) {
-                logBlock(bukkitWorld, mutation.position(), "block-break", mutation.expectedState(), playerName, playerId);
+                // Player#breakBlock normally reaches Prism through BlockBreakEvent. Keep the
+                // direct API path only as a fallback for mutations that did not emit that event.
+                if (!breakAlreadyLogged) {
+                    logBlock(bukkitWorld, mutation.position(), "block-break", mutation.expectedState(), playerName, playerId);
+                }
                 return;
             }
             BlockData expected = safeBlockData(mutation.expectedState());
@@ -77,7 +87,9 @@ final class PrismAuditService implements AuditService {
             if (replacedSolid && !breakAlreadyLogged) {
                 logBlock(bukkitWorld, mutation.position(), "block-break", mutation.expectedState(), playerName, playerId);
             }
-            logBlock(bukkitWorld, mutation.position(), "block-place", mutation.targetState(), playerName, playerId);
+            if (!placeEventAlreadyLogged) {
+                logBlock(bukkitWorld, mutation.position(), "block-place", mutation.targetState(), playerName, playerId);
+            }
             logContainerItems(bukkitWorld, mutation.position(), mutation.targetState(), mutation.targetNbt(),
                     playerName, playerId);
         } catch (RuntimeException ex) {

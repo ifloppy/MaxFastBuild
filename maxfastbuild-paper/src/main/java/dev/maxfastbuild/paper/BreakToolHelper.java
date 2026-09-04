@@ -14,9 +14,8 @@ import org.bukkit.inventory.meta.ItemMeta;
  * Enforces remaining durability &gt;= {@link #MIN_REMAINING} and vanilla-like tool effectiveness.
  */
 final class BreakToolHelper {
-    /** Never wear a tool below this remaining durability. */
+    /** Never select a tool with fewer than this many safe uses remaining. */
     static final int MIN_REMAINING = 4;
-    private static final int BREAK_DAMAGE = 1;
 
     private BreakToolHelper() {}
 
@@ -65,56 +64,37 @@ final class BreakToolHelper {
             return false;
         }
         ItemStack tool = selection.tool();
-        // Only break if the tool is actually effective (prevents soft-fail weirdness).
         if (player.getGameMode() != GameMode.CREATIVE && !isEffectiveFor(tool, block)) {
             return false;
         }
-        // Vanilla break (CoreProtect sees this once). Prefer Paper 3-arg when present.
-        boolean changed = breakNaturallyVanilla(block, tool);
-        if (!changed) return false;
-        if (player.getGameMode() == GameMode.CREATIVE) return true;
-        if (!isMiningTool(tool)) return true;
-        // breakNaturally does not always apply item damage the same as player mining — wear once here.
-        applyDamage(player, selection.slot(), BREAK_DAMAGE);
-        return true;
-    }
 
-    private static boolean breakNaturallyVanilla(Block block, ItemStack tool) {
-        try {
-            var method = Block.class.getMethod("breakNaturally", ItemStack.class, boolean.class, boolean.class);
-            Object result = method.invoke(block, tool, true, true);
-            return result instanceof Boolean b && b;
-        } catch (ReflectiveOperationException ignored) {
-            return block.breakNaturally(tool, true);
-        }
-    }
-
-    /** Package-visible so silent break can wear tools without going through breakNaturally. */
-    static void applyDamage(Player player, int slot, int amount) {
+        // Paper's Player#breakBlock is the important part here: unlike Block#breakNaturally it goes
+        // through the normal player break pipeline (BlockBreakEvent, protection/audit plugins,
+        // vanilla drops/enchantments/tool damage). MFB may select a tool outside the held slot, so
+        // temporarily swap that slot into the player's main hand and swap the post-break stack back.
         PlayerInventory inv = player.getInventory();
-        ItemStack stack = slot == 40 ? inv.getItemInOffHand() : inv.getItem(slot);
-        if (stack == null || stack.getType().isAir() || !isMiningTool(stack)) return;
-        int max = maxDurability(stack);
-        int damage = currentDamage(stack);
-        int remaining = max - damage;
-        if (remaining - amount < MIN_REMAINING) return;
-        // Prefer ItemStack#damage(int, LivingEntity) when present (Paper); else meta damage.
-        try {
-            var method = ItemStack.class.getMethod("damage", int.class, org.bukkit.entity.LivingEntity.class);
-            Object result = method.invoke(stack, amount, player);
-            ItemStack updated = result instanceof ItemStack item ? item : stack;
-            if (slot == 40) inv.setItemInOffHand(updated);
-            else inv.setItem(slot, updated);
-            return;
-        } catch (ReflectiveOperationException ignored) {
-            // fall through
+        int held = inv.getHeldItemSlot();
+        int toolSlot = selection.slot();
+        if (toolSlot == held) {
+            return player.breakBlock(block);
         }
-        ItemMeta meta = stack.getItemMeta();
-        if (meta instanceof Damageable damageable) {
-            damageable.setDamage(damage + amount);
-            stack.setItemMeta(meta);
-            if (slot == 40) inv.setItemInOffHand(stack);
-            else inv.setItem(slot, stack);
+
+        ItemStack heldStack = inv.getItem(held);
+        ItemStack selectedStack = toolSlot == 40 ? inv.getItemInOffHand() : inv.getItem(toolSlot);
+        if (selectedStack == null || selectedStack.getType().isAir()) return false;
+
+        if (toolSlot == 40) inv.setItemInOffHand(heldStack);
+        else inv.setItem(toolSlot, heldStack);
+        inv.setItem(held, selectedStack);
+        try {
+            return player.breakBlock(block);
+        } finally {
+            // Player#breakBlock may damage or consume the held tool. Move that resulting stack back
+            // to the slot MFB borrowed it from, then restore the player's original held item.
+            ItemStack resultingTool = inv.getItem(held);
+            inv.setItem(held, heldStack);
+            if (toolSlot == 40) inv.setItemInOffHand(resultingTool);
+            else inv.setItem(toolSlot, resultingTool);
         }
     }
 

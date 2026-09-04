@@ -16,14 +16,12 @@ import java.util.UUID;
 import java.util.logging.Logger;
 
 /**
- * CoreProtect logging aligned with vanilla mutation path:
+ * CoreProtect logging aligned with the actual notification path.
  * <ul>
- *   <li><b>Break</b> ({@code breakNaturally}): {@code breakNaturally} may not fire
- *       {@code BlockBreakEvent} on all Paper/Leaf versions, so we call
- *       {@code logRemoval} ourselves once (exactly one record).</li>
- *   <li><b>Place</b> ({@code setBlockData}): CP is not auto-notified — {@code logPlacement} once.
- *       For solid occupants the removal is also logged here since {@code breakNaturally}
- *       may not fire the event. Air/replaceable occupants skip removal logging.</li>
+ *   <li>A standard {@code BlockPlaceEvent} is already consumed by CoreProtect, so an emitted
+ *       placement event suppresses the API {@code logPlacement} fallback.</li>
+ *   <li>A successful player {@code BlockBreakEvent} path is already consumed by CoreProtect, so
+ *       the API {@code logRemoval} fallback is suppressed when MFB reports that event as emitted.</li>
  * </ul>
  */
 final class CoreProtectAuditService implements AuditService {
@@ -51,7 +49,7 @@ final class CoreProtectAuditService implements AuditService {
                 return new CoreProtectAuditService(null);
             }
             LOG.info("CoreProtect audit enabled (API " + version
-                    + ", break=audit logRemoval, place=audit logPlacement + logRemoval for solid)");
+                    + ", event-aware dedup: placement event preferred, API fallback otherwise)");
             return new CoreProtectAuditService(discovered);
         } catch (LinkageError | RuntimeException ex) {
             LOG.warning("CoreProtect API not usable: " + ex.getMessage());
@@ -72,6 +70,12 @@ final class CoreProtectAuditService implements AuditService {
     @Override
     public void record(UUID playerId, String playerName, String world, BlockMutation mutation,
                        OperationKind kind, boolean breakAlreadyLogged) {
+        record(playerId, playerName, world, mutation, kind, breakAlreadyLogged, false);
+    }
+
+    @Override
+    public void record(UUID playerId, String playerName, String world, BlockMutation mutation,
+                       OperationKind kind, boolean breakAlreadyLogged, boolean placeEventAlreadyLogged) {
         if (api == null || playerName == null || playerName.isBlank()) return;
         World bukkitWorld = Bukkit.getWorld(world);
         if (bukkitWorld == null) return;
@@ -83,22 +87,26 @@ final class CoreProtectAuditService implements AuditService {
         try {
             boolean ok = true;
             if (kind == OperationKind.BREAK) {
-                // breakNaturally may not fire BlockBreakEvent on all Paper/Leaf versions.
-                // Call logRemoval ourselves once to guarantee exactly one record.
-                BlockData removed = Bukkit.createBlockData(mutation.expectedState());
-                if (!removed.getMaterial().isAir()) {
-                    ok = api.logRemoval(playerName, location, removed.getMaterial(), removed);
+                // Player#breakBlock normally reaches CoreProtect through BlockBreakEvent. Keep the
+                // direct API path only as a fallback for mutations that did not emit that event.
+                if (!breakAlreadyLogged) {
+                    BlockData removed = Bukkit.createBlockData(mutation.expectedState());
+                    if (!removed.getMaterial().isAir()) {
+                        ok = api.logRemoval(playerName, location, removed.getMaterial(), removed);
+                    }
                 }
             } else {
-                // Place: log removal of the occupant (if solid non-replaceable) since
-                // breakNaturally may not fire BlockBreakEvent on all Paper/Leaf versions.
+                // A replacement can have two audit actions at one coordinate: removal of the old
+                // solid block and placement of the new block. Each side independently falls back
+                // only when the platform/event path did not already notify CoreProtect.
                 BlockData expected = Bukkit.createBlockData(mutation.expectedState());
                 Material expectedMat = expected.getMaterial();
-                if (!expectedMat.isAir() && !PaperWorldAccess.isReplaceableOccupant(expectedMat)) {
+                if (!breakAlreadyLogged && !expectedMat.isAir()
+                        && !PaperWorldAccess.isReplaceableOccupant(expectedMat)) {
                     ok = api.logRemoval(playerName, location, expectedMat, expected);
                 }
                 BlockData placed = Bukkit.createBlockData(mutation.targetState());
-                if (!placed.getMaterial().isAir()) {
+                if (!placeEventAlreadyLogged && !placed.getMaterial().isAir()) {
                     ok = api.logPlacement(playerName, location, placed.getMaterial(), placed) && ok;
                 }
             }
