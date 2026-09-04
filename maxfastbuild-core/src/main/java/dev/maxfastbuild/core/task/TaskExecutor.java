@@ -54,6 +54,25 @@ public final class TaskExecutor {
         return removed;
     }
 
+    /** Remove and return every latest in-memory task snapshot owned by a player. */
+    public List<BuildTask> detachPlayerSnapshots(UUID playerId) {
+        List<BuildTask> removed = new ArrayList<>();
+        for (Map.Entry<UUID, BuildTask> entry : running.entrySet()) {
+            BuildTask task = entry.getValue();
+            if (!task.playerId().equals(playerId)) continue;
+            if (running.remove(entry.getKey(), task)) {
+                decrementPlayerCount(playerId);
+                removed.add(task);
+            }
+        }
+        return List.copyOf(removed);
+    }
+
+    /** Latest immutable in-memory snapshot, or null when the task is not active. */
+    public BuildTask snapshot(UUID id) {
+        return running.get(id);
+    }
+
     /** Snapshot of in-memory task ids (for safe shutdown / PlugMan unload). */
     public Set<UUID> activeIds() {
         return Set.copyOf(running.keySet());
@@ -124,6 +143,9 @@ public final class TaskExecutor {
                 }
                 WorldAccess.ValidationResult validation = world.mayMutate(playerId, worldName, mutation, operation);
                 if (!validation.allowed()) {
+                    // Offline is a temporary execution condition, not a failed mutation. Advancing
+                    // here would consume the task tail while its owner is disconnected.
+                    if ("player_offline".equals(validation.reason())) break;
                     skipped++;
                     skippedIndices.add(cursor);
                 } else {
@@ -134,6 +156,7 @@ public final class TaskExecutor {
                         changedPositions.add(mutation.position());
                         audit.record(playerId, playerName, worldName, mutation, operation, result.breakAlreadyLogged());
                     } else {
+                        if ("player_offline".equals(result.reason())) break;
                         skipped++;
                         skippedIndices.add(cursor);
                     }

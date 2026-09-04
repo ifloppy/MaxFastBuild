@@ -387,21 +387,40 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         pendingBuilds.remove(playerId);
         commandQueues.remove(playerId);
         lastPasteNeeds.remove(playerId);
+
+        Instant now = Instant.now();
+        Set<UUID> paused = new HashSet<>();
+        // The executor is authoritative while a task is running. Starting from SQLite can miss a
+        // newly queued task or see its previous PAUSED_OFFLINE state while async saves catch up.
+        for (BuildTask latest : executor.detachPlayerSnapshots(playerId)) {
+            try {
+                if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
+                    tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, now));
+                    paused.add(latest.id());
+                }
+            } catch (RuntimeException ex) {
+                getLogger().warning("Failed to pause task " + latest.id() + " on quit: " + ex.getMessage());
+            }
+        }
+        // Publish the authoritative snapshots before the fallback database scan, so it cannot
+        // overwrite them with an older cursor/status.
+        tasks.flush();
+
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(playerId)) continue;
+            if (paused.contains(task.id())) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
             try {
-                // Prefer in-memory snapshot (has latest applied_count) when present.
                 BuildTask latest = executor.detachSnapshot(task.id());
-                if (latest == null) latest = tasks.find(task.id()).orElse(task);
+                if (latest == null) latest = task;
                 if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
-                    tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, Instant.now()));
-                    tasks.flush();
+                    tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, now));
                 }
             } catch (RuntimeException ex) {
                 getLogger().warning("Failed to pause task " + task.id() + " on quit: " + ex.getMessage());
             }
         }
+        tasks.flush();
     }
 
     @EventHandler public void onWorldChange(PlayerChangedWorldEvent event) {
@@ -2122,9 +2141,22 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (!active || tasks == null || executor == null) return;
         int count = Math.max(1, getConfig().getInt("execution.blocks-per-step", 1));
         int globalRemaining = globalBudgetCap(globalBudgetPerTick);
+        boolean pausedOffline = false;
         for (UUID id : executor.activeIds()) {
-            if (globalRemaining <= 0) break;
             try {
+                BuildTask activeTask = executor.snapshot(id);
+                if (activeTask == null) continue;
+                Player taskPlayer = Bukkit.getPlayer(activeTask.playerId());
+                if (taskPlayer == null || !taskPlayer.isOnline()) {
+                    BuildTask latest = executor.detachSnapshot(id);
+                    if (latest != null && (latest.status() == TaskStatus.RUNNING
+                            || latest.status() == TaskStatus.QUEUED)) {
+                        tasks.save(latest.transition(TaskStatus.PAUSED_OFFLINE, Instant.now()));
+                        pausedOffline = true;
+                    }
+                    continue;
+                }
+                if (globalRemaining <= 0) continue;
                 int perTask = Math.min(count, globalRemaining);
                 TaskExecutor.TickResult result = executor.tick(id, perTask);
                 globalRemaining -= result.changed() + result.skipped();
@@ -2133,6 +2165,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getLogger().severe("Task " + id + " failed: " + ex.getMessage());
             }
         }
+        if (pausedOffline) tasks.flush();
     }
 
     /**

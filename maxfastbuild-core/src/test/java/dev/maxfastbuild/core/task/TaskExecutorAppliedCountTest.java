@@ -53,6 +53,70 @@ class TaskExecutorAppliedCountTest {
         assertThat(repo.find(id).orElseThrow().status()).isEqualTo(TaskStatus.COMPLETED);
     }
 
+    @Test void detachesAllPlayerTasksFromLatestMemoryState() {
+        InMemoryRepo repo = new InMemoryRepo();
+        StubWorld world = new StubWorld();
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        AuditService audit = new AuditService() {
+            @Override public boolean available() { return true; }
+            @Override public void record(UUID playerId, String playerName, String worldName, BlockMutation mutation, OperationKind kind) {}
+        };
+        TaskExecutor executor = new TaskExecutor(repo, world, audit, clock, 100);
+        UUID player = UUID.randomUUID();
+        UUID otherPlayer = UUID.randomUUID();
+        BuildTask first = task(UUID.randomUUID(), player, clock.instant());
+        BuildTask second = task(UUID.randomUUID(), player, clock.instant());
+        BuildTask other = task(UUID.randomUUID(), otherPlayer, clock.instant());
+        executor.enqueue(first);
+        executor.enqueue(second);
+        executor.enqueue(other);
+
+        executor.tick(first.id(), 1);
+        List<BuildTask> detached = executor.detachPlayerSnapshots(player);
+
+        assertThat(detached).extracting(BuildTask::id).containsExactlyInAnyOrder(first.id(), second.id());
+        assertThat(detached).filteredOn(task -> task.id().equals(first.id())).singleElement()
+                .extracting(BuildTask::cursor, BuildTask::appliedCount).containsExactly(1, 1);
+        assertThat(executor.activeCount(player)).isZero();
+        assertThat(executor.isActive(first.id())).isFalse();
+        assertThat(executor.isActive(second.id())).isFalse();
+        assertThat(executor.isActive(other.id())).isTrue();
+        assertThat(executor.activeCount(otherPlayer)).isEqualTo(1);
+    }
+
+    @Test void offlineValidationDoesNotConsumeTaskProgress() {
+        InMemoryRepo repo = new InMemoryRepo();
+        StubWorld world = new StubWorld();
+        world.offline = true;
+        Clock clock = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+        AuditService audit = new AuditService() {
+            @Override public boolean available() { return true; }
+            @Override public void record(UUID playerId, String playerName, String worldName, BlockMutation mutation, OperationKind kind) {}
+        };
+        TaskExecutor executor = new TaskExecutor(repo, world, audit, clock);
+        BuildTask task = task(UUID.randomUUID(), UUID.randomUUID(), clock.instant());
+        executor.enqueue(task);
+
+        TaskExecutor.TickResult result = executor.tick(task.id(), 10);
+
+        assertThat(result.finished()).isFalse();
+        assertThat(result.changed()).isZero();
+        assertThat(result.skipped()).isZero();
+        assertThat(result.task().cursor()).isZero();
+        assertThat(result.task().appliedCount()).isZero();
+        assertThat(executor.isActive(task.id())).isTrue();
+    }
+
+    private static BuildTask task(UUID id, UUID player, Instant now) {
+        List<BlockMutation> mutations = List.of(
+                new BlockMutation(new BlockPos(0, 64, 0), "minecraft:air", "minecraft:stone"),
+                new BlockMutation(new BlockPos(1, 64, 0), "minecraft:air", "minecraft:stone"));
+        BuildPlan plan = new BuildPlan("world", OperationKind.PLACE,
+                new Bounds(new BlockPos(0, 64, 0), new BlockPos(1, 64, 0)), mutations);
+        return new BuildTask(id, player, "Builder", plan, TaskStatus.QUEUED, 0, 0, Set.of(), null,
+                BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
+    }
+
     private static final class InMemoryRepo implements TaskRepository {
         private final Map<UUID, BuildTask> tasks = new HashMap<>();
         @Override public void initialize() {}
@@ -70,11 +134,13 @@ class TaskExecutorAppliedCountTest {
 
     private static final class StubWorld implements WorldAccess {
         private final Map<String, String> states = new HashMap<>();
+        private boolean offline;
         private static String key(String world, BlockPos pos) { return world + ":" + pos.x() + "," + pos.y() + "," + pos.z(); }
         @Override public String stateAt(String world, BlockPos position) {
             return states.getOrDefault(key(world, position), "minecraft:air");
         }
         @Override public ValidationResult mayMutate(UUID playerId, String world, BlockMutation mutation, OperationKind kind) {
+            if (offline) return new ValidationResult(false, "player_offline");
             return new ValidationResult(true, "");
         }
         @Override public MutationResult mutate(UUID playerId, String world, BlockMutation mutation, OperationKind kind) {
