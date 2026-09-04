@@ -54,6 +54,14 @@ public record BuildTask(UUID id, UUID playerId, String playerName, BuildPlan pla
         return new BuildTask(id, playerId, playerName, plan, status, cursor, appliedCount, skipped, escrowId, charged, nextRefunded, createdAt, now, failure);
     }
 
+    /** Attach a persisted failure reason after transitioning to FAILED. */
+    public BuildTask withFailure(String nextFailure, Instant now) {
+        if (status != TaskStatus.FAILED) throw new IllegalStateException("Failure reason requires FAILED status");
+        String reason = nextFailure == null || nextFailure.isBlank() ? "unknown_failure" : nextFailure;
+        return new BuildTask(id, playerId, playerName, plan, status, cursor, appliedCount, skipped,
+                escrowId, charged, refunded, createdAt, now, reason);
+    }
+
     private static boolean allowed(TaskStatus from, TaskStatus to) {
         return switch (from) {
             case VALIDATING -> to == TaskStatus.RESERVING || to == TaskStatus.FAILED;

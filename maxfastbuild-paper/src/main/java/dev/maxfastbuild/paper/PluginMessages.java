@@ -92,6 +92,8 @@ final class PluginMessages {
                     component("task-completed", data.get("applied"), data.get("planned"), data.get("refund"));
             case "maxfastbuild.task.partial" ->
                     component("task-partial", data.get("applied"), data.get("planned"), data.get("refund"));
+            case "maxfastbuild.task.failed" ->
+                    component("task-failed", data.get("applied"), data.get("planned"), data.get("refund"), data.get("reason"));
             case "maxfastbuild.error.insufficient_materials" -> {
                 Component base = component("insufficient-materials", data.get("need"), data.get("have"), data.get("material"));
                 if (Boolean.TRUE.equals(data.get("seedFarm"))) {

@@ -146,7 +146,9 @@ final class PrismAuditService implements AuditService {
         World bukkitWorld = Bukkit.getWorld(world);
         if (bukkitWorld == null) return;
         Material material = Material.matchMaterial(materialKey);
-        if (material == null || material.isAir()) return;
+        // Prism item actions require a real inventory item; never pass block-only Materials such as
+        // REDSTONE_WIRE even if a future caller accidentally supplies one.
+        if (material == null || material.isAir() || !material.isItem()) return;
         try {
             ItemStack stack = new ItemStack(material);
             recordActivity(bukkitWorld, pos,

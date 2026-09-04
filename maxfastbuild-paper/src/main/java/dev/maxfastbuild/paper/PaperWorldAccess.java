@@ -281,20 +281,25 @@ final class PaperWorldAccess implements WorldAccess {
 
         // Fire one player-style placement event at execution time. The event receives a read-through
         // virtual Block whose type/data are the target state, while the real world is still untouched.
+        // IMPORTANT: the in-world block Material is not always an inventory item (REDSTONE_WIRE,
+        // TRIPWIRE, crops, wall variants, etc.). Use the same canonical block->item mapping as billing;
+        // never construct ItemStack directly from targetMaterial. Truly derived/transient states with
+        // no placement item (piston heads, portals, fluids/fire, ...) skip this synthetic event rather
+        // than throwing and wedging the whole task. Those states need their own native event semantics.
         // For a solid replacement MFB models two vanilla player actions: break the old block, then
         // place into the resulting air. Therefore BlockPlaceEvent#getBlockReplacedState MUST be AIR,
         // not the old solid block. Passing the old block here makes audit plugins such as CoreProtect
         // record a second removal in addition to Player#breakBlock's BlockBreakEvent.
-        // Directly replaceable occupants (grass, snow, fluids, etc.) keep their real replaced state.
         boolean placeEventFired = false;
-        if (!stateAlreadyMatches) {
+        Material placementItem = PaperInventoryHelper.placementItemFromBlockState(mutation.targetState());
+        if (!stateAlreadyMatches && placementItem != null) {
             Block placedView = placementView(block, targetData);
             org.bukkit.block.BlockState replacedState = replacedSolid
                     ? dataState(block, Material.AIR.createBlockData())
                     : dataState(block, currentData);
             BlockPlaceEvent placeEvent = new BlockPlaceEvent(
                     placedView, replacedState, placementAgainst(block),
-                    new ItemStack(targetMaterial), player, true, EquipmentSlot.HAND);
+                    new ItemStack(placementItem), player, true, EquipmentSlot.HAND);
             Bukkit.getPluginManager().callEvent(placeEvent);
             placeEventFired = true;
             if (placeEvent.isCancelled() || !placeEvent.canBuild()) {

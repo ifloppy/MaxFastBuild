@@ -49,6 +49,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, List<PendingEntity>> taskEntities = new ConcurrentHashMap<>();
     private final Map<UUID, PaperInventoryHelper.RemovalLedger> taskRemovals = new ConcurrentHashMap<>();
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
+    /** Persisted executable tasks discovered during this plugin enable. They stay inert until explicitly resumed. */
+    private final Set<UUID> startupQuarantinedTasks = ConcurrentHashMap.newKeySet();
     private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
     /** Reassembles multi-part Litematica paste payloads (session per player+id, 120s window). */
     private PasteAccumulator pastes;
@@ -120,7 +122,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             mfbSetblock.setExecutor(setBlockCommand);
             mfbSetblock.setTabCompleter(setBlockCommand);
             getServer().getPluginManager().registerEvents(this, this);
-            resumeTasks();
+            quarantineStartupTasks();
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
             getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickPastePlanners(); tickTasks(); processCommandQueues(); }, period, period);
             active = true;
@@ -390,8 +392,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         Instant now = Instant.now();
         Set<UUID> paused = new HashSet<>();
-        // The executor is authoritative while a task is running. Starting from SQLite can miss a
-        // newly queued task or see its previous PAUSED_OFFLINE state while async saves catch up.
+        // The executor is authoritative while a task is live. Starting from SQLite can miss a
+        // newly queued task or see a stale state while async saves catch up.
         for (BuildTask latest : executor.detachPlayerSnapshots(playerId)) {
             try {
                 if (latest.status() == TaskStatus.RUNNING || latest.status() == TaskStatus.QUEUED) {
@@ -402,13 +404,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Failed to pause task " + latest.id() + " on quit: " + ex.getMessage());
             }
         }
-        // Publish the authoritative snapshots before the fallback database scan, so it cannot
-        // overwrite them with an older cursor/status.
+        // Publish the authoritative in-memory snapshots before scanning SQLite, otherwise an older
+        // async row can overwrite them with a stale cursor/status.
         tasks.flush();
 
         for (BuildTask task : tasks.recoverable()) {
-            if (!task.playerId().equals(playerId)) continue;
-            if (paused.contains(task.id())) continue;
+            if (!task.playerId().equals(playerId) || paused.contains(task.id())) continue;
             if (task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
             try {
                 BuildTask latest = executor.detachSnapshot(task.id());
@@ -439,7 +440,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(event.getPlayer().getUniqueId())) continue;
-            if (task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN
+            // Anything discovered during enable stays inert even when its owner later joins.
+            // PAUSED_SHUTDOWN is likewise never an implicit join-resume state: only the explicit
+            // admin recovery path may revive work from a previous plugin/server lifetime.
+            if (startupQuarantinedTasks.contains(task.id())) continue;
+            if (task.status() != TaskStatus.PAUSED_OFFLINE
                     && task.status() != TaskStatus.RUNNING && task.status() != TaskStatus.QUEUED) continue;
             if (executor.isActive(task.id())) continue;
             BuildTask queued = task.status() == TaskStatus.QUEUED
@@ -580,7 +585,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 messages.send(player, "status-tasks", executor.activeCount(player.getUniqueId()));
                 messages.send(player, "status-queue", queueSize(player.getUniqueId()));
             }
-            case "cancel" -> clearPendingQueue(player);
+            case "cancel" -> cancelPlayerTasks(player);
             case "clearpos" -> clearSelectionPoints(player);
             case "about" -> messages.send(player, "about");
             default -> messages.send(player, "unknown-subcommand", args[0]);
@@ -1769,8 +1774,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 continue;
             }
             if (!pending.iterator.hasNext()) {
-                finalizePastePlanning(pending);
-                it.remove();
+                try {
+                    finalizePastePlanning(pending);
+                } catch (RuntimeException | LinkageError ex) {
+                    // Never let one paste-finalization bug cancel the global repeating scheduler.
+                    // settleInstant has its own transactional-style failure settlement; this remains
+                    // a last-resort guard for unexpected planner/finalizer integration failures.
+                    getLogger().severe("Paste finalization crashed for " + player.getName() + ": " + shortError(ex));
+                    sendProtocol(player, "error", "maxfastbuild.error.paste_precheck_failed",
+                            Map.of("count", 1, "fatal", 1, "detail", shortError(ex)));
+                } finally {
+                    it.remove();
+                }
             }
         }
     }
@@ -2195,12 +2210,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     continue;
                 }
                 if (globalRemaining <= 0) continue;
+
                 int perTask = Math.min(count, globalRemaining);
                 TaskExecutor.TickResult result = executor.tick(id, perTask);
                 globalRemaining -= result.changed() + result.skipped();
+                if (result.task().status() == TaskStatus.FAILED) {
+                    getLogger().severe("Task " + id + " failed once and was stopped safely: " + result.task().failure());
+                }
                 if (result.finished()) settlePartial(result);
-            } catch (RuntimeException ex) {
-                getLogger().severe("Task " + id + " failed: " + ex.getMessage());
+            } catch (RuntimeException | LinkageError ex) {
+                // This is now a last-resort guard for executor/settlement bugs. Per-mutation failures
+                // are converted to FAILED inside TaskExecutor so they cannot repeat every server tick.
+                getLogger().severe("Task " + id + " scheduler failure: " + shortError(ex));
             }
         }
         if (pausedOffline) tasks.flush();
@@ -2298,24 +2319,150 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         if (player != null) {
             debugLog("task settled player=" + player.getName() + " taskId=" + task.id()
-                    + " applied=" + appliedCount + " planned=" + planned + " refund=" + refund.toPlainString());
-            String key = missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed";
-            sendProtocol(player, "completed", key,
-                    Map.of("applied", appliedCount, "planned", planned, "cost", task.charged().toPlainString(),
-                            "refund", refund.toPlainString()));
+                    + " status=" + task.status() + " applied=" + appliedCount + " planned=" + planned
+                    + " refund=" + refund.toPlainString());
+            Map<String, Object> data = new HashMap<>();
+            data.put("applied", appliedCount);
+            data.put("planned", planned);
+            data.put("cost", task.charged().toPlainString());
+            data.put("refund", refund.toPlainString());
+            if (task.status() == TaskStatus.FAILED) {
+                data.put("reason", task.failure() == null ? "unknown_failure" : task.failure());
+                sendProtocol(player, "error", "maxfastbuild.task.failed", data);
+            } else {
+                String key = missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed";
+                sendProtocol(player, "completed", key, data);
+            }
         }
     }
 
-    private void resumeTasks() {
-        if (tasks == null || executor == null) return;
+    /**
+     * Never execute durable work merely because the plugin was enabled. Tasks left behind by a
+     * crash/reload may have been the reason the plugin was replaced in the first place; replaying
+     * them during enable is an unsafe side effect. Normalize live-looking rows to PAUSED_SHUTDOWN
+     * and keep every executable persisted task in an in-memory quarantine until an administrator
+     * explicitly resumes or cancels it.
+     *
+     * Tasks paused because a player disconnects during THIS plugin lifetime are not added here and
+     * still resume normally from onJoin().
+     */
+    private void quarantineStartupTasks() {
+        startupQuarantinedTasks.clear();
+        if (tasks == null) return;
+        tasks.flush();
+        Instant now = Instant.now();
+        int normalized = 0;
         for (BuildTask task : tasks.recoverable()) {
             TaskStatus status = task.status();
-            if (status != TaskStatus.RUNNING && status != TaskStatus.PAUSED_SHUTDOWN && status != TaskStatus.QUEUED) continue;
-            if (Bukkit.getPlayer(task.playerId()) == null) continue;
-            if (executor.isActive(task.id())) continue;
-            BuildTask queued = status == TaskStatus.QUEUED ? task : task.transition(TaskStatus.QUEUED, Instant.now());
-            executor.enqueue(queued);
+            if (status != TaskStatus.RUNNING && status != TaskStatus.QUEUED
+                    && status != TaskStatus.PAUSED_OFFLINE && status != TaskStatus.PAUSED_SHUTDOWN) {
+                continue;
+            }
+            BuildTask parked = task;
+            if (status == TaskStatus.RUNNING || status == TaskStatus.QUEUED) {
+                parked = task.transition(TaskStatus.PAUSED_SHUTDOWN, now);
+                tasks.save(parked);
+                normalized++;
+            }
+            startupQuarantinedTasks.add(task.id());
+            getLogger().warning("Startup quarantine task=" + task.id()
+                    + " player=" + task.playerName()
+                    + " previousStatus=" + status
+                    + " cursor=" + parked.cursor()
+                    + " applied=" + parked.appliedCount()
+                    + " planned=" + parked.plan().mutations().size());
         }
+        if (normalized > 0) tasks.flush();
+        if (!startupQuarantinedTasks.isEmpty()) {
+            getLogger().warning("Quarantined " + startupQuarantinedTasks.size()
+                    + " persisted build task(s); none will execute until /mfbadmin recovery resume <taskId|all>."
+                    + " Use /mfbadmin recovery cancel <taskId|all> to settle unwanted work safely.");
+        }
+    }
+
+    private void showRecovery(org.bukkit.command.CommandSender sender) {
+        List<BuildTask> recoverable = tasks.recoverable();
+        messages.send(sender, "recovery", recoverable.size(), ledger.pending().size());
+        sender.sendMessage("Startup quarantine: " + startupQuarantinedTasks.size() + " task(s)");
+        int shown = 0;
+        for (BuildTask task : recoverable) {
+            if (!startupQuarantinedTasks.contains(task.id())) continue;
+            sender.sendMessage(" - " + task.id() + " " + task.playerName()
+                    + " " + task.status() + " " + task.cursor() + "/" + task.plan().mutations().size()
+                    + " applied=" + task.appliedCount());
+            if (++shown >= 12) {
+                if (startupQuarantinedTasks.size() > shown) sender.sendMessage(" - ...");
+                break;
+            }
+        }
+        if (!startupQuarantinedTasks.isEmpty()) {
+            sender.sendMessage("/mfbadmin recovery resume <taskId|all>");
+            sender.sendMessage("/mfbadmin recovery cancel <taskId|all>");
+        }
+    }
+
+    private void handleQuarantinedRecovery(org.bukkit.command.CommandSender sender, String action, String selector) {
+        if (tasks == null || executor == null) return;
+        Set<UUID> requested = new LinkedHashSet<>();
+        if ("all".equalsIgnoreCase(selector)) {
+            requested.addAll(startupQuarantinedTasks);
+        } else {
+            try {
+                requested.add(UUID.fromString(selector));
+            } catch (IllegalArgumentException ex) {
+                sender.sendMessage("Invalid task UUID: " + selector);
+                return;
+            }
+        }
+        if (requested.isEmpty()) {
+            sender.sendMessage("No quarantined tasks matched.");
+            return;
+        }
+
+        int changed = 0;
+        int offline = 0;
+        int missing = 0;
+        for (UUID id : requested) {
+            if (!startupQuarantinedTasks.contains(id)) {
+                missing++;
+                continue;
+            }
+            BuildTask task = tasks.find(id).orElse(null);
+            if (task == null) {
+                startupQuarantinedTasks.remove(id);
+                missing++;
+                continue;
+            }
+            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
+                    && task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) {
+                startupQuarantinedTasks.remove(id);
+                missing++;
+                continue;
+            }
+            Player owner = Bukkit.getPlayer(task.playerId());
+            if (owner == null) {
+                offline++;
+                continue;
+            }
+            try {
+                BuildTask queued = task.status() == TaskStatus.QUEUED
+                        ? task
+                        : task.transition(TaskStatus.QUEUED, Instant.now());
+                executor.enqueue(queued);
+                if ("cancel".equalsIgnoreCase(action)) {
+                    TaskExecutor.TickResult aborted = executor.abort(id);
+                    settlePartial(aborted);
+                }
+                startupQuarantinedTasks.remove(id);
+                changed++;
+            } catch (RuntimeException ex) {
+                getLogger().warning("Recovery " + action + " failed for task " + id + ": " + ex.getMessage());
+                sender.sendMessage("Task " + id + " failed: " + shortError(ex));
+            }
+        }
+        tasks.flush();
+        sender.sendMessage(("cancel".equalsIgnoreCase(action) ? "Cancelled " : "Resumed ") + changed
+                + " quarantined task(s); ownerOffline=" + offline + ", notFound/notQuarantined=" + missing + ".");
     }
 
     private boolean handleAdmin(org.bukkit.command.CommandSender sender, String[] args) {
@@ -2358,7 +2505,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sender.sendMessage(messages.component("reloaded"));
             getLogger().info("Reloaded config; CLI language=" + messages.language());
         } else if (args[0].equalsIgnoreCase("recovery")) {
-            messages.send(sender, "recovery", tasks.recoverable().size(), ledger.pending().size());
+            if (args.length >= 3 && (args[1].equalsIgnoreCase("resume") || args[1].equalsIgnoreCase("cancel"))) {
+                handleQuarantinedRecovery(sender, args[1], args[2]);
+            } else {
+                showRecovery(sender);
+            }
         } else if (args[0].equalsIgnoreCase("torches") && args.length >= 7) {
             dumpTorches(sender, args);
         } else if (args[0].equalsIgnoreCase("giveall") && args.length >= 2) {
@@ -2532,19 +2683,62 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    /** Clear commands that have not yet become durable BuildTasks. Running tasks cannot be cancelled. */
-    private void clearPendingQueue(Player player) {
+    /** Cancel every pending or durable task owned by the player, including work already RUNNING. */
+    private void cancelPlayerTasks(Player player) {
         if (!active || tasks == null || executor == null) return;
         UUID playerId = player.getUniqueId();
-        int cleared = 0;
-        if (pendingBuilds.remove(playerId) != null) cleared++;
-        if (pendingPastes.remove(playerId) != null) cleared++;
+        int cancelled = 0;
+
+        if (pendingBuilds.remove(playerId) != null) cancelled++;
+        if (pendingPastes.remove(playerId) != null) cancelled++;
         lastPasteNeeds.remove(playerId);
-        Queue<QueuedCommand> queued = commandQueues.remove(playerId);
-        if (queued != null) cleared += queued.size();
+        Queue<QueuedCommand> queuedCommands = commandQueues.remove(playerId);
+        if (queuedCommands != null) cancelled += queuedCommands.size();
+
+        Set<UUID> handled = new HashSet<>();
+        for (UUID id : executor.activeIds()) {
+            BuildTask snapshot = executor.snapshot(id);
+            if (snapshot == null || !snapshot.playerId().equals(playerId)) continue;
+            try {
+                TaskExecutor.TickResult aborted = executor.abort(id);
+                settlePartial(aborted);
+                startupQuarantinedTasks.remove(id);
+                handled.add(id);
+                cancelled++;
+            } catch (RuntimeException ex) {
+                getLogger().warning("Cancel failed for active task " + id + ": " + ex.getMessage());
+            }
+        }
+
+        // Defensive recovery path: async persistence/reload can leave a durable active/paused row
+        // that is not currently attached to the executor. Re-attach then use the same abort path so
+        // refund/material settlement stays centralized and cursor-aware.
+        tasks.flush();
+        for (BuildTask task : tasks.recoverable()) {
+            if (!task.playerId().equals(playerId) || handled.contains(task.id())) continue;
+            if (task.status() != TaskStatus.QUEUED && task.status() != TaskStatus.RUNNING
+                    && task.status() != TaskStatus.PAUSED_OFFLINE && task.status() != TaskStatus.PAUSED_SHUTDOWN) {
+                continue;
+            }
+            try {
+                BuildTask queued = task.status() == TaskStatus.QUEUED
+                        ? task
+                        : task.transition(TaskStatus.QUEUED, Instant.now());
+                executor.enqueue(queued);
+                TaskExecutor.TickResult aborted = executor.abort(task.id());
+                settlePartial(aborted);
+                startupQuarantinedTasks.remove(task.id());
+                handled.add(task.id());
+                cancelled++;
+            } catch (RuntimeException ex) {
+                getLogger().warning("Cancel recovery failed for task " + task.id() + ": " + ex.getMessage());
+            }
+        }
+        tasks.flush();
+
         if (messages != null) {
-            if (cleared == 0) messages.send(player, "cancel-none");
-            else messages.send(player, "cancel-done", cleared);
+            if (cancelled == 0) messages.send(player, "cancel-none");
+            else messages.send(player, "cancel-done", cancelled);
         }
     }
 
@@ -2833,7 +3027,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (bukkitWorld == null) return;
         boolean allowMobs = player != null
                 && (player.getGameMode() == GameMode.CREATIVE || player.hasPermission("maxfastbuild.bypass.entities"));
-        int spawned = 0, skippedMobs = 0, cancelled = 0;
+        int spawned = 0, skippedMobs = 0, cancelled = 0, runtimeErrors = 0;
+        String firstRuntimeError = null;
         List<PendingEntity> notSpawned = new ArrayList<>();
         for (PendingEntity pe : entities) {
             if (pe.data().mob() && !allowMobs) {
@@ -2841,28 +3036,46 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 notSpawned.add(pe);
                 continue;
             }
-            PaperEntityHelper.SpawnResult result = PaperEntityHelper.spawn(bukkitWorld, pe.data(), pe.x(), pe.y(), pe.z());
-            if (result.added() && fireEntitySpawnEvent(player, result.entity(), pe.data())) {
-                spawned++;
-            } else {
-                if (!result.added()) {
-                    debugLog("paste entity spawn failed player=" + (player == null ? "?" : player.getName())
-                            + " type=" + pe.data().type() + " reason=" + (result.reason() == null ? "unknown" : result.reason()));
+            PaperEntityHelper.SpawnResult result = null;
+            try {
+                result = PaperEntityHelper.spawn(bukkitWorld, pe.data(), pe.x(), pe.y(), pe.z());
+                if (result.added() && fireEntitySpawnEvent(player, result.entity(), pe.data())) {
+                    spawned++;
+                } else {
+                    if (!result.added()) {
+                        debugLog("paste entity spawn failed player=" + (player == null ? "?" : player.getName())
+                                + " type=" + pe.data().type() + " reason="
+                                + (result.reason() == null ? "unknown" : result.reason()));
+                    }
+                    // A cancelled event (protection plugin) removes the entity so it does not linger
+                    // while its materials are refunded.
+                    if (result.added() && result.entity() != null) {
+                        result.entity().remove();
+                        cancelled++;
+                    }
+                    notSpawned.add(pe);
                 }
-                // A cancelled event (protection plugin) removes the entity so it does not linger
-                // while its materials are refunded.
-                if (result.added() && result.entity() != null) {
-                    result.entity().remove();
-                    cancelled++;
+            } catch (RuntimeException | LinkageError ex) {
+                // Third-party entity listeners are allowed to fail without aborting settlement for
+                // every other entity or the whole task. If creation happened before the listener
+                // threw, remove that entity before refunding its material.
+                if (result != null && result.added() && result.entity() != null) {
+                    try { result.entity().remove(); } catch (RuntimeException ignored) {}
                 }
+                runtimeErrors++;
+                if (firstRuntimeError == null) firstRuntimeError = shortError(ex);
                 notSpawned.add(pe);
             }
         }
         if (!notSpawned.isEmpty()) {
             returnEntityMaterials(player, notSpawned, removals);
         }
+        if (runtimeErrors > 0) {
+            getLogger().warning("Entity paste had " + runtimeErrors + " runtime error(s); first: " + firstRuntimeError);
+        }
         debugLog("entities spawned=" + spawned + " skippedMobs=" + skippedMobs
-                + " notSpawned=" + notSpawned.size() + " cancelled=" + cancelled);
+                + " notSpawned=" + notSpawned.size() + " cancelled=" + cancelled
+                + " runtimeErrors=" + runtimeErrors);
     }
 
     /**
@@ -3047,49 +3260,76 @@ if (data.billableItem() != null) {
         PaperWorldAccess world = new PaperWorldAccess();
         List<BlockMutation> mutations = plan.mutations();
         long applied = 0;
+        int cursor = 0;
         Set<Integer> unapplied = new HashSet<>();
+        List<BlockPos> appliedPositions = new ArrayList<>();
+        Throwable failure = null;
+        boolean deferredStarted = false;
+
         // Litematica-exact physics: place every block with NO_UPDATE, then one notification pass so
         // redstone computes against the final layout (see WorldAccess#beginDeferredPhysics).
-        world.beginDeferredPhysics();
         try {
+            deferredStarted = true;
+            world.beginDeferredPhysics();
             for (int i = 0; i < mutations.size(); i++) {
                 BlockMutation mutation = mutations.get(i);
-                BlockPos pos = mutation.position();
                 // Replace-by-default: a position whose current state no longer matches what the
                 // schematic expects is placed over (mayMutate/mutate handle the break), never a stop.
-                WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+                WorldAccess.ValidationResult validation = world.mayMutate(
+                        player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
                 if (!validation.allowed()) {
                     unapplied.add(i);
+                    cursor = i + 1;
                     continue;
                 }
-                WorldAccess.MutationResult result = world.mutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
+                WorldAccess.MutationResult result = world.mutate(
+                        player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
                 if (!result.changed()) {
                     unapplied.add(i);
+                    cursor = i + 1;
                     continue;
                 }
+
+                // Count/advance before audit hooks. If an audit plugin throws after the real block
+                // changed, that block must not be retried or refunded as if it never happened.
                 applied++;
+                appliedPositions.add(mutation.position());
+                cursor = i + 1;
                 audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE,
                         result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
             }
+        } catch (RuntimeException | LinkageError ex) {
+            failure = ex;
+            for (int i = cursor; i < mutations.size(); i++) unapplied.add(i);
         } finally {
-            world.endDeferredPhysics();
-        }
-        // Redstone settle: force re-place redstone components so onPlace fires against the final
-        // layout (plain update(true,true) on unchanged blocks skips onPlace and leaves torches at
-        // their partial-build state), then a cross-tick convergence tail for scheduled ticks.
-        List<BlockPos> settled = null;
-        if (applied > 0) {
-            settled = new ArrayList<>((int) applied);
-            for (int i = 0; i < mutations.size(); i++) {
-                if (!unapplied.contains(i)) settled.add(mutations.get(i).position());
+            if (deferredStarted) {
+                try {
+                    world.endDeferredPhysics();
+                } catch (RuntimeException | LinkageError ex) {
+                    if (failure == null) failure = ex;
+                    else failure.addSuppressed(ex);
+                }
             }
-            world.settlePlacements(pending.world, settled);
-            scheduleRedstoneTail(pending.world, settled);
         }
-        // Spawn pasted entities (minecarts/boats/armor stands/mobs) after the blocks are placed.
+
+        // Settle only positions that actually changed. Failure here also stops the instant operation
+        // cleanly instead of escaping into (and potentially cancelling) the global scheduler.
+        if (!appliedPositions.isEmpty()) {
+            try {
+                world.settlePlacements(pending.world, appliedPositions);
+                if (failure == null) scheduleRedstoneTail(pending.world, appliedPositions);
+            } catch (RuntimeException | LinkageError ex) {
+                if (failure == null) failure = ex;
+                else failure.addSuppressed(ex);
+            }
+        }
+
+        // Spawn entities only after a clean block phase. If block execution failed, no entity was
+        // spawned yet, so all entity materials can be returned safely without duplication.
         if (!pending.entities.isEmpty()) {
             auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, pending.removals);
-            spawnEntities(player, pending.world, pending.entities, pending.removals);
+            if (failure == null) spawnEntities(player, pending.world, pending.entities, pending.removals);
+            else returnEntityMaterials(player, pending.entities, pending.removals);
         }
         long planned = mutations.size();
         long missed = unapplied.size();
@@ -3110,7 +3350,8 @@ if (data.billableItem() != null) {
             String tx = transactionId + ":partial-refund";
             ledger.intent(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund);
             EconomyService.TransactionResult result = economy.deposit(player.getUniqueId(), refund, tx);
-            ledger.complete(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund, result.successful(), result.message());
+            ledger.complete(tx, player.getUniqueId(), player.getUniqueId(), EconomyLedger.Kind.REFUND, refund,
+                    result.successful(), result.message());
         }
         if (missed > 0) {
             auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, pending.removals);
@@ -3119,10 +3360,24 @@ if (data.billableItem() != null) {
         auditContainerTakes(player, pending.world, false, null, pending.removals);
         debugLog("paste executed player=" + player.getName()
                 + " applied=" + applied + " planned=" + planned + " skipped=" + missed
-                + " planningSkipped=" + pending.planningSkipped);
-        sendProtocol(player, "completed", missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed",
-                Map.of("applied", applied, "planned", planned, "cost", charge.total().toPlainString(),
-                        "refund", refund.toPlainString(), "skippedPlanning", pending.planningSkipped));
+                + " planningSkipped=" + pending.planningSkipped
+                + (failure == null ? "" : " failure=" + shortError(failure)));
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("applied", applied);
+        data.put("planned", planned);
+        data.put("cost", charge.total().toPlainString());
+        data.put("refund", refund.toPlainString());
+        data.put("skippedPlanning", pending.planningSkipped);
+        if (failure != null) {
+            data.put("reason", shortError(failure));
+            getLogger().severe("Instant paste failed once and was stopped safely for "
+                    + player.getName() + ": " + shortError(failure));
+            sendProtocol(player, "error", "maxfastbuild.task.failed", data);
+        } else {
+            sendProtocol(player, "completed",
+                    missed > 0 ? "maxfastbuild.task.partial" : "maxfastbuild.task.completed", data);
+        }
     }
 
     /**

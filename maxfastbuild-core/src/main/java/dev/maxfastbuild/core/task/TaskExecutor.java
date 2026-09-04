@@ -2,6 +2,7 @@ package dev.maxfastbuild.core.task;
 
 import dev.maxfastbuild.api.*;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -112,7 +113,11 @@ public final class TaskExecutor {
 
     public TickResult tick(UUID id, int blocksPerStep, boolean forceSave) {
         BuildTask task = Objects.requireNonNull(running.get(id), "Unknown running task");
-        if (task.status() == TaskStatus.QUEUED) task = task.transition(TaskStatus.RUNNING, clock.instant());
+        if (task.status() == TaskStatus.QUEUED) {
+            task = task.transition(TaskStatus.RUNNING, clock.instant());
+            // Keep the in-memory snapshot authoritative even if execution fails before this tick saves.
+            running.put(id, task);
+        }
         BuildPlan plan = task.plan();
         List<BlockMutation> mutations = plan.mutations();
         int size = mutations.size();
@@ -125,11 +130,15 @@ public final class TaskExecutor {
         int cursor = task.cursor();
         Set<Integer> skippedIndices = new HashSet<>();
         List<BlockPos> changedPositions = new ArrayList<>();
+        Throwable failure = null;
+        boolean deferredStarted = false;
+
         // Litematica-style batch physics: place every block in this step with NO_UPDATE, then run
         // one notification pass over the placed positions so redstone computes against the final
         // layout of the batch instead of a partially-built circuit.
-        world.beginDeferredPhysics();
         try {
+            deferredStarted = true;
+            world.beginDeferredPhysics();
             while (changed + skipped < blocksPerStep && cursor < size) {
                 BlockMutation mutation = mutations.get(cursor);
                 if (!replaceMismatched) {
@@ -143,36 +152,70 @@ public final class TaskExecutor {
                 }
                 WorldAccess.ValidationResult validation = world.mayMutate(playerId, worldName, mutation, operation);
                 if (!validation.allowed()) {
-                    // Offline is a temporary execution condition, not a failed mutation. Advancing
-                    // here would consume the task tail while its owner is disconnected.
+                    // Offline is temporary. Never consume the remaining task as skipped while its
+                    // owner is disconnected; Paper will detach it as PAUSED_OFFLINE.
                     if ("player_offline".equals(validation.reason())) break;
                     skipped++;
                     skippedIndices.add(cursor);
-                } else {
-                    WorldAccess.MutationResult result = world.mutate(playerId, worldName, mutation, operation);
-                    if (result.changed()) {
-                        changed++;
-                        applied++;
-                        changedPositions.add(mutation.position());
-                        audit.record(playerId, playerName, worldName, mutation, operation,
-                                result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
-                    } else {
-                        if ("player_offline".equals(result.reason())) break;
-                        skipped++;
-                        skippedIndices.add(cursor);
-                    }
+                    cursor++;
+                    continue;
                 }
+
+                WorldAccess.MutationResult result = world.mutate(playerId, worldName, mutation, operation);
+                if (!result.changed()) {
+                    if ("player_offline".equals(result.reason())) break;
+                    skipped++;
+                    skippedIndices.add(cursor);
+                    cursor++;
+                    continue;
+                }
+
+                // The world changed successfully. Advance the cursor BEFORE calling audit hooks so
+                // an audit/plugin exception cannot make settlement refund or retry an already-applied block.
+                changed++;
+                applied++;
+                changedPositions.add(mutation.position());
                 cursor++;
+                audit.record(playerId, playerName, worldName, mutation, operation,
+                        result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
             }
+        } catch (RuntimeException | LinkageError ex) {
+            failure = ex;
         } finally {
-            world.endDeferredPhysics();
+            if (deferredStarted) {
+                try {
+                    world.endDeferredPhysics();
+                } catch (RuntimeException | LinkageError ex) {
+                    if (failure == null) failure = ex;
+                    else failure.addSuppressed(ex);
+                }
+            }
         }
+
+        // Settle blocks that really changed even when a later mutation/audit failed. This keeps the
+        // partial build internally consistent before it is refunded and marked FAILED.
         if (!changedPositions.isEmpty()) {
-            world.settlePlacements(worldName, changedPositions);
+            try {
+                world.settlePlacements(worldName, changedPositions);
+            } catch (RuntimeException | LinkageError ex) {
+                if (failure == null) failure = ex;
+                else failure.addSuppressed(ex);
+            }
         }
         if (cursor != task.cursor()) {
             task = task.advance(cursor, applied, skippedIndices, clock.instant());
         }
+
+        if (failure != null) {
+            Instant now = clock.instant();
+            task = task.transition(TaskStatus.FAILED, now).withFailure(failureMessage(failure), now);
+            running.remove(id);
+            decrementPlayerCount(playerId);
+            repository.save(task);
+            repository.flush();
+            return new TickResult(task, changed, skipped, task.appliedCount(), true);
+        }
+
         boolean finished = cursor == size;
         if (finished) {
             task = task.transition(TaskStatus.COMPLETED, clock.instant());
@@ -188,6 +231,12 @@ public final class TaskExecutor {
             }
         }
         return new TickResult(task, changed, skipped, task.appliedCount(), finished);
+    }
+
+    private static String failureMessage(Throwable failure) {
+        String message = failure.getMessage();
+        String text = failure.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
+        return text.length() <= 1000 ? text : text.substring(0, 1000);
     }
 
     private void decrementPlayerCount(UUID playerId) {

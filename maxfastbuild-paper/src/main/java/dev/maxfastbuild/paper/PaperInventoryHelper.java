@@ -40,6 +40,24 @@ final class PaperInventoryHelper {
 
     /** Block-state ids that are billed as a different (mapped) item; generic suffix rules live in {@link #genericBlockToItem}. */
     private static final Map<String, String> BLOCK_TO_ITEM = Map.ofEntries(
+            // Blocks whose in-world Material is not the inventory item a player actually uses.
+            // Keep this mapping canonical: billing and synthetic player-place events both use it.
+            Map.entry("minecraft:redstone_wire", "minecraft:redstone"),
+            Map.entry("minecraft:tripwire", "minecraft:string"),
+            Map.entry("minecraft:wall_torch", "minecraft:torch"),
+            Map.entry("minecraft:cocoa", "minecraft:cocoa_beans"),
+            Map.entry("minecraft:wheat", "minecraft:wheat_seeds"),
+            Map.entry("minecraft:carrots", "minecraft:carrot"),
+            Map.entry("minecraft:potatoes", "minecraft:potato"),
+            Map.entry("minecraft:beetroots", "minecraft:beetroot_seeds"),
+            Map.entry("minecraft:melon_stem", "minecraft:melon_seeds"),
+            Map.entry("minecraft:attached_melon_stem", "minecraft:melon_seeds"),
+            Map.entry("minecraft:pumpkin_stem", "minecraft:pumpkin_seeds"),
+            Map.entry("minecraft:attached_pumpkin_stem", "minecraft:pumpkin_seeds"),
+            Map.entry("minecraft:sweet_berry_bush", "minecraft:sweet_berries"),
+            Map.entry("minecraft:cave_vines", "minecraft:glow_berries"),
+            Map.entry("minecraft:cave_vines_plant", "minecraft:glow_berries"),
+            Map.entry("minecraft:bamboo_sapling", "minecraft:bamboo"),
             Map.entry("minecraft:snow_layer", "minecraft:snow"),
             Map.entry("minecraft:big_dripleaf_stem", "minecraft:big_dripleaf"),
             Map.entry("minecraft:pitcher_crop", "minecraft:pitcher_plant"),
@@ -66,33 +84,37 @@ final class PaperInventoryHelper {
     }
 
     /**
-     * Map a block-state id to the item a survival player must pay to place it. Wall/potted/snow
-     * variants have no inventory item of their own and previously made the whole paste fail; the
-     * mapped result is verified to actually be an item, otherwise the raw id is kept (and the paste
-     * falls back to today's rejection).
+     * Map a block-state id to the inventory item a survival player uses to create it. This mapping
+     * is deliberately pure/string-only; runtime callers that require an ItemStack validate the
+     * mapped Material separately via {@link #placementItemFromBlockState(String)}.
      */
     static String itemKeyFromBlockState(String blockState) {
         if (blockState == null) return null;
         int bracket = blockState.indexOf('[');
         String id = bracket > 0 ? blockState.substring(0, bracket) : blockState;
-        String mapped = genericBlockToItem(id);
-        if (mapped != null && !mapped.equals(id)) {
-            Material check = resolveMaterial(mapped);
-            if (check != null && check.isItem()) return mapped;
-        }
-        return id;
+        return genericBlockToItem(id);
+    }
+
+    /** Inventory item that represents a directly placeable block state, or null for derived/transient states. */
+    static Material placementItemFromBlockState(String blockState) {
+        Material material = resolveMaterial(itemKeyFromBlockState(blockState));
+        return material != null && material.isItem() ? material : null;
     }
 
     private static String genericBlockToItem(String id) {
         if (id == null || !id.startsWith("minecraft:")) return id;
+        String explicit = BLOCK_TO_ITEM.get(id);
+        if (explicit != null) return explicit;
         if (id.startsWith("minecraft:potted_")) return "minecraft:flower_pot";
         if (id.endsWith("_wall_hanging_sign")) return id.substring(0, id.length() - "_wall_hanging_sign".length()) + "_hanging_sign";
         if (id.endsWith("_wall_sign")) return id.substring(0, id.length() - "_wall_sign".length()) + "_sign";
         if (id.endsWith("_wall_torch")) return id.substring(0, id.length() - "_wall_torch".length()) + "_torch";
         if (id.endsWith("_wall_banner")) return id.substring(0, id.length() - "_wall_banner".length()) + "_banner";
+        if (id.endsWith("_wall_head")) return id.substring(0, id.length() - "_wall_head".length()) + "_head";
+        if (id.endsWith("_wall_skull")) return id.substring(0, id.length() - "_wall_skull".length()) + "_skull";
         if (id.endsWith("_coral_wall_fan")) return id.substring(0, id.length() - "_wall_fan".length()) + "_fan";
         if (id.endsWith("_plant")) return id.substring(0, id.length() - "_plant".length());
-        return BLOCK_TO_ITEM.getOrDefault(id, id);
+        return id;
     }
 
     /** Search configuration for one material-consuming operation. */
@@ -834,7 +856,10 @@ final class PaperInventoryHelper {
     }
 
     static boolean isFluid(Material material) {
-        return material == Material.WATER || material == Material.LAVA;
+        // Bucket-placeable source blocks are token-gated rather than consumed. Powder snow follows
+        // the same inventory semantics as water/lava: the filled bucket must exist, but placement
+        // returns an empty bucket instead of consuming the container itself.
+        return material == Material.WATER || material == Material.LAVA || material == Material.POWDER_SNOW;
     }
 
     static boolean isFire(Material material) {
@@ -881,6 +906,7 @@ final class PaperInventoryHelper {
     private static Material fluidBucket(Material fluid) {
         if (fluid == Material.WATER) return Material.WATER_BUCKET;
         if (fluid == Material.LAVA) return Material.LAVA_BUCKET;
+        if (fluid == Material.POWDER_SNOW) return Material.POWDER_SNOW_BUCKET;
         return null;
     }
 

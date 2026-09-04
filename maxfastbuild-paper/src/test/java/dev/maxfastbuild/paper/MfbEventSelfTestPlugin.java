@@ -51,15 +51,89 @@ public final class MfbEventSelfTestPlugin extends JavaPlugin {
             settlePlacements = worldAccessClass.getMethod("settlePlacements", String.class, List.class);
             settlePlacements.setAccessible(true);
 
+            runBlockItemMappingTest();
             runNkvdTntTest();
             runCoreProtectDedupTest();
             runCoreProtectReplacementDedupTest();
             runPrismBreakDedupProbe();
             runMachineEquivalenceTest();
         } catch (Throwable t) {
+            // Keep the self-test plugin loaded until server shutdown. Prism records asynchronously;
+            // closing this plugin's classloader immediately after an event can make Prism's delayed
+            // batch resolve classes through a closed JAR and create a false-positive zip-file error.
             fail("bootstrap", t);
-            Bukkit.getPluginManager().disablePlugin(this);
         }
+    }
+
+    private void runBlockItemMappingTest() throws Exception {
+        Object mfbPlugin = Bukkit.getPluginManager().getPlugin("MaxFastBuild");
+        if (mfbPlugin == null) throw new IllegalStateException("MaxFastBuild plugin unavailable in item mapping selftest");
+        ClassLoader loader = mfbPlugin.getClass().getClassLoader();
+        Class<?> helper = Class.forName("dev.maxfastbuild.paper.PaperInventoryHelper", true, loader);
+        Method placementItem = helper.getDeclaredMethod("placementItemFromBlockState", String.class);
+        placementItem.setAccessible(true);
+        Method isFluid = helper.getDeclaredMethod("isFluid", Material.class);
+        isFluid.setAccessible(true);
+        Method isFreeBlock = helper.getDeclaredMethod("isFreeBlock", Material.class);
+        isFreeBlock.setAccessible(true);
+
+        Map<String, Material> cases = new LinkedHashMap<>();
+        cases.put("minecraft:redstone_wire[power=0]", Material.REDSTONE);
+        cases.put("minecraft:tripwire[attached=false,disarmed=false,east=false,north=false,powered=false,south=false,west=false]", Material.STRING);
+        cases.put("minecraft:wall_torch[facing=north]", Material.TORCH);
+        cases.put("minecraft:redstone_wall_torch[facing=east,lit=true]", Material.REDSTONE_TORCH);
+        cases.put("minecraft:cocoa[age=2,facing=south]", Material.COCOA_BEANS);
+        cases.put("minecraft:wheat[age=7]", Material.WHEAT_SEEDS);
+        cases.put("minecraft:player_wall_head[facing=north]", Material.PLAYER_HEAD);
+        cases.put("minecraft:wither_skeleton_wall_skull[facing=east]", Material.WITHER_SKELETON_SKULL);
+
+        for (Map.Entry<String, Material> entry : cases.entrySet()) {
+            Material actual = (Material) placementItem.invoke(null, entry.getKey());
+            if (actual != entry.getValue()) {
+                throw new IllegalStateException("placement item mismatch for " + entry.getKey()
+                        + ": expected=" + entry.getValue() + " actual=" + actual);
+            }
+            // This is the exact constructor that previously exploded for REDSTONE_WIRE.
+            ItemStack stack = new ItemStack(actual);
+            if (stack.getType() != entry.getValue()) {
+                throw new IllegalStateException("ItemStack mismatch for " + entry.getKey());
+            }
+        }
+        if (Material.REDSTONE_WIRE.isItem()) {
+            throw new IllegalStateException("test assumption changed: REDSTONE_WIRE unexpectedly became an item");
+        }
+        if (!((Boolean) isFluid.invoke(null, Material.POWDER_SNOW))
+                || ((Boolean) isFreeBlock.invoke(null, Material.POWDER_SNOW))) {
+            throw new IllegalStateException("POWDER_SNOW must require bucket-token semantics, not free placement");
+        }
+
+        List<String> resolvedBlockOnly = new ArrayList<>();
+        List<String> unresolvedBlockOnly = new ArrayList<>();
+        for (Material material : Material.values()) {
+            if (!material.isBlock() || material.isAir() || material.isItem()) continue;
+            Material mapped = (Material) placementItem.invoke(null, material.getKey().toString());
+            if (mapped == null) unresolvedBlockOnly.add(material.name());
+            else resolvedBlockOnly.add(material.name() + "->" + mapped.name());
+        }
+        getLogger().info("BLOCK ITEM AUDIT resolved=" + resolvedBlockOnly);
+        getLogger().info("BLOCK ITEM AUDIT unresolved=" + unresolvedBlockOnly);
+        java.util.Set<String> expectedDerived = java.util.Set.of(
+                "BLACK_CANDLE_CAKE", "BLUE_CANDLE_CAKE", "BROWN_CANDLE_CAKE", "BUBBLE_COLUMN", "CANDLE_CAKE",
+                "CYAN_CANDLE_CAKE", "END_GATEWAY", "END_PORTAL", "FIRE", "FROSTED_ICE", "GRAY_CANDLE_CAKE",
+                "GREEN_CANDLE_CAKE", "LAVA", "LAVA_CAULDRON", "LIGHT_BLUE_CANDLE_CAKE", "LIGHT_GRAY_CANDLE_CAKE",
+                "LIME_CANDLE_CAKE", "MAGENTA_CANDLE_CAKE", "MOVING_PISTON", "NETHER_PORTAL", "ORANGE_CANDLE_CAKE",
+                "PINK_CANDLE_CAKE", "PISTON_HEAD", "POWDER_SNOW", "POWDER_SNOW_CAULDRON", "PURPLE_CANDLE_CAKE",
+                "RED_CANDLE_CAKE", "SOUL_FIRE", "TALL_SEAGRASS", "WATER", "WATER_CAULDRON", "WHITE_CANDLE_CAKE",
+                "YELLOW_CANDLE_CAKE");
+        java.util.Set<String> actualDerived = java.util.Set.copyOf(unresolvedBlockOnly);
+        if (!actualDerived.equals(expectedDerived)) {
+            java.util.Set<String> unexpected = new java.util.TreeSet<>(actualDerived);
+            unexpected.removeAll(expectedDerived);
+            java.util.Set<String> missing = new java.util.TreeSet<>(expectedDerived);
+            missing.removeAll(actualDerived);
+            throw new IllegalStateException("block-only placement mapping drift: unexpected=" + unexpected + " missing=" + missing);
+        }
+        getLogger().info("BLOCK ITEM SELFTEST PASS: every directly placeable block-only state maps to a real item; remaining states are explicitly-derived/native-action states");
     }
 
     private void runNkvdTntTest() throws Exception {
@@ -351,7 +425,8 @@ public final class MfbEventSelfTestPlugin extends JavaPlugin {
         } finally {
             clearBox(world, baseline);
             clearBox(world, evented);
-            Bukkit.getPluginManager().disablePlugin(this);
+            // Do not self-disable here; Prism may still be committing async records from this test.
+            // The server shutdown will close this classloader after those async tasks are drained.
         }
     }
 

@@ -43,6 +43,7 @@
   "maxfastbuild.error.paste_precheck_failed": "⚠ Paste precheck failed: %s items could not be pasted (%s fatal — may be server version incompatibility). Details: %s. Report to the admin. To skip unknown items, try running with 'Skip NBT/Skip entities' enabled.",
   "maxfastbuild.task.completed": "Task complete: %s / %s applied, cost %s, refund %s",
   "maxfastbuild.task.partial": "Task partial: %s / %s applied, cost %s, refunded %s",
+  "maxfastbuild.task.failed": "Task stopped after a server execution error: %s / %s applied, cost %s, refund %s. Reason: %s",
   "maxfastbuild.error.protocol": "Protocol request rejected: %s",
   "maxfastbuild.error.malformed": "Malformed request: %s",
   "maxfastbuild.error.rate_limited": "Too many build requests",
