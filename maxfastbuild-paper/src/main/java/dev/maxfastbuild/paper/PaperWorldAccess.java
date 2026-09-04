@@ -4,8 +4,12 @@ import dev.maxfastbuild.api.*;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.bukkit.block.BlockSupport;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.block.data.MultipleFacing;
+import org.bukkit.block.data.type.Fence;
+import org.bukkit.block.data.type.Gate;
+import org.bukkit.block.data.type.GlassPane;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 
@@ -54,17 +58,16 @@ final class PaperWorldAccess implements WorldAccess {
     }
 
     /**
-     * Recalculate pane/fence connections ({@link GlassPane} / {@link Fence}) after all blocks are placed.
+     * Recalculate vanilla bar/pane and fence connections after all blocks are placed.
      * <p>
-     * {@code setBlockData} bakes default connection properties ({@code east=false, …}) into the
-     * placed block. {@link #settlePlaced} only triggers redstone/water physics — it does NOT
-     * recalculate directional connections. This pass forces every pane/fence in and around the
-     * fill region to re-evaluate its neighbours and form connections.
+     * {@code setBlockData} bakes the schematic's directional properties into the placed block. In a
+     * deferred bulk paste those properties can describe the schematic neighbourhood rather than the
+     * final live neighbourhood (especially at the paste boundary). Re-evaluate only Bukkit's
+     * {@link GlassPane}/{@link Fence} data families after the whole batch exists.
      * <p>
-     * Redstone safety: this only touches non-conductive {@code GlassPane}/{@code Fence} blocks and
-     * applies them with {@code applyPhysics=false} (client render update only, no neighbour physics,
-     * no scheduled ticks), so redstone machine timing/state is unaffected. Each connection is set
-     * explicitly on both sides, so neighbour propagation is not needed.
+     * The predicates below intentionally mirror the vanilla 26.2 IronBarsBlock/FenceBlock rules:
+     * sturdy full faces are connectable even when transparent (for example plain glass), bars also
+     * connect to bars/walls, and fences respect wooden-vs-non-wooden groups plus fence-gate facing.
      */
     private static void fixConnections(World world, List<BlockPos> positions) {
         Set<BlockPos> processed = new HashSet<>();
@@ -90,16 +93,22 @@ final class PaperWorldAccess implements WorldAccess {
     private static int[] recalcConnections(Block block, Set<BlockPos> processed) {
         BlockPos key = new BlockPos(block.getX(), block.getY(), block.getZ());
         if (!processed.add(key)) return new int[]{0, 0};
+
+        Material selfType = block.getType();
         org.bukkit.block.BlockState state = block.getState();
         BlockData data = state.getBlockData();
-        if (!(data instanceof MultipleFacing)) return new int[]{0, 0};
+        boolean pane = data instanceof GlassPane;
+        boolean fence = data instanceof Fence;
+        if ((!pane && !fence) || !(data instanceof MultipleFacing)) return new int[]{0, 0};
         MultipleFacing mf = (MultipleFacing) data.clone();
         boolean changed = false;
         java.util.Set<BlockFace> allowed = mf.getAllowedFaces();
         for (BlockFace face : HORIZONTAL) {
             if (!allowed.contains(face)) continue;
             Block neighbor = block.getRelative(face);
-            boolean should = shouldConnect(block, neighbor);
+            boolean should = pane
+                    ? paneShouldConnect(neighbor, face)
+                    : fenceShouldConnect(selfType, neighbor, face);
             if (mf.hasFace(face) != should) {
                 mf.setFace(face, should);
                 changed = true;
@@ -107,17 +116,59 @@ final class PaperWorldAccess implements WorldAccess {
         }
         if (changed) {
             state.setBlockData(mf);
-            state.update(true, true);
+            state.update(true, false);
             return new int[]{1, 1};
         }
         return new int[]{1, 0};
     }
 
-    private static boolean shouldConnect(Block self, Block neighbor) {
+    /** Vanilla IronBarsBlock.attachsTo: sturdy non-exception block, another bar/pane, or a wall. */
+    static boolean paneShouldConnect(Block neighbor, BlockFace faceFromSelf) {
         Material neighborType = neighbor.getType();
         if (neighborType.isAir()) return false;
-        if (neighborType == self.getType()) return true;
-        return neighborType.isSolid() && neighborType.isOccluding();
+        if (neighbor.getBlockData() instanceof GlassPane || Tag.WALLS.isTagged(neighborType)) return true;
+        return hasConnectableFullFace(neighbor, faceFromSelf);
+    }
+
+    /** Vanilla FenceBlock.connectsTo: sturdy non-exception block, compatible fence, or oriented gate. */
+    static boolean fenceShouldConnect(Material selfType, Block neighbor, BlockFace faceFromSelf) {
+        Material neighborType = neighbor.getType();
+        if (neighborType.isAir()) return false;
+
+        if (Tag.FENCES.isTagged(neighborType)
+                && Tag.WOODEN_FENCES.isTagged(neighborType) == Tag.WOODEN_FENCES.isTagged(selfType)) {
+            return true;
+        }
+        BlockData neighborData = neighbor.getBlockData();
+        if (neighborData instanceof Gate gate && gateConnectsTo(gate, faceFromSelf)) {
+            return true;
+        }
+        return hasConnectableFullFace(neighbor, faceFromSelf);
+    }
+
+    private static boolean hasConnectableFullFace(Block neighbor, BlockFace faceFromSelf) {
+        Material type = neighbor.getType();
+        if (isConnectionException(type)) return false;
+        return neighbor.getBlockData().isFaceSturdy(faceFromSelf.getOppositeFace(), BlockSupport.FULL);
+    }
+
+    /** Mirrors Block.isExceptionForConnection in vanilla 26.2. */
+    static boolean isConnectionException(Material type) {
+        return Tag.LEAVES.isTagged(type)
+                || type == Material.BARRIER
+                || type == Material.CARVED_PUMPKIN
+                || type == Material.JACK_O_LANTERN
+                || type == Material.MELON
+                || type == Material.PUMPKIN
+                || Tag.SHULKER_BOXES.isTagged(type);
+    }
+
+    /** A fence connects to the broad side of a gate, never along the gate's opening axis. */
+    static boolean gateConnectsTo(Gate gate, BlockFace faceFromSelf) {
+        BlockFace facing = gate.getFacing();
+        boolean gateFacesX = facing == BlockFace.EAST || facing == BlockFace.WEST;
+        boolean neighbourOnZ = faceFromSelf == BlockFace.NORTH || faceFromSelf == BlockFace.SOUTH;
+        return gateFacesX == neighbourOnZ;
     }
 
     @Override public String stateAt(String world, BlockPos position) {
