@@ -27,7 +27,7 @@
   "maxfastbuild.paste.option.skip_entities": "跳过全部实体（船/矿车/画/展示框/盔甲架）",
   "maxfastbuild.paste.option.skip_mobs": "仅跳过生物实体（村民/牛羊等）",
   "maxfastbuild.paste.option.skip_drops": "跳过掉落物实体（地上的物品）",
-  "maxfastbuild.paste.option.skip_contents": "跳过容器内物品（箱子/木桶等置空）",
+  "maxfastbuild.paste.option.skip_contents": "跳过容器内物品（不粘贴原理图内容；保留已有容器物品）",
   "maxfastbuild.paste.option.skip_nbt": "跳过 NBT 标签（清除箱子/告示牌内容）",
   "maxfastbuild.paste.option.instant": "即时粘贴（付费、同步执行）",
   "maxfastbuild.paste.settings.start": "开始粘贴",

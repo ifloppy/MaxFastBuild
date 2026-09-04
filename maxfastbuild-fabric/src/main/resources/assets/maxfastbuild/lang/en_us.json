@@ -27,7 +27,7 @@
   "maxfastbuild.paste.option.skip_entities": "Skip entities (boats/minecarts/paintings/item frames/armor stands)",
   "maxfastbuild.paste.option.skip_mobs": "Skip living mobs only (villagers/cows/sheep, etc.)",
   "maxfastbuild.paste.option.skip_drops": "Skip dropped item entities (items on the ground)",
-  "maxfastbuild.paste.option.skip_contents": "Skip container contents (paste empty chests/barrels)",
+  "maxfastbuild.paste.option.skip_contents": "Skip container contents (do not paste schematic items; preserve existing container items)",
   "maxfastbuild.paste.option.skip_nbt": "Skip NBT tags (clear chest/sign contents)",
   "maxfastbuild.paste.option.instant": "Instant paste (paid, synchronous)",
   "maxfastbuild.paste.settings.start": "Start Paste",

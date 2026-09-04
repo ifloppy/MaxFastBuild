@@ -1596,6 +1596,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             int brace = raw.indexOf('{');
             String target = brace >= 0 ? raw.substring(0, brace) : raw;
             String targetNbt = brace >= 0 ? raw.substring(brace) : null;
+            boolean preserveContents;
             if (targetNbt != null && PaperNbtHelper.parseCompound(targetNbt) == null) {
                 debugLog("paste rejected player=" + player.getName()
                         + " reason=unparseable_nbt raw=\"" + raw + "\"");
@@ -1609,16 +1610,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 sendProtocol(player, "error", "maxfastbuild.error.invalid_material", Map.of("material", target));
                 return;
             }
+            preserveContents = skipContents && PaperNbtHelper.hasSkippableContentFields(material);
             if (skipContents && targetNbt != null) {
-                // Empty-container paste: drop every billable content field (Items/Book/RecordItem/
-                // pot item/sherds) so nothing is billed and nothing is placed inside the tile.
+                // The client normally strips storage fields before sending, but the server repeats
+                // the strip authoritatively for old/malicious clients. preserveContents is based on
+                // the target tile type, not on whether an Items tag survived transport.
                 String stripped = PaperNbtHelper.stripContentFields(targetNbt, material);
-                targetNbt = stripped == null ? targetNbt : stripped;
+                if (stripped != null) targetNbt = stripped;
             }
             if (material.isAir() || !material.isBlock() || RestrictedMaterials.isForbiddenPlace(material)) {
                 continue;
             }
-            PastePos pastePos = new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()), target, targetNbt);
+            PastePos pastePos = new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()),
+                    target, targetNbt, preserveContents);
             if (!regionMetrics.contains(pastePos.position())) {
                 sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "entry_outside_region"));
                 return;
@@ -1761,6 +1765,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         int minHeight = selectedWorld.getMinHeight();
         int maxHeight = selectedWorld.getMaxHeight();
+        Object registry = PaperNbtHelper.registryAccess(selectedWorld);
         for (int i = 0; i < batch && pending.iterator.hasNext(); i++) {
             PastePos pp = pending.iterator.next();
             pending.processed++;
@@ -1779,8 +1784,23 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 pending.planningSkipped++;
                 continue;
             }
-            if (before.equals(pp.targetState()) && pp.targetNbt() == null) continue;
-            BlockMutation mutation = new BlockMutation(pos, before, pp.targetState(), pp.targetNbt());
+            if (before.equals(pp.targetState())) {
+                if (pp.targetNbt() == null) continue;
+                Block liveBlock = selectedWorld.getBlockAt(pos.x(), pos.y(), pos.z());
+                try {
+                    if (PaperNbtHelper.targetNbtAlreadyPresent(liveBlock, liveBlock.getType(), pp.targetNbt(),
+                            pp.preserveContents(), registry)) {
+                        continue;
+                    }
+                } catch (LinkageError | RuntimeException ex) {
+                    // Comparison is an optimization only. If this server version cannot read the
+                    // live tile safely, fall back to the normal validated mutation rather than
+                    // incorrectly treating a possibly-incomplete block as already satisfied.
+                    debugLog("paste NBT compare unavailable pos=" + pos + " target=" + pp.targetState()
+                            + " error=" + shortError(ex));
+                }
+            }
+            BlockMutation mutation = new BlockMutation(pos, before, pp.targetState(), pp.targetNbt(), pp.preserveContents());
             WorldAccess.ValidationResult validation;
             try {
                 validation = world.mayMutate(player.getUniqueId(), pending.world, mutation, OperationKind.PLACE);
@@ -1797,9 +1817,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 continue;
             }
             pending.mutations.add(mutation);
-            if (PaperWorldAccess.requiresBreakToReplace(before)) {
-                pending.replaceBreakCount++;
-            }
+            if (mutationNeedsReplaceBreak(mutation)) pending.replaceBreakCount++;
             if (pending.mutations.size() > pending.maxAffectedBlocks) {
                 return new PlanningError("maxfastbuild.error.affected_too_large",
                         Map.of("actual", pending.mutations.size(), "limit", pending.maxAffectedBlocks));
@@ -2184,7 +2202,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         long replaceBreaks = 0;
         if (task.plan().operation() == OperationKind.PLACE) {
             for (BlockMutation mutation : task.plan().mutations()) {
-                if (PaperWorldAccess.requiresBreakToReplace(mutation.expectedState())) replaceBreaks++;
+                if (mutationNeedsReplaceBreak(mutation)) replaceBreaks++;
             }
         }
         BigDecimal areaPart = policy.perAreaEnabled()
@@ -2643,11 +2661,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Per-block materials and exact container contents a paste consumes. The container block itself
-     * is billed as one plain block item (its material key); every item inside its {@code Items} NBT
-     * is billed as an exact-match item (same type + meta). Throws {@link PasteRejectException} when
-     * block-entity NBT cannot be parsed or contains a forbidden/undecodable item — a paste carrying
-     * NBT is rejected outright rather than placed empty.
+     * Per-block materials and exact container contents a paste consumes. A block item is charged
+     * only when execution will actually place/replace that block; an existing matching tile that
+     * only receives NBT consumes no second chest/barrel/etc. Its pasted NBT contents (when not
+     * skipped) are still billed exactly. Throws {@link PasteRejectException} for unsafe NBT.
      */
     private static PasteMaterials collectPasteMaterials(World world, List<BlockMutation> mutations) {
         Map<String, Long> blocks = new LinkedHashMap<>();
@@ -2656,15 +2673,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         for (BlockMutation mutation : mutations) {
             String blockKey = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
             Material blockMaterial = PaperInventoryHelper.resolveMaterial(blockKey);
-            // Derived/transient blocks without an inventory item (piston heads, stems, frosted ice)
-            // are placed free; fluids and fire are billed as tokens below.
-            if (blockMaterial != null && PaperInventoryHelper.isFreeBlock(blockMaterial)) {
-                if (mutation.targetNbt() != null) {
-                    throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
+            boolean consumesBlockItem = mutationConsumesBlockItem(mutation);
+            if (consumesBlockItem) {
+                // Derived/transient blocks without an inventory item (piston heads, stems, frosted ice)
+                // are placed free; fluids and fire are billed as tokens below.
+                if (blockMaterial != null && PaperInventoryHelper.isFreeBlock(blockMaterial)) {
+                    if (mutation.targetNbt() != null) {
+                        throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
+                    }
+                    continue;
                 }
-                continue;
+                blocks.merge(blockKey, 1L, Long::sum);
             }
-            blocks.merge(blockKey, 1L, Long::sum);
             if (mutation.targetNbt() == null) continue;
             if (registry == null) throw new PasteRejectException("maxfastbuild.error.nbt_unavailable", Map.of());
             Material tileMaterial;
@@ -2688,6 +2708,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
         return new PasteMaterials(blocks, contents);
+    }
+
+    /** A mutation consumes a block item only when it really places/replaces the target block. */
+    private static boolean mutationConsumesBlockItem(BlockMutation mutation) {
+        if (mutation.expectedState().equals(mutation.targetState())) return false;
+        return !PaperWorldAccess.canPreserveContentsInPlace(
+                mutation.expectedState(), mutation.targetState(), mutation.preserveContents());
+    }
+
+    /** Whether execution must physically break the current solid occupant before placing. */
+    private static boolean mutationNeedsReplaceBreak(BlockMutation mutation) {
+        return mutationConsumesBlockItem(mutation)
+                && PaperWorldAccess.requiresBreakToReplace(mutation.expectedState());
     }
 
     private record PasteMaterials(Map<String, Long> blocks, Map<org.bukkit.inventory.ItemStack, Long> contents) {}
@@ -2904,16 +2937,18 @@ if (data.billableItem() != null) {
         // (player inventory or nearby container); leftovers fall back to the player.
         if (removals != null) {
             for (BlockMutation mutation : unused) {
-                String key = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
-                Material blockMaterial = PaperInventoryHelper.resolveMaterial(key);
-                // Fire blocks consume flint-and-steel durability (recorded under FLINT_AND_STEEL),
-                // so an unapplied fire block refunds one flint use, never a fire item.
-                if (blockMaterial != null && PaperInventoryHelper.isFire(blockMaterial)) {
-                    removals.refundMaterial("minecraft:flint_and_steel", 1);
-                } else if (player != null) {
-                    removals.refundOrGive(player, key, 1);
-                } else {
-                    removals.refundMaterial(key, 1);
+                if (mutationConsumesBlockItem(mutation)) {
+                    String key = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
+                    Material blockMaterial = PaperInventoryHelper.resolveMaterial(key);
+                    // Fire blocks consume flint-and-steel durability (recorded under FLINT_AND_STEEL),
+                    // so an unapplied fire block refunds one flint use, never a fire item.
+                    if (blockMaterial != null && PaperInventoryHelper.isFire(blockMaterial)) {
+                        removals.refundMaterial("minecraft:flint_and_steel", 1);
+                    } else if (player != null) {
+                        removals.refundOrGive(player, key, 1);
+                    } else {
+                        removals.refundMaterial(key, 1);
+                    }
                 }
                 for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
                     if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
@@ -2927,10 +2962,12 @@ if (data.billableItem() != null) {
         }
         if (player != null) {
             for (BlockMutation mutation : unused) {
-                String key = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
-                Material material = PaperInventoryHelper.resolveMaterial(key);
-                if (material != null && !SeedCatalog.isSeeded(material)) {
-                    PaperInventoryHelper.giveOrDrop(player, key, 1);
+                if (mutationConsumesBlockItem(mutation)) {
+                    String key = PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState());
+                    Material material = PaperInventoryHelper.resolveMaterial(key);
+                    if (material != null && !SeedCatalog.isSeeded(material)) {
+                        PaperInventoryHelper.giveOrDrop(player, key, 1);
+                    }
                 }
                 for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
                     if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
@@ -2945,9 +2982,12 @@ if (data.billableItem() != null) {
         if (world == null) return;
         Location loc = new Location(world, unused.getFirst().position().x() + 0.5, unused.getFirst().position().y() + 0.5, unused.getFirst().position().z() + 0.5);
         for (BlockMutation mutation : unused) {
-            org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()));
-            if (mat != null && mat.isItem()) {
-                world.dropItemNaturally(loc, new org.bukkit.inventory.ItemStack(mat, 1));
+            if (mutationConsumesBlockItem(mutation)) {
+                org.bukkit.Material mat = PaperInventoryHelper.resolveMaterial(
+                        PaperInventoryHelper.itemKeyFromBlockState(mutation.targetState()));
+                if (mat != null && mat.isItem()) {
+                    world.dropItemNaturally(loc, new org.bukkit.inventory.ItemStack(mat, 1));
+                }
             }
             for (PaperNbtHelper.ItemInstance item : billableItems(mutation.targetState(), mutation.targetNbt(), registry)) {
                 if (item.bukkit() == null || item.bukkit().getType().isAir() || item.count() <= 0) continue;
@@ -3322,7 +3362,7 @@ if (data.billableItem() != null) {
     }
 
     /** Absolute position and its palette target state (client-supplied, re-validated per tick). */
-    private record PastePos(BlockPos position, String targetState, String targetNbt) {}
+    private record PastePos(BlockPos position, String targetState, String targetNbt, boolean preserveContents) {}
 
     private record PasteRegionMetrics(Bounds bounds, long volume, List<PasteTransfer.Region> regions) {
         long sizeX() { return bounds.sizeX(); }

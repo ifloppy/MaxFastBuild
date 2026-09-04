@@ -198,7 +198,7 @@ public final class PasteTransfer {
      * Split a paste into {@link Payload} parts. Every part repeats the full palette.
      *
      * @param instant true when the paste should be executed immediately by the server (paid, capped size)
-     * @param skipContents true when the client asked to paste containers empty (no contents billed or placed)
+     * @param skipContents true when schematic container contents should be omitted; existing destination contents are preserved
      * @throws IllegalArgumentException when the paste exceeds {@link #MAX_PARTS}.
      */
     public static List<Payload> split(String pasteSessionId, int[] origin, List<String> palette, List<Entry> entries,

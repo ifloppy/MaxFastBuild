@@ -4,7 +4,10 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.Chest;
 import org.bukkit.block.TileState;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 
 import java.lang.reflect.Method;
@@ -322,6 +325,192 @@ final class PaperNbtHelper {
             return isCompound(result) ? result : null;
         } catch (ReflectiveOperationException | LinkageError e) {
             return null;
+        }
+    }
+
+    /**
+     * Merge the destination tile's live storage fields into an already-validated target compound.
+     * This is the execution-time half of "skip container contents": the schematic's item fields
+     * were removed during planning, while the destination's current values are captured only now,
+     * immediately before mutation, so queued tasks cannot overwrite later player changes with a
+     * stale planning-time snapshot.
+     *
+     * @return a cloned target compound with preserved storage fields, or {@code null} if the live
+     *         tile NBT cannot be read safely
+     */
+    static Object mergeCurrentContentFields(Block block, Material material, Object targetCompound) {
+        if (block == null || targetCompound == null) return targetCompound;
+        List<ItemField> fields = ITEM_FIELDS.get(material);
+        if (fields == null || fields.stream().noneMatch(ItemField::stripOnSkip)) return targetCompound;
+
+        Object current = snapshotCompound(block.getState());
+        if (current == null) return null;
+        Object merged = cloneCompound(targetCompound);
+        if (merged == null) return null;
+        for (ItemField field : fields) {
+            if (!field.stripOnSkip()) continue;
+            Object live = getTag(current, field.key());
+            if (live == null) {
+                removeTag(merged, field.key());
+            } else {
+                putTag(merged, field.key(), cloneTag(live));
+            }
+        }
+        return merged;
+    }
+
+    /** Whether this tile has storage fields that "skip container contents" must preserve. */
+    static boolean hasSkippableContentFields(Material material) {
+        List<ItemField> fields = ITEM_FIELDS.get(material);
+        return fields != null && fields.stream().anyMatch(ItemField::stripOnSkip);
+    }
+
+    /**
+     * Whether the live tile already satisfies the schematic NBT. This is used during paste planning
+     * so an in-place repair does not demand a second copy of contents that are already present.
+     * Structural coordinates are ignored, and when skip-contents is active the storage fields are
+     * deliberately ignored as well. For ordinary inventory-backed containers the Items list is
+     * compared against the live Bukkit inventory by slot + exact ItemStack metadata instead of raw
+     * SNBT, avoiding false mismatches from harmless codec/default-key normalization.
+     */
+    static boolean targetNbtAlreadyPresent(Block block, Material material, String targetSnbt,
+                                           boolean ignoreSkippableContents, Object registryAccess) {
+        if (block == null || targetSnbt == null || targetSnbt.isBlank()) return targetSnbt == null;
+        Object target = parseCompound(targetSnbt);
+        Object current = snapshotCompound(block.getState());
+        if (target == null || current == null) return false;
+
+        List<ItemField> fields = ITEM_FIELDS.getOrDefault(material, List.of());
+        Set<String> itemKeys = new HashSet<>();
+        Inventory liveInventory = liveInventory(block.getState());
+        for (ItemField field : fields) {
+            itemKeys.add(field.key());
+            if (ignoreSkippableContents && field.stripOnSkip()) continue;
+            Object expected = getTag(target, field.key());
+            if (field.kind() == FieldKind.LIST && "Items".equals(field.key()) && liveInventory != null) {
+                if (!inventoryMatchesItemsTag(liveInventory, expected, registryAccess)) return false;
+            } else {
+                Object actual = getTag(current, field.key());
+                if (!tagSubsetMatches(actual, expected, 0)) return false;
+            }
+        }
+
+        Set<String> keys = compoundKeys(target);
+        if (keys == null) return false;
+        for (String key : keys) {
+            if (STRUCTURAL_KEYS.contains(key) || itemKeys.contains(key)) continue;
+            Object expected = getTag(target, key);
+            Object actual = comparableTag(current, key);
+            if (!tagSubsetMatches(actual, expected, 0)) return false;
+        }
+        return true;
+    }
+
+    private static Inventory liveInventory(BlockState state) {
+        if (state instanceof Chest chest) return chest.getBlockInventory();
+        if (state instanceof InventoryHolder holder) return holder.getInventory();
+        return null;
+    }
+
+    private static boolean inventoryMatchesItemsTag(Inventory inventory, Object expectedTag, Object registryAccess) {
+        ItemStack[] expected = new ItemStack[inventory.getSize()];
+        if (expectedTag != null) {
+            if (!expectedTag.getClass().getName().equals(LIST_TAG)) return false;
+            int size = listSize(expectedTag);
+            for (int i = 0; i < size; i++) {
+                Object entry = listGet(expectedTag, i);
+                if (entry == null || !entry.getClass().getName().equals(COMPOUND_TAG)) return false;
+                Decoded decoded = decodeItem(entry, registryAccess);
+                if (decoded == null) return false;
+                Object slotTag = getTag(entry, "Slot");
+                int slot = slotTag == null ? i : numberValue(slotTag, -1);
+                if (slot < 0 || slot >= expected.length || expected[slot] != null) return false;
+                ItemStack stack = decoded.bukkit().clone();
+                stack.setAmount((int) Math.min(Integer.MAX_VALUE, decoded.count()));
+                expected[slot] = stack;
+            }
+        }
+        for (int slot = 0; slot < expected.length; slot++) {
+            ItemStack want = expected[slot];
+            ItemStack have = inventory.getItem(slot);
+            boolean wantEmpty = want == null || want.getType().isAir() || want.getAmount() <= 0;
+            boolean haveEmpty = have == null || have.getType().isAir() || have.getAmount() <= 0;
+            if (wantEmpty || haveEmpty) {
+                if (wantEmpty != haveEmpty) return false;
+                continue;
+            }
+            if (want.getAmount() != have.getAmount() || !want.isSimilar(have)) return false;
+        }
+        return true;
+    }
+
+    private static Object comparableTag(Object compound, String key) {
+        Object tag = getTag(compound, key);
+        if (tag != null) return tag;
+        if ("Count".equals(key)) return getTag(compound, "count");
+        if ("count".equals(key)) return getTag(compound, "Count");
+        return null;
+    }
+
+    private static boolean tagSubsetMatches(Object actual, Object expected, int depth) {
+        if (expected == null) return actual == null;
+        if (actual == null || depth > MAX_NBT_DEPTH) return false;
+        if (expected.getClass().getName().equals(COMPOUND_TAG)) {
+            if (!actual.getClass().getName().equals(COMPOUND_TAG)) return false;
+            Set<String> keys = compoundKeys(expected);
+            if (keys == null) return false;
+            for (String key : keys) {
+                if (!tagSubsetMatches(comparableTag(actual, key), getTag(expected, key), depth + 1)) return false;
+            }
+            return true;
+        }
+        if (expected.getClass().getName().equals(LIST_TAG)) {
+            if (!actual.getClass().getName().equals(LIST_TAG)) return false;
+            int size = listSize(expected);
+            if (size != listSize(actual)) return false;
+            for (int i = 0; i < size; i++) {
+                if (!tagSubsetMatches(listGet(actual, i), listGet(expected, i), depth + 1)) return false;
+            }
+            return true;
+        }
+        return expected.equals(actual);
+    }
+
+    private static int numberValue(Object tag, int fallback) {
+        for (String name : List.of("intValue", "getAsInt")) {
+            Method value = method(tag.getClass(), name);
+            if (value == null) continue;
+            try {
+                Object result = value.invoke(tag);
+                if (result instanceof Number number) return number.intValue();
+            } catch (ReflectiveOperationException | LinkageError ignored) {
+            }
+        }
+        return fallback;
+    }
+
+    private static Object snapshotCompound(BlockState state) {
+        for (String methodName : List.of("getSnapshotNBT", "serializeNBT")) {
+            try {
+                Method snapshot = method(state.getClass(), methodName);
+                if (snapshot == null) continue;
+                Object nbt = snapshot.invoke(state);
+                if (isCompound(nbt)) return nbt;
+            } catch (ReflectiveOperationException | LinkageError ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static Object cloneTag(Object tag) {
+        if (tag == null) return null;
+        Method copy = method(tag.getClass(), "copy");
+        if (copy == null) return tag;
+        try {
+            Object cloned = copy.invoke(tag);
+            return cloned == null ? tag : cloned;
+        } catch (ReflectiveOperationException | LinkageError ignored) {
+            return tag;
         }
     }
 

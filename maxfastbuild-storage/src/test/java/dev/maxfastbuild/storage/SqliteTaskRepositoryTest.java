@@ -39,7 +39,7 @@ class SqliteTaskRepositoryTest {
         UUID id = UUID.randomUUID(), player = UUID.randomUUID();
         String chestNbt = "{Items:[{id:\"minecraft:diamond\",Count:1b,Slot:0}]}";
         BuildPlan plan = new BuildPlan("world", OperationKind.PLACE, new Bounds(new BlockPos(0, 0, 0), new BlockPos(1, 0, 0)), List.of(
-                new BlockMutation(new BlockPos(0, 0, 0), "minecraft:air", "minecraft:chest[facing=north]", chestNbt),
+                new BlockMutation(new BlockPos(0, 0, 0), "minecraft:chest[facing=south]", "minecraft:chest[facing=north]", chestNbt, true),
                 new BlockMutation(new BlockPos(1, 0, 0), "minecraft:air", "minecraft:stone")));
         Instant now = Instant.now();
         BuildTask task = new BuildTask(id, player, "Builder", plan, TaskStatus.RUNNING, 0, 0, Set.of(), "escrow", BigDecimal.ZERO, BigDecimal.ZERO, now, now, null);
@@ -50,7 +50,9 @@ class SqliteTaskRepositoryTest {
         BlockMutation recoveredMutation = recovered.plan().mutations().get(0);
         assertThat(recoveredMutation.targetNbt()).isEqualTo(chestNbt);
         assertThat(recoveredMutation.targetState()).isEqualTo("minecraft:chest[facing=north]");
+        assertThat(recoveredMutation.preserveContents()).isTrue();
         assertThat(recovered.plan().mutations().get(1).targetNbt()).isNull();
+        assertThat(recovered.plan().mutations().get(1).preserveContents()).isFalse();
         repository.close();
     }
 }

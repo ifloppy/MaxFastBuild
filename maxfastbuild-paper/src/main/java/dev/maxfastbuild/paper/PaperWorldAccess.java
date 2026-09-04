@@ -147,6 +147,9 @@ final class PaperWorldAccess implements WorldAccess {
         if (RestrictedMaterials.isForbiddenPlace(targetMaterial) || !targetMaterial.isBlock()) {
             return new ValidationResult(false, "forbidden_material");
         }
+        boolean stateAlreadyMatches = target.getBlockData().matches(targetData);
+        boolean preserveInPlace = canPreserveContentsInPlace(
+                target.getBlockData().getAsString(), mutation.targetState(), mutation.preserveContents());
         // Reject invalid or unsafe block-entity NBT before anything in the world is touched.
         if (mutation.targetNbt() != null) {
             PaperNbtHelper.NbtCheck check = PaperNbtHelper.validateForBlock(
@@ -155,7 +158,7 @@ final class PaperWorldAccess implements WorldAccess {
                 return new ValidationResult(false, "invalid_nbt:" + rejected.reason());
             }
         }
-        if (!isReplaceableOccupant(material)) {
+        if (!stateAlreadyMatches && !preserveInPlace && !isReplaceableOccupant(material)) {
             ValidationResult breakCheck = mayBreakLocal(player, target, material);
             if (!breakCheck.allowed()) {
                 if ("unbreakable_block".equals(breakCheck.reason())) {
@@ -210,7 +213,17 @@ final class PaperWorldAccess implements WorldAccess {
         }
 
         Material occupant = block.getType();
-        boolean replacedSolid = !stateAlreadyMatches && !isReplaceableOccupant(occupant);
+        boolean preserveInPlace = canPreserveContentsInPlace(
+                currentData.getAsString(), mutation.targetState(), mutation.preserveContents());
+        if (preserveInPlace && validatedNbt != null) {
+            Object merged = PaperNbtHelper.mergeCurrentContentFields(block, targetMaterial, validatedNbt);
+            if (merged == null) {
+                return new MutationResult(false, "container_preserve_failed");
+            }
+            validatedNbt = merged;
+        }
+
+        boolean replacedSolid = !stateAlreadyMatches && !preserveInPlace && !isReplaceableOccupant(occupant);
         boolean naturalBreakLogged = false;
         if (replacedSolid) {
             MutationResult broken = breakVanilla(player, block);
@@ -262,6 +275,22 @@ final class PaperWorldAccess implements WorldAccess {
             return !isReplaceableOccupant(Bukkit.createBlockData(expectedState).getMaterial());
         } catch (IllegalArgumentException ex) {
             return true;
+        }
+    }
+
+    /**
+     * A skip-contents paste may update block state/NBT in place only when the destination is already
+     * the same storage-capable block type. This deliberately never migrates contents between block
+     * types; if the target really differs, normal replace rules apply.
+     */
+    static boolean canPreserveContentsInPlace(String expectedState, String targetState, boolean preserveContents) {
+        if (!preserveContents || expectedState == null || targetState == null) return false;
+        try {
+            Material expected = Bukkit.createBlockData(expectedState).getMaterial();
+            Material target = Bukkit.createBlockData(targetState).getMaterial();
+            return expected == target && PaperNbtHelper.hasSkippableContentFields(target);
+        } catch (IllegalArgumentException ex) {
+            return false;
         }
     }
 

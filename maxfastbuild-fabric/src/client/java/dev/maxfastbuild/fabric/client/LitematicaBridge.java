@@ -50,7 +50,7 @@ public final class LitematicaBridge {
     private static List<PasteTransfer.Region> lastRegions = List.of();
     /**
      * When true, the {@code Items} tag is removed from every container block-entity before it is
-     * serialized, so the pasted container is empty and the server never bills its contents. Set by
+     * serialized, so schematic contents are not billed or applied and existing destination contents are preserved. Set by
      * {@code PasteController.confirmStart} from the {@code skipContents} filter before collection.
      */
     private static volatile boolean stripContainerItems;

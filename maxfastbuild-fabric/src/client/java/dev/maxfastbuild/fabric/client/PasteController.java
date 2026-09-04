@@ -234,7 +234,7 @@ final class PasteController {
         settings = newSettings;
         instant = newInstant;
         // Container contents are stripped at collection time (before SNBT serialization), so the
-        // collected palette never carries them and the server bills only the empty container block.
+        // collected palette never carries them; the server preserves any existing destination contents.
         LitematicaBridge.setStripContainerItems(newSettings.skipContents());
         state = State.PENDING_HELLO;
         pendingSince = now();
@@ -244,7 +244,7 @@ final class PasteController {
     /**
      * Apply the settings screen filters to a collected placement. Fluids are dropped, block-entity
      * NBT is stripped from the palette (server then places a plain block), and container contents
-     * are stripped from block-entity NBT (empty container pasted, not billed) when {@code skipContents}.
+     * are stripped from block-entity NBT; existing destination contents are preserved when {@code skipContents}.
      */
     private static List<PasteBlock> applySkip(List<PasteBlock> blocks, PasteSettings skip) {
         if (!skip.skipFluids() && !skip.skipEntities() && !skip.skipNbt() && !skip.skipContents()) return blocks;
