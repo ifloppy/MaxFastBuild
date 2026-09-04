@@ -83,8 +83,7 @@ final class PluginMessages {
         if (data == null) data = Map.of();
         return switch (messageKey) {
             case "maxfastbuild.task.accepted" ->
-                    component("task-accepted", data.get("blocks"), data.get("regionBlocks"),
-                            data.get("sizeX"), data.get("sizeY"), data.get("sizeZ"), data.get("charge"));
+                    component("task-accepted", acceptedArguments(raw("task-accepted"), data));
             case "maxfastbuild.paste.blocks_skipped" ->
                     component("blocks-skipped", data.get("skipped"), data.get("entitySkipped"), data.get("planned"));
             case "maxfastbuild.error.paste_precheck_failed" ->
@@ -226,5 +225,18 @@ final class PluginMessages {
             }
         }
         return result;
+    }
+
+    /**
+     * Keep old on-disk message packs safe: before the detailed region fields were added,
+     * task-accepted used {0}=blocks and {1}=charge. The config merge intentionally preserves
+     * customized files, so an old bundle must not receive the new positional arguments.
+     */
+    static Object[] acceptedArguments(String template, Map<String, ?> data) {
+        if (template != null && template.contains("{5}")) {
+            return new Object[]{data.get("blocks"), data.get("regionBlocks"), data.get("sizeX"),
+                    data.get("sizeY"), data.get("sizeZ"), data.get("charge")};
+        }
+        return new Object[]{data.get("blocks"), data.get("charge")};
     }
 }
