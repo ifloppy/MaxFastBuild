@@ -35,6 +35,8 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private static final Gson GSON = new Gson();
     private static final Material PREVIEW_MATERIAL = Material.GREEN_STAINED_GLASS;
+    private static final int DEFAULT_PREVIEW_BLOCKS = 2048;
+    private static final int ABSOLUTE_MAX_PREVIEW_BLOCKS = 8192;
     private final Map<UUID, Selection> selections = new ConcurrentHashMap<>();
     /** Block positions currently replaced by client-only preview packets. */
     private final Map<UUID, PreviewState> previews = new ConcurrentHashMap<>();
@@ -971,8 +973,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * Send a client-only green-glass preview. The generated positions deliberately use the same
-     * request object as the executor, so /mfb apply cannot drift from what the player saw.
+     * Send a client-only green-glass preview. Small selections show the exact generated shape;
+     * large selections use a bounded sampled outline so preview work cannot scale with region volume.
      */
     private void refreshSelectionPreview(Player player, Selection selection) {
         clearSelectionPreview(player);
@@ -994,11 +996,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     return;
                 }
                 try {
-                    positions = new LinkedHashSet<>(new DefaultShapeGenerator().generate(request,
-                            shapeGenerationLimit(limits().maxRegionBlocks())));
-                } catch (ShapeLimitException ex) {
-                    messages.send(player, "preview-too-large", limits().maxRegionBlocks());
-                    return;
+                    int previewLimit = previewBlockLimit();
+                    SelectionPreviewSampler.Sample sample = SelectionPreviewSampler.sample(request, previewLimit);
+                    positions = new LinkedHashSet<>(sample.positions());
+                    if (sample.simplified()) {
+                        messages.send(player, "preview-simplified", previewLimit);
+                    }
                 } catch (RuntimeException ex) {
                     messages.send(player, "preview-unavailable");
                     return;
@@ -1017,7 +1020,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         for (BlockPos pos : positions) {
             player.sendBlockChange(new Location(world, pos.x(), pos.y(), pos.z()), previewData);
         }
-        previews.put(player.getUniqueId(), new PreviewState(world.getName(), Set.copyOf(positions)));
+        previews.put(player.getUniqueId(), new PreviewState(world.getName(),
+                Collections.unmodifiableSet(new LinkedHashSet<>(positions))));
     }
 
     /** Restore the current real block state after a client-only preview. */
@@ -3177,6 +3181,11 @@ if (data.billableItem() != null) {
 
     private static int shapeGenerationLimit(long limit) {
         return (int) Math.min(Integer.MAX_VALUE, Math.max(1, limit));
+    }
+
+    private int previewBlockLimit() {
+        int configured = getConfig().getInt("preview.max-blocks", DEFAULT_PREVIEW_BLOCKS);
+        return Math.max(32, Math.min(ABSOLUTE_MAX_PREVIEW_BLOCKS, configured));
     }
 
     private static ShapeRequest shapeRequest(Selection selection) {

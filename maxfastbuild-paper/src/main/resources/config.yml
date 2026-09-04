@@ -1,5 +1,10 @@
 # Server-side CLI / admin message pack (messages_<lang>.yml). Client protocol still uses Fabric lang.
 default-language: zh_cn
+preview:
+  # Client-only selection preview budget. Large selections automatically fall back to a sampled
+  # bounding-box outline instead of generating/sending every selected block on the server thread.
+  # Values above 8192 are clamped in code as a final watchdog safety guard.
+  max-blocks: 2048
 execution:
   ticks-per-block: 1
   blocks-per-step: 1
