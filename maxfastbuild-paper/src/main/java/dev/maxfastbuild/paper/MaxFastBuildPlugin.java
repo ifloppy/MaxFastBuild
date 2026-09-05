@@ -627,6 +627,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         return pos.x() + ", " + pos.y() + ", " + pos.z();
     }
 
+    /**
+     * Order a newly-created batch in a physically natural vertical direction while preserving the
+     * producer's original order inside each Y layer. Existing persisted tasks are intentionally not
+     * re-sorted on load, so their saved cursor remains valid across plugin upgrades.
+     */
+    static List<BlockMutation> orderMutationsForExecution(OperationKind operation, List<BlockMutation> mutations) {
+        List<BlockMutation> ordered = new ArrayList<>(mutations);
+        Comparator<BlockMutation> byY = Comparator.comparingInt(mutation -> mutation.position().y());
+        if (operation == OperationKind.BREAK) byY = byY.reversed();
+        ordered.sort(byY);
+        return List.copyOf(ordered);
+    }
+
     private static String plain(String miniOrLegacy) {
         if (miniOrLegacy == null || miniOrLegacy.isBlank()) return "-";
         return miniOrLegacy.replaceAll("<[^>]+>", "").replace('&', '§').replaceAll("§.", "");
@@ -787,7 +800,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         // Mode: destroy - break first then place
         // Vanilla behavior: destroy on air = just place (no break needed)
         boolean destroy = "destroy".equals(mode);
-        boolean targetIsAir = before.equals("minecraft:air");
+        boolean targetIsAir = Bukkit.createBlockData(before).getMaterial().isAir();
         boolean willBreak = destroy && !targetIsAir;
 
         // Validate: for destroy on air, only validate PLACE; otherwise validate BREAK then PLACE
@@ -870,7 +883,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         // Calculate charge
         List<BlockMutation> mutations = List.of(new BlockMutation(position, before, blockState));
         Bounds bounds = new Bounds(position, position);
-        BuildPlan plan = new BuildPlan(worldName, OperationKind.PLACE, bounds, mutations);
+        BuildPlan plan = new BuildPlan(worldName, OperationKind.PLACE, bounds,
+                orderMutationsForExecution(OperationKind.PLACE, mutations));
         BillingPolicy.Charge charge = billing().quote(plan, replaceBreakCount);
 
         boolean tookMoney = false;
@@ -1334,19 +1348,23 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 return new PlanningError("maxfastbuild.error.protected", Map.of("position", pos.toString(), "reason", "unsafe_height"));
             }
             String before = world.stateAt(worldName, pos);
-            if (operation == OperationKind.BREAK && before.equals("minecraft:air")) continue;
-            if (pending.keepOnly && !before.equals("minecraft:air")) continue;
-            if (pending.filter != null) {
-                Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
-                if (beforeMaterial != pending.filter) continue;
-            }
-            if (!pending.excluded.isEmpty()) {
-                Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
-                if (pending.excluded.contains(beforeMaterial)) continue;
-            }
+            Material beforeMaterial = Bukkit.createBlockData(before).getMaterial();
+            // Bukkit has multiple air block states (AIR/CAVE_AIR/VOID_AIR). Treat all of them as
+            // empty; comparing only against the literal minecraft:air misclassified cave air as a
+            // protected break and produced an already_air error while flattening terrain.
+            if (operation == OperationKind.BREAK && beforeMaterial.isAir()) continue;
+            if (pending.keepOnly && !beforeMaterial.isAir()) continue;
+            if (pending.filter != null && beforeMaterial != pending.filter) continue;
+            if (!pending.excluded.isEmpty() && pending.excluded.contains(beforeMaterial)) continue;
             BlockMutation mutation = new BlockMutation(pos, before, operation == OperationKind.BREAK ? "minecraft:air" : pending.selection.material());
             WorldAccess.ValidationResult validation = world.mayMutate(player.getUniqueId(), worldName, mutation, operation);
             if (!validation.allowed()) {
+                // The world may change between stateAt() and mayMutate() (physics, another task,
+                // or a player action). An already-air break is therefore a benign no-op, not a
+                // protection failure that should abort the whole batch.
+                if (operation == OperationKind.BREAK && "already_air".equals(validation.reason())) {
+                    continue;
+                }
                 if ("insufficient_tool".equals(validation.reason())) {
                     return new PlanningError("maxfastbuild.error.insufficient_tool", Map.of("reason", validation.reason()));
                 }
@@ -1423,7 +1441,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
 
         Bounds selectionBounds = shapeRequest(selection).bounds();
-        BuildPlan plan = new BuildPlan(selection.world(), operation, selectionBounds, mutations);
+        BuildPlan plan = new BuildPlan(selection.world(), operation, selectionBounds,
+                orderMutationsForExecution(operation, mutations));
         // Place-over-solid: charge per-block for place + for each required break.
         BillingPolicy.Charge charge = billing().quote(plan, operation == OperationKind.PLACE ? pending.replaceBreakCount : 0);
         boolean requireMaterials = operation == OperationKind.PLACE
@@ -1861,7 +1880,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             min = new BlockPos(Math.min(min.x(), pos.x()), Math.min(min.y(), pos.y()), Math.min(min.z(), pos.z()));
             max = new BlockPos(Math.max(max.x(), pos.x()), Math.max(max.y(), pos.y()), Math.max(max.z(), pos.z()));
         }
-        BuildPlan plan = new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max), mutations);
+        BuildPlan plan = new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max),
+                orderMutationsForExecution(OperationKind.PLACE, mutations));
         BillingPolicy policy = billing();
         BillingPolicy.Charge charge = policy.quote(plan, pending.replaceBreakCount);
         if (pending.instant) {
