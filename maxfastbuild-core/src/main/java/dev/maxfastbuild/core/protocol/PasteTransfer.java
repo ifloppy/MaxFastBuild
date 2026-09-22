@@ -59,7 +59,14 @@ public final class PasteTransfer {
         public EntityEntry {
             Objects.requireNonNull(type);
             Objects.requireNonNull(nbt);
-            if (!type.contains(":")) throw new IllegalArgumentException("entity_type_requires_namespace");
+            if (!type.startsWith("minecraft:") || !type.matches("minecraft:[a-z0-9_./-]{1,64}")) {
+                throw new IllegalArgumentException("unsupported_entity_namespace");
+            }
+            if (!Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)
+                    || Math.abs(x) > 30_000_000 || Math.abs(y) > 30_000_000 || Math.abs(z) > 30_000_000) {
+                throw new IllegalArgumentException("invalid_entity_position");
+            }
+            if (nbt.length() > 32_000) throw new IllegalArgumentException("entity_nbt_too_large");
         }
     }
 
@@ -82,38 +89,60 @@ public final class PasteTransfer {
     /** One part of a paste transfer. */
     public record Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette,
                           List<String> blocks, boolean instant, List<EntityEntry> entities,
-                          boolean skipContents, List<Region> regions) {
+                          boolean skipContents, List<Region> regions, String checksum) {
         public Payload {
             Objects.requireNonNull(pasteSessionId);
+            if (pasteSessionId.length() < 1 || pasteSessionId.length() > 64
+                    || !pasteSessionId.matches("[A-Za-z0-9_-]+")) {
+                throw new IllegalArgumentException("invalid_paste_session");
+            }
             Objects.requireNonNull(palette);
             Objects.requireNonNull(blocks);
             Objects.requireNonNull(entities);
             Objects.requireNonNull(regions);
+            if (palette.size() > 16_384 || blocks.size() > MAX_BLOCKS_PER_PART) {
+                throw new IllegalArgumentException("paste_part_too_large");
+            }
             palette = List.copyOf(palette);
             blocks = List.copyOf(blocks);
             entities = List.copyOf(entities);
             regions = List.copyOf(regions);
+            for (String state : palette) {
+                if (state == null || state.length() > 64_000) {
+                    throw new IllegalArgumentException("palette_entry_too_large");
+                }
+            }
+            if (checksum != null && !checksum.matches("[A-Za-z0-9_-]{43}")) {
+                throw new IllegalArgumentException("invalid_paste_checksum");
+            }
         }
 
         /** Backward-compatible constructor defaulting {@code instant} to false (legacy/non-instant). */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of(), false, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, false, List.of(), false, List.of(), null);
         }
 
         /** Backward-compatible constructor with no entities. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of(), false, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, List.of(), false, List.of(), null);
         }
 
         /** Backward-compatible constructor with entities but no skip flag. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette, List<String> blocks, boolean instant, List<EntityEntry> entities) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, false, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, false, List.of(), null);
         }
 
         /** Backward-compatible constructor with no region metadata. */
         public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette,
                        List<String> blocks, boolean instant, List<EntityEntry> entities, boolean skipContents) {
-            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, skipContents, List.of());
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, skipContents, List.of(), null);
+        }
+
+        /** Backward-compatible constructor without a checksum. */
+        public Payload(String pasteSessionId, int part, int parts, int[] origin, List<String> palette,
+                       List<String> blocks, boolean instant, List<EntityEntry> entities, boolean skipContents,
+                       List<Region> regions) {
+            this(pasteSessionId, part, parts, origin, palette, blocks, instant, entities, skipContents, regions, null);
         }
 
         @Override
@@ -160,7 +189,45 @@ public final class PasteTransfer {
 
     /** Deserialize a payload from UTF-8 JSON bytes (caller gunzips first). */
     public static Payload decode(byte[] json) {
-        return GSON.fromJson(new String(json, StandardCharsets.UTF_8), Payload.class);
+        if (json == null || json.length == 0 || json.length > MAX_GUNZIP_BYTES) {
+            throw new IllegalArgumentException("invalid_paste_json");
+        }
+        Payload payload = GSON.fromJson(new String(json, StandardCharsets.UTF_8), Payload.class);
+        if (payload == null) throw new IllegalArgumentException("invalid_paste_json");
+        return payload;
+    }
+
+    /** Return a payload with a deterministic checksum over the payload without its checksum field. */
+    public static Payload withChecksum(Payload payload) {
+        Objects.requireNonNull(payload);
+        Payload unsigned = withoutChecksum(payload);
+        return new Payload(unsigned.pasteSessionId(), unsigned.part(), unsigned.parts(), unsigned.origin(),
+                unsigned.palette(), unsigned.blocks(), unsigned.instant(), unsigned.entities(),
+                unsigned.skipContents(), unsigned.regions(), ProtocolDigest.sha256(encode(unsigned)));
+    }
+
+    /** Verify the payload checksum. New clients must provide one. */
+    public static void verifyChecksum(Payload payload) {
+        if (payload == null || payload.checksum() == null) throw new IllegalArgumentException("missing_paste_checksum");
+        String expected = withChecksum(payload).checksum();
+        if (!java.security.MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII),
+                payload.checksum().getBytes(StandardCharsets.US_ASCII))) {
+            throw new IllegalArgumentException("paste_checksum_mismatch");
+        }
+    }
+
+    /** Digest of repeated metadata, excluding block entries and the checksum itself. */
+    public static String metadataChecksum(Payload payload) {
+        Payload metadata = new Payload(payload.pasteSessionId(), 0, payload.parts(), payload.origin(),
+                payload.palette(), List.of(), payload.instant(), payload.entities(), payload.skipContents(),
+                payload.regions(), null);
+        return ProtocolDigest.sha256(encode(metadata));
+    }
+
+    private static Payload withoutChecksum(Payload payload) {
+        return new Payload(payload.pasteSessionId(), payload.part(), payload.parts(), payload.origin(),
+                payload.palette(), payload.blocks(), payload.instant(), payload.entities(),
+                payload.skipContents(), payload.regions(), null);
     }
 
     public static String formatEntry(Entry entry) {
@@ -227,9 +294,9 @@ public final class PasteTransfer {
                 blockEntries.add(formatEntry(entries.get(i)));
             }
             result.add(new Payload(pasteSessionId, part, totalParts, originCopy, palette, blockEntries,
-                    instant, entityList, skipContents, regionList));
+                    instant, entityList, skipContents, regionList, null));
         }
-        return result;
+        return result.stream().map(PasteTransfer::withChecksum).toList();
     }
 
     /**

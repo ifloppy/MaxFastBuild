@@ -3,7 +3,7 @@ package dev.maxfastbuild.fabric.client;
 import com.google.gson.JsonObject;
 import dev.maxfastbuild.core.protocol.ProtocolEnvelope;
 
-/** Server-authoritative limits received from the v4 hello handshake. */
+/** Server-authoritative limits received from the v5 hello handshake. */
 final class ServerCapabilities {
     private static volatile Limits current;
 

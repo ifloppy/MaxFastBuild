@@ -66,6 +66,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         ClientPlayConnectionEvents.JOIN.register((handler, sender, client) -> {
             helloPending = true;
             handshakeNotified = false;
+            PasteController.onConnectionJoin();
         });
     }
 

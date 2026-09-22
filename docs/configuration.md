@@ -2,6 +2,10 @@
 
 Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside this repository. After first run, the live file is under the server’s MaxFastBuild plugin data folder.
 
+The Fabric client also accepts `config/maxfastbuild.json`; `pasteCommandIntervalMs` defaults to 80
+and is clamped to 80–2000 ms. Increasing it is useful on servers with stricter command-packet
+limits; the server-side bucket remains authoritative.
+
 ## Keys
 
 | Key | Meaning | Read by code |
@@ -30,11 +34,15 @@ Paper defaults live in `maxfastbuild-paper/src/main/resources/config.yml` inside
 | `coreprotect.required` | Reject builds if CoreProtect is missing | yes |
 | `protocol.session-minutes` | Lifetime for optional legacy HMAC sessions | yes |
 | `protocol.max-payload-bytes` | Max decoded authenticated payload part size | yes |
+| `protocol.transport.commands-per-second` / `command-burst` | Server command-chunk rate guard; excess chunks are silently retried by the client | yes |
+| `protocol.transport.retention-seconds` | Idle SQLite upload retention window | yes |
+| `protocol.transport.max-inflight-transfers-per-player` / `max-storage-bytes` | Persistent command-transfer count and byte quotas | yes |
 | `protocol.paste.max-parts` | Maximum parts in one bulk paste, advertised to clients | yes |
 | `protocol.paste.max-blocks-per-part` | Maximum entries in one bulk paste part, advertised to clients | yes |
 | `protocol.paste.max-total-blocks` | Maximum in-flight bulk-paste entries across players | yes |
+| `protocol.paste.max-inflight-uploads-per-player` / `max-storage-bytes` | Persistent paste-upload count and byte quotas | yes |
 
-Protocol v4 no longer reads the old `instant-paste.max-blocks` key. Instant and queued requests share
+Protocol v5 no longer reads the old `instant-paste.max-blocks` key. Instant and queued requests share
 `execution.max-affected-blocks`; an old key left in an existing config file can be removed.
 
 ## Permissions

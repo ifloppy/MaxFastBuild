@@ -35,6 +35,8 @@ import java.util.UUID;
 final class PasteController {
     private static final long HELLO_TIMEOUT_MS = 6_000;
     private static final long ACK_TIMEOUT_MS = 12_000;
+    /** Vanilla command packets are sent gradually; this prevents a large paste from looking like a command flood. */
+    private static final int MAX_RETRIES = 3;
 
     private enum State { IDLE, PENDING_HELLO, SENDING }
 
@@ -68,6 +70,12 @@ final class PasteController {
     private static int currentPart;
     private static boolean waitingAck;
     private static long pendingSince;
+    private static List<String> commandQueue = List.of();
+    private static int nextCommand;
+    private static long nextCommandAt;
+    private static int retries;
+    private static String activeEnvelope;
+    private static String activeTransferId;
     private static String sessionId;
     private static byte[] secret;
     private static long sequence;
@@ -90,22 +98,29 @@ final class PasteController {
             toggleInstant();
         }
         prevInstantKeyDown = instantDown;
+        if (state == State.SENDING) pumpCommands(client);
         if (state == State.PENDING_HELLO && now() - pendingSince > HELLO_TIMEOUT_MS) {
             abort("maxfastbuild.paste.hello_timeout");
         } else if (state == State.SENDING && waitingAck && now() - pendingSince > ACK_TIMEOUT_MS) {
-            abort("maxfastbuild.paste.ack_timeout");
+            if (retries++ >= MAX_RETRIES) {
+                abort("maxfastbuild.paste.ack_timeout");
+            } else {
+                // Re-send the same authenticated envelope and transfer id. The server's SQLite
+                // store keeps already received chunks and treats duplicates as idempotent.
+                waitingAck = false;
+                nextCommand = 0;
+                commandQueue = List.of();
+                sendPart(false);
+            }
         }
     }
 
-    /**
-     * HUD indicator shown only while an instant paste is actively streaming to the server, so it
-     * never persists on screen; the redstone warning lives in the paste-settings screen and the
-     * toggle notification instead.
-     */
+    /** Upload progress HUD; the redstone warning remains in the settings screen. */
     static void renderHud(HudCanvas canvas) {
-        if (state != State.SENDING || !instant || clientPlayer() == null) return;
-        Component text = Component.translatable("maxfastbuild.paste.instant_hud");
-        canvas.centeredText(Minecraft.getInstance().font, text, canvas.guiWidth() / 2, canvas.guiHeight() - 64, 0xFFFFC44D);
+        if (state != State.SENDING || clientPlayer() == null || parts == null) return;
+        Component text = Component.translatable("maxfastbuild.paste.uploading", currentPart + 1, parts.size());
+        canvas.centeredText(Minecraft.getInstance().font, text, canvas.guiWidth() / 2, canvas.guiHeight() - 64,
+                instant ? 0xFFFFC44D : 0xFF8EE9FF);
     }
 
     static void onHello(JsonObject object) {
@@ -115,7 +130,7 @@ final class PasteController {
             } catch (RuntimeException ignored) {
             }
         }
-        if (state != State.PENDING_HELLO) return;
+        if (state != State.PENDING_HELLO && !(state == State.SENDING && parts != null)) return;
         if (!object.has("sessionId") || !object.has("secret")) {
             abort("maxfastbuild.paste.hello_failed");
             return;
@@ -130,6 +145,25 @@ final class PasteController {
         ServerCapabilities.Limits capabilities = ServerCapabilities.current();
         if (capabilities == null) {
             abort("maxfastbuild.paste.hello_failed");
+            return;
+        }
+        // A reconnect gets a new HMAC session, but the SQLite server store still has the same
+        // pasteSessionId. Keep the already collected parts and resume at the last unacknowledged
+        // part instead of recollecting the schematic or restarting at part zero.
+        if (parts != null && pasteSessionId != null) {
+            if (parts.size() > capabilities.maxPasteParts()) {
+                abort("maxfastbuild.paste.too_large");
+                return;
+            }
+            currentPart = Math.max(0, Math.min(currentPart, parts.size() - 1));
+            sequence = 0;
+            retries = 0;
+            waitingAck = false;
+            commandQueue = List.of();
+            activeEnvelope = null;
+            activeTransferId = null;
+            state = State.SENDING;
+            sendPart(true);
             return;
         }
         List<PasteBlock> blocks = ClientPlatform.instance().collectLitematicaPlacement();
@@ -181,9 +215,14 @@ final class PasteController {
         currentPart = 0;
         waitingAck = false;
         sequence = 0;
+        retries = 0;
+        commandQueue = List.of();
+        nextCommand = 0;
+        activeEnvelope = null;
+        activeTransferId = null;
         state = State.SENDING;
         notify(Component.translatable(instant ? "maxfastbuild.paste.starting_instant" : "maxfastbuild.paste.starting", blocks.size()));
-        sendPart();
+        sendPart(true);
     }
 
     static void onAck(JsonObject object) {
@@ -198,15 +237,33 @@ final class PasteController {
         if (currentPart >= parts.size()) {
             state = State.IDLE;
             parts = null;
+            commandQueue = List.of();
+            activeEnvelope = null;
+            activeTransferId = null;
             notify(Component.translatable("maxfastbuild.paste.sent", total));
         } else {
-            sendPart();
+            retries = 0;
+            sendPart(true);
         }
     }
 
     /** Abort the active paste session (the error message is shown by the caller). */
     static void onError(JsonObject object) {
         resetSession();
+    }
+
+    /** Preserve the durable paste cursor across a network reconnect and request a fresh HMAC session. */
+    static void onConnectionJoin() {
+        if (state != State.SENDING) return;
+        state = State.PENDING_HELLO;
+        pendingSince = now();
+        waitingAck = false;
+        commandQueue = List.of();
+        nextCommand = 0;
+        activeEnvelope = null;
+        activeTransferId = null;
+        sessionId = null;
+        secret = null;
     }
 
     private static void startPaste() {
@@ -314,38 +371,66 @@ final class PasteController {
                 || id.equals("marker"));
     }
 
-    private static void sendPart() {
+    private static void sendPart(boolean freshEnvelope) {
         if (parts == null || currentPart < 0 || currentPart >= parts.size()) {
             resetSession();
             return;
         }
-        PasteTransfer.Payload payload = parts.get(currentPart);
-        byte[] zipped = PasteTransfer.gzip(PasteTransfer.encode(payload));
-        ServerCapabilities.Limits capabilities = ServerCapabilities.current();
-        if (capabilities == null || zipped.length > capabilities.maxPayloadBytes()) {
-            abort("maxfastbuild.paste.too_large");
-            return;
+        if (freshEnvelope) {
+            PasteTransfer.Payload payload = parts.get(currentPart);
+            byte[] zipped = PasteTransfer.gzip(PasteTransfer.encode(payload));
+            ServerCapabilities.Limits capabilities = ServerCapabilities.current();
+            if (capabilities == null || zipped.length > capabilities.maxPayloadBytes()) {
+                abort("maxfastbuild.paste.too_large");
+                return;
+            }
+            String payloadB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(zipped);
+            long seq = sequence++;
+            String signingInput = ProtocolEnvelope.CURRENT_VERSION + "\n" + sessionId + "\n" + seq + "\n" + payloadB64;
+            String mac = hmac(secret, signingInput);
+            activeEnvelope = ProtocolEnvelope.CURRENT_VERSION + " " + sessionId + " " + seq + " " + payloadB64 + " " + mac;
+            activeTransferId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
         }
-        String payloadB64 = Base64.getUrlEncoder().withoutPadding().encodeToString(zipped);
-        long seq = sequence++;
-        String signingInput = ProtocolEnvelope.CURRENT_VERSION + "\n" + sessionId + "\n" + seq + "\n" + payloadB64;
-        String mac = hmac(secret, signingInput);
-        String envelope = ProtocolEnvelope.CURRENT_VERSION + " " + sessionId + " " + seq + " " + payloadB64 + " " + mac;
-        Minecraft client = Minecraft.getInstance();
-        if (client.getConnection() == null) {
+        if (activeEnvelope == null || activeTransferId == null) {
             abort("maxfastbuild.paste.send_failed");
             return;
         }
+        Minecraft client = Minecraft.getInstance();
+        if (client.getConnection() == null) {
+            // The join callback normally handles this first, but a disconnect can race the
+            // command pump between two ticks. Preserve the durable paste cursor and wait for the
+            // next handshake instead of discarding the collected parts.
+            onConnectionJoin();
+            return;
+        }
         try {
-            for (String command : CHUNKS.split(envelope)) {
-                client.getConnection().sendCommand(command);
-            }
+            commandQueue = CHUNKS.splitWithDigest(activeEnvelope, activeTransferId);
+            nextCommand = 0;
+            nextCommandAt = now();
+            pendingSince = now();
         } catch (IllegalArgumentException ex) {
             abort("maxfastbuild.paste.too_large");
             return;
         }
-        waitingAck = true;
-        pendingSince = now();
+        waitingAck = false;
+    }
+
+    private static void pumpCommands(Minecraft client) {
+        if (commandQueue.isEmpty()) return;
+        if (client.getConnection() == null) {
+            onConnectionJoin();
+            return;
+        }
+        long now = now();
+        if (now < nextCommandAt) return;
+        client.getConnection().sendCommand(commandQueue.get(nextCommand++));
+        nextCommandAt = now + MaxFastBuildConfig.pasteCommandIntervalMs();
+        pendingSince = now;
+        if (nextCommand >= commandQueue.size()) {
+            commandQueue = List.of();
+            waitingAck = true;
+            pendingSince = now;
+        }
     }
 
     private static void abort(String messageKey) {
@@ -359,6 +444,10 @@ final class PasteController {
         pasteSessionId = null;
         currentPart = 0;
         waitingAck = false;
+        commandQueue = List.of();
+        nextCommand = 0;
+        activeEnvelope = null;
+        activeTransferId = null;
         sessionId = null;
         secret = null;
     }

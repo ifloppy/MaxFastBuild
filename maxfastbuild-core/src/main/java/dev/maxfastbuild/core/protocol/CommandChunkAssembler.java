@@ -28,13 +28,42 @@ public final class CommandChunkAssembler {
     }
 
     public List<String> split(String envelope) {
-        String transferId = UUID.randomUUID().toString().substring(0, 8);
+        return splitInternal(envelope, false);
+    }
+
+    /**
+     * Split an envelope and include a SHA-256 digest in every command. The digest is not a
+     * replacement for the HMAC; it lets the persistent receiver reject a truncated/corrupted
+     * transfer before it is parsed, and makes retry/resume idempotent.
+     */
+    public List<String> splitWithDigest(String envelope) {
+        return splitInternal(envelope, true, null);
+    }
+
+    /** Rebuild the same durable transfer when an ACK is lost. */
+    public List<String> splitWithDigest(String envelope, String transferId) {
+        return splitInternal(envelope, true, transferId);
+    }
+
+    private List<String> splitInternal(String envelope, boolean withDigest) {
+        return splitInternal(envelope, withDigest, null);
+    }
+
+    private List<String> splitInternal(String envelope, boolean withDigest, String requestedTransferId) {
+        if (envelope == null || envelope.isEmpty()) throw new IllegalArgumentException("empty_envelope");
+        String transferId = requestedTransferId == null
+                ? UUID.randomUUID().toString().replace("-", "").substring(0, withDigest ? 16 : 8)
+                : requestedTransferId;
+        if (!transferId.matches("[0-9a-f]{8,32}")) throw new IllegalArgumentException("invalid_transfer_id");
+        String digest = withDigest ? ProtocolDigest.sha256(envelope) : null;
         int total = Math.max(1, (envelope.length() + CHUNK_SIZE - 1) / CHUNK_SIZE);
         if (total > MAX_CHUNKS) throw new IllegalArgumentException("request_too_large");
         List<String> commands = new ArrayList<>(total);
         for (int index = 0; index < total; index++) {
             String chunk = envelope.substring(index * CHUNK_SIZE, Math.min(envelope.length(), (index + 1) * CHUNK_SIZE));
-            String command = "__mfb p " + transferId + " " + index + " " + total + " " + chunk;
+            String command = withDigest
+                    ? "__mfb p " + transferId + " " + index + " " + total + " " + digest + " " + chunk
+                    : "__mfb p " + transferId + " " + index + " " + total + " " + chunk;
             if (command.length() > MAX_COMMAND_LENGTH) throw new IllegalStateException("command_chunk_too_long");
             commands.add(command);
         }

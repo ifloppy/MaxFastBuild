@@ -8,6 +8,7 @@ import org.bukkit.entity.EntityType;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Server-side entity paste: type whitelist, item billing for item/vehicle entities, LootTable
@@ -49,14 +50,27 @@ final class PaperEntityHelper {
      * forbidden items).
      */
     static EntityData validate(String type, String snbt, Object registryAccess) {
-        if (type == null || !type.contains(":")) throw new EntityRejectException("missing_entity_id");
+        if (type == null || !type.startsWith("minecraft:")
+                || !type.matches("minecraft:[a-z0-9_./-]{1,64}")) {
+            throw new EntityRejectException("unsupported_entity_namespace");
+        }
+        if (type.equals("minecraft:command_block_minecart")) {
+            throw new EntityRejectException("command_entity_forbidden");
+        }
+        if (snbt == null || snbt.length() > 32_000) throw new EntityRejectException("entity_nbt_too_large");
         Object compound = PaperNbtHelper.parseCompound(snbt);
         if (compound == null) throw new EntityRejectException("unparseable_entity_nbt");
         String forbidden = PaperNbtHelper.validateEntityKeys(compound);
         if (forbidden != null) throw new EntityRejectException(forbidden);
+        String embeddedType = PaperNbtHelper.entityTypeId(compound);
+        if (embeddedType != null && !type.equals(embeddedType)) {
+            throw new EntityRejectException("entity_id_mismatch");
+        }
+        EntityType known = org.bukkit.Registry.ENTITY_TYPE.get(NamespacedKey.minecraft(type.substring(type.indexOf(':') + 1)));
+        if (known == null) throw new EntityRejectException("unknown_entity_type");
         Material item = billableItem(type);
         boolean decor = item == null && DECOR.contains(type);
-        boolean mob = item == null && !decor && isAliveMob(type);
+        boolean mob = item == null && !decor && known.isAlive();
         if (item == null && !mob && !decor) throw new EntityRejectException("unsupported_entity_type:" + type);
         List<PaperNbtHelper.ItemInstance> contents =
                 item != null ? PaperNbtHelper.decodeEntityItems(compound, registryAccess) : List.of();
@@ -73,7 +87,6 @@ final class PaperEntityHelper {
             case "hopper_minecart" -> Material.HOPPER_MINECART;
             case "furnace_minecart" -> Material.FURNACE_MINECART;
             case "tnt_minecart" -> Material.TNT_MINECART;
-            case "command_block_minecart" -> Material.COMMAND_BLOCK_MINECART;
             case "armor_stand" -> Material.ARMOR_STAND;
             case "item_frame" -> Material.ITEM_FRAME;
             case "glow_item_frame" -> Material.GLOW_ITEM_FRAME;
@@ -98,14 +111,23 @@ final class PaperEntityHelper {
         return bukkit != null && bukkit.isAlive();
     }
 
+    /** Spawn an entity without a pre-add hook. */
+    static SpawnResult spawn(World world, EntityData data, double x, double y, double z) {
+        return spawn(world, data, x, y, z, null);
+    }
+
     /**
      * Spawn the entity from its validated NBT at the given absolute position by re-adding
      * {@code id} + {@code Pos} and loading it via NMS (26.2: {@code EntityType.loadEntityRecursive},
      * older: {@code EntityType.create(CompoundTag, Level)}) then {@code addFreshEntity}.
-     * Returns the spawn outcome including the Bukkit wrapper so the caller can fire the Bukkit
-     * spawn/place events that audit plugins (CoreProtect/Prism) listen to.
+     *
+     * <p>{@code beforeAdd} runs after the Bukkit wrapper exists but before the entity enters the
+     * world. This is important for placement entities: vanilla fires {@code EntityPlaceEvent}
+     * before {@code addFreshEntity}, while adding first makes protection plugins cancel an entity
+     * that has already been inserted and can make a paste look successful while nothing remains.</p>
      */
-    static SpawnResult spawn(World world, EntityData data, double x, double y, double z) {
+    static SpawnResult spawn(World world, EntityData data, double x, double y, double z,
+                             Predicate<org.bukkit.entity.Entity> beforeAdd) {
         try {
             Object nmsWorld = world.getClass().getMethod("getHandle").invoke(world);
             Object compound = PaperNbtHelper.cloneCompound(data.compound());
@@ -114,14 +136,26 @@ final class PaperEntityHelper {
             PaperNbtHelper.putDoubleList(compound, "Pos", x, y, z);
             Object entity = loadEntity(compound, nmsWorld);
             if (entity == null) return new SpawnResult(false, null, "loadEntity returned null");
-            Method add = nmsWorld.getClass().getMethod("addFreshEntity",
-                    Class.forName("net.minecraft.world.entity.Entity"));
-            add.invoke(nmsWorld, entity);
+
             org.bukkit.entity.Entity bukkit = null;
             try {
                 Object wrapper = entity.getClass().getMethod("getBukkitEntity").invoke(entity);
                 if (wrapper instanceof org.bukkit.entity.Entity cast) bukkit = cast;
             } catch (ReflectiveOperationException ignored) {
+            }
+            if (beforeAdd != null && !beforeAdd.test(bukkit)) {
+                return new SpawnResult(false, bukkit, "spawn event cancelled");
+            }
+
+            Method add = nmsWorld.getClass().getMethod("addFreshEntity",
+                    Class.forName("net.minecraft.world.entity.Entity"));
+            // addFreshEntity can reject an entity (for example when the target chunk is not
+            // accepting entities or another server/plugin hook cancels the add). The reflective
+            // call's return value is the authoritative outcome; treating invocation itself as
+            // success leaves the entity item consumed even though nothing entered the world.
+            Object addResult = add.invoke(nmsWorld, entity);
+            if (!(addResult instanceof Boolean added) || !added) {
+                return new SpawnResult(false, bukkit, "addFreshEntity returned false");
             }
             return new SpawnResult(true, bukkit, null);
         } catch (ReflectiveOperationException | LinkageError e) {

@@ -114,6 +114,15 @@ debug:
   tile-readback: false
 protocol:
   session-minutes: 30
+  transport:
+    # Paste chunks are persisted in SQLite, then removed after this idle retention window.
+    retention-seconds: 300
+    # Server-side command-packet guard; excess chunks are silently dropped and retried by the client.
+    commands-per-second: 16
+    command-burst: 4
+    # Hard storage quotas for abandoned command transfers.
+    max-inflight-transfers-per-player: 3
+    max-storage-bytes: 8388608
   # Max bytes of a single gzipped paste payload part (NBT-heavy schematics need headroom).
   max-payload-bytes: 131072
   paste:
@@ -121,3 +130,6 @@ protocol:
     max-parts: 64
     max-blocks-per-part: 1600
     max-total-blocks: 300000
+    # Durable upload quotas; completed uploads are retained only as short-lived idempotency records.
+    max-inflight-uploads-per-player: 2
+    max-storage-bytes: 16777216

@@ -17,6 +17,7 @@
   "maxfastbuild.paste.instant_on": "即时粘贴：开启 — 粘贴立即执行，费用按 %s 倍收取。注意：即时粘贴也可能破坏生电机器，生电请谨慎使用",
   "maxfastbuild.paste.instant_off": "即时粘贴：关闭 — 粘贴作为任务排队执行",
   "maxfastbuild.paste.instant_hud": "即时粘贴",
+  "maxfastbuild.paste.uploading": "正在上传粘贴数据：第 %s/%s 段…",
   "maxfastbuild.paste.warning.redstone": "粘贴可能破坏生电机器 — 生电请谨慎使用",
   "maxfastbuild.paste.sent": "已发送 %s 段粘贴数据；服务器将逐块校验并扣除材料费用",
   "maxfastbuild.paste.in_progress": "已有粘贴任务正在进行",

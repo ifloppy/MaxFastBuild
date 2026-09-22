@@ -24,4 +24,18 @@ class SecureProtocolTest {
         ProtocolEnvelope changed = new ProtocolEnvelope(valid.version(), valid.sessionId(), valid.sequence(), valid.payload() + "A", valid.mac());
         assertThatThrownBy(() -> protocol.verify(player, changed)).hasMessage("invalid_mac");
     }
+
+    @Test void identicalGzipEnvelopeCanBeRetriedIdempotently() {
+        SecureProtocol protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(5), 1024);
+        UUID player = UUID.randomUUID();
+        SecureProtocol.Session session = protocol.issue(player);
+        byte[] gzip = PasteTransfer.gzip("{}".getBytes(StandardCharsets.UTF_8));
+        ProtocolEnvelope valid = protocol.sign(session, 0, gzip);
+        assertThat(protocol.verify(player, valid)).isEqualTo(gzip);
+        assertThat(protocol.verify(player, valid)).isEqualTo(gzip);
+
+        ProtocolEnvelope differentPayload = protocol.sign(session, 0,
+                PasteTransfer.gzip("{\"different\":true}".getBytes(StandardCharsets.UTF_8)));
+        assertThatThrownBy(() -> protocol.verify(player, differentPayload)).hasMessage("replayed_request");
+    }
 }

@@ -26,7 +26,8 @@ public final class SecureProtocol {
     public Session issue(UUID playerId) {
         byte[] secret = new byte[32];
         random.nextBytes(secret);
-        Session session = new Session(UUID.randomUUID().toString(), playerId, secret, clock.instant().plus(lifetime), -1);
+        Session session = new Session(UUID.randomUUID().toString(), playerId, secret,
+                clock.instant().plus(lifetime), -1, null);
         sessions.put(session.id(), session);
         return session;
     }
@@ -43,14 +44,28 @@ public final class SecureProtocol {
         if (envelope.version() != ProtocolEnvelope.CURRENT_VERSION) throw new ProtocolException("unsupported_version");
         if (current == null || !current.playerId().equals(playerId)) throw new ProtocolException("invalid_session");
         if (clock.instant().isAfter(current.expiresAt())) { sessions.remove(current.id()); throw new ProtocolException("expired_session"); }
-        if (envelope.sequence() <= current.lastSequence()) throw new ProtocolException("replayed_request");
+        if (envelope.sequence() < 0) throw new ProtocolException("invalid_sequence");
+        if (envelope.sequence() < current.lastSequence()) throw new ProtocolException("replayed_request");
         String expected = mac(current.secret(), new ProtocolEnvelope(envelope.version(), envelope.sessionId(), envelope.sequence(), envelope.payload(), "").signingInput());
         if (!MessageDigest.isEqual(expected.getBytes(StandardCharsets.US_ASCII), envelope.mac().getBytes(StandardCharsets.US_ASCII))) throw new ProtocolException("invalid_mac");
         byte[] decoded;
         try { decoded = B64D.decode(envelope.payload()); } catch (IllegalArgumentException ex) { throw new ProtocolException("invalid_payload"); }
         if (decoded.length > maxPayloadBytes) throw new ProtocolException("payload_too_large");
-        sessions.put(current.id(), current.withLastSequence(envelope.sequence()));
+        // A paste retry may repeat the final authenticated envelope when its ACK was lost. Only
+        // allow that idempotent case for the gzip bulk channel; legacy JSON requests must remain
+        // strictly one-shot because replaying one could charge/build twice.
+        if (envelope.sequence() == current.lastSequence()) {
+            if (!isGzip(decoded) || !envelope.payload().equals(current.lastPayload())) {
+                throw new ProtocolException("replayed_request");
+            }
+            return decoded;
+        }
+        sessions.put(current.id(), current.withLastSequence(envelope.sequence(), envelope.payload()));
         return decoded;
+    }
+
+    private static boolean isGzip(byte[] payload) {
+        return payload.length >= 2 && (payload[0] & 0xFF) == 0x1F && (payload[1] & 0xFF) == 0x8B;
     }
 
     private static String mac(byte[] secret, String value) {
@@ -61,9 +76,12 @@ public final class SecureProtocol {
         } catch (GeneralSecurityException ex) { throw new IllegalStateException(ex); }
     }
 
-    public record Session(String id, UUID playerId, byte[] secret, Instant expiresAt, long lastSequence) {
+    public record Session(String id, UUID playerId, byte[] secret, Instant expiresAt, long lastSequence,
+                          String lastPayload) {
         @Override public byte[] secret() { return secret.clone(); }
-        Session withLastSequence(long value) { return new Session(id, playerId, secret, expiresAt, value); }
+        Session withLastSequence(long value, String payload) {
+            return new Session(id, playerId, secret, expiresAt, value, payload);
+        }
     }
 
     public static final class ProtocolException extends RuntimeException {

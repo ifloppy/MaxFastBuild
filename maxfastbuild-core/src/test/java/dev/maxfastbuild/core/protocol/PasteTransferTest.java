@@ -79,6 +79,7 @@ class PasteTransferTest {
         assertThat(parts).hasSize(3);
         assertThat(parts).allSatisfy(part -> assertThat(part.blocks()).hasSizeBetween(1, 3));
         assertThat(parts).allSatisfy(part -> assertThat(part.regions()).containsExactly(REGION));
+        assertThat(parts).allSatisfy(PasteTransfer::verifyChecksum);
     }
 
     @Test void splitRejectsHugePaste() {
@@ -101,5 +102,12 @@ class PasteTransferTest {
         assertThat(PasteTransfer.MAX_INSTANT_ENTITIES_PER_CHUNK).isEqualTo(32);
         assertThat(PasteTransfer.MAX_NORMAL_ENTITIES).isEqualTo(500);
         assertThat(PasteTransfer.MAX_NORMAL_ENTITIES_PER_CHUNK).isEqualTo(64);
+    }
+
+    @Test void entityPayloadRejectsUnsafeNamespaceAndCoordinates() {
+        assertThatThrownBy(() -> new PasteTransfer.EntityEntry("evil:minecart", 0, 64, 0, "{}"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PasteTransfer.EntityEntry("minecraft:minecart", Double.NaN, 64, 0, "{}"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

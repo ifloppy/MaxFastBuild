@@ -17,6 +17,7 @@
   "maxfastbuild.paste.instant_on": "Instant paste ON — pastes execute immediately at %s× cost (see server config). Note: instant paste may also disrupt redstone machines; use with caution on technical builds",
   "maxfastbuild.paste.instant_off": "Instant paste OFF — pastes enqueue as tasks",
   "maxfastbuild.paste.instant_hud": "INSTANT PASTE",
+  "maxfastbuild.paste.uploading": "Uploading paste part %s/%s…",
   "maxfastbuild.paste.warning.redstone": "Pasting may disrupt redstone machines — use with caution on technical builds",
   "maxfastbuild.paste.sent": "Sent %s-part paste; server validates, takes materials, and charges",
   "maxfastbuild.paste.in_progress": "A paste is already in progress",

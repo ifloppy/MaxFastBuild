@@ -282,8 +282,6 @@ public final class LitematicaBridge {
         Rotation subRotation = (Rotation) invokeQuiet(subRegion, "getRotation");
         BlockPos subPos = (BlockPos) invokeQuiet(subRegion, "getPos");
         if (subMirror == null || subRotation == null || subPos == null) return;
-        Rotation combined = placementRotation.getRotated(subRotation);
-        Mirror subMirrorAdj = adjustedSubMirror(subMirror, placementRotation);
         BlockPos boxT = getTransformedBlockPos(subPos, placementMirror, placementRotation);
         for (Object info : collection) {
             Vec3 pos = asVec3(invokeQuiet(info, "getPosition"));
@@ -311,7 +309,7 @@ public final class LitematicaBridge {
                     clip(snbt, 600));
             if (snbt == null || snbt.isBlank()) continue;
             Vec3 transformed = getTransformedVec3(
-                    getTransformedVec3(pos, placementMirror, placementRotation), subMirrorAdj, combined);
+                    getTransformedVec3(pos, placementMirror, placementRotation), subMirror, subRotation);
             double wx = boxT.getX() + origin.getX() + transformed.x();
             double wy = boxT.getY() + origin.getY() + transformed.y();
             double wz = boxT.getZ() + origin.getZ() + transformed.z();
@@ -351,6 +349,18 @@ public final class LitematicaBridge {
         } catch (ReflectiveOperationException | RuntimeException ignored) {
             return null;
         }
+    }
+
+    /**
+     * Litematica swaps the sub-region mirror axes when the placement itself is rotated by 90° so
+     * the mirrored axis flips meaning for block placement.
+     */
+    private static Mirror adjustedSubMirror(Mirror subMirror, Rotation placementRotation) {
+        if (subMirror == Mirror.NONE) return subMirror;
+        if (placementRotation == Rotation.CLOCKWISE_90 || placementRotation == Rotation.COUNTERCLOCKWISE_90) {
+            return subMirror == Mirror.FRONT_BACK ? Mirror.LEFT_RIGHT : Mirror.FRONT_BACK;
+        }
+        return subMirror;
     }
 
     /**
@@ -471,18 +481,6 @@ public final class LitematicaBridge {
             case 3: return new BlockPos(z, y, -x);   // COUNTERCLOCKWISE_90
             default: return new BlockPos(x, y, z);
         }
-    }
-
-    /**
-     * Litematica swaps the sub-region mirror axes when the placement itself is rotated by 90° so the
-     * mirrored axis flips meaning (see {@code placeBlocksToWorld}).
-     */
-    private static Mirror adjustedSubMirror(Mirror subMirror, Rotation placementRotation) {
-        if (subMirror == Mirror.NONE) return subMirror;
-        if (placementRotation == Rotation.CLOCKWISE_90 || placementRotation == Rotation.COUNTERCLOCKWISE_90) {
-            return subMirror == Mirror.FRONT_BACK ? Mirror.LEFT_RIGHT : Mirror.FRONT_BACK;
-        }
-        return subMirror;
     }
 
     private static Object invokeStatic(Class<?> type, String name) throws ReflectiveOperationException {

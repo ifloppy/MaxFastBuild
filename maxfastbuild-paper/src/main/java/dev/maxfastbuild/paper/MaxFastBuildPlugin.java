@@ -41,6 +41,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     /** Block positions currently replaced by client-only preview packets. */
     private final Map<UUID, PreviewState> previews = new ConcurrentHashMap<>();
     private final Map<UUID, TokenBucket> limits = new ConcurrentHashMap<>();
+    /** Transport-level bucket; paste chunks are paced on the client and silently dropped when abusive. */
+    private final Map<UUID, TokenBucket> protocolCommandLimits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
     private final Map<UUID, PendingPaste> pendingPastes = new ConcurrentHashMap<>();
@@ -51,9 +53,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     /** Persisted executable tasks discovered during this plugin enable. They stay inert until explicitly resumed. */
     private final Set<UUID> startupQuarantinedTasks = ConcurrentHashMap.newKeySet();
-    private final CommandChunkAssembler chunks = new CommandChunkAssembler(Clock.systemUTC(), Duration.ofSeconds(15));
-    /** Reassembles multi-part Litematica paste payloads (session per player+id, 120s window). */
-    private PasteAccumulator pastes;
+    /** Durable command chunks and paste parts; upload state must not live only on the JVM heap. */
+    private SqliteProtocolTransferStore transferStore;
     /** Effective server limits, replaced atomically on reload. */
     private volatile ServerLimits serverLimits;
     private SecureProtocol protocol;
@@ -78,8 +79,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         saveDefaultConfig();
         mergeConfigDefaults();
         serverLimits = loadServerLimits();
-        pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120),
-                serverLimits.maxPasteParts(), serverLimits.maxBlocksPerPart(), serverLimits.maxPasteTotalBlocks());
         refreshDebugFlags();
         SeedCatalog.reload(getConfig());
         messages = new PluginMessages(this);
@@ -87,6 +86,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         try {
             protocol = new SecureProtocol(Clock.systemUTC(), Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)), serverLimits.maxPayloadBytes());
             database = new SqliteDatabase(getDataFolder().toPath().resolve("maxfastbuild.db"));
+            transferStore = new SqliteProtocolTransferStore(database,
+                    getConfig().getInt("protocol.transport.max-inflight-transfers-per-player", 3),
+                    getConfig().getInt("protocol.transport.max-storage-bytes", 8 * 1024 * 1024),
+                    getConfig().getInt("protocol.paste.max-inflight-uploads-per-player", 2),
+                    getConfig().getInt("protocol.paste.max-storage-bytes", 16 * 1024 * 1024),
+                    serverLimits.maxPasteParts(), serverLimits.maxPayloadBytes(),
+                    Duration.ofSeconds(Math.max(30, getConfig().getLong("protocol.transport.retention-seconds", 300))));
+            transferStore.initialize();
             SqliteTaskRepository sqliteTasks = new SqliteTaskRepository(database);
             sqliteTasks.initialize();
             if (getConfig().getBoolean("execution.async-queue.enabled", true)) {
@@ -126,6 +133,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             long period = Math.max(1, getConfig().getLong("execution.ticks-per-block", 1));
             getServer().getScheduler().runTaskTimer(this, () -> { tickPlanners(); tickPastePlanners(); tickTasks(); processCommandQueues(); }, period, period);
             active = true;
+            // A fully uploaded paste is durably kept in READY state until it reaches task
+            // admission. Recover it for players who remain online across a plugin reload.
+            getServer().getScheduler().runTask(this, () -> {
+                if (!active || transferStore == null) return;
+                for (Player online : Bukkit.getOnlinePlayers()) resumeReadyPastes(online);
+            });
             getLogger().info("CLI messages language: " + messages.language());
             getLogger().info("Compatibility mode: Player.breakBlock + BlockPlaceEvent; CoreProtect API is fallback-only (no duplicate replacement logs)");
             ensureSqliteDriver();
@@ -253,13 +266,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             clearAllPreviews();
             selections.clear();
             limits.clear();
+            protocolCommandLimits.clear();
             sessions.clear();
             pendingBuilds.clear();
             pendingPastes.clear();
             lastPasteNeeds.clear();
             commandQueues.clear();
-            try { chunks.clear(); } catch (RuntimeException ignored) { }
-            try { if (pastes != null) pastes.clear(); } catch (RuntimeException ignored) { }
+            transferStore = null;
             if (tasks != null) {
                 try { tasks.closeQuietly(); } catch (RuntimeException ex) {
                     getLogger().warning("SQLite close failed: " + ex.getMessage());
@@ -355,16 +368,26 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                         sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "chunk_arity"));
                         return;
                     }
-                    String chunk = parts.length == 6 ? parts[5] : String.join(" ", Arrays.copyOfRange(parts, 5, parts.length));
-                    Optional<String> complete = chunks.accept(player.getUniqueId(), parts[2], Integer.parseInt(parts[3]), Integer.parseInt(parts[4]), chunk);
-                    if (complete.isEmpty()) return;
-                    String[] envelopeParts = complete.get().split(" ", 5);
+                    if (!player.hasPermission("maxfastbuild.use") || !allowProtocolChunk(player)) return;
+                    // A legacy chunk can itself contain spaces because it is a slice of the
+                    // space-separated envelope. Detect the optional v5 digest by its exact
+                    // base64url-SHA-256 shape, rather than by token count.
+                    boolean hasEnvelopeDigest = parts.length >= 7
+                            && parts[5].matches("[A-Za-z0-9_-]{43}");
+                    String envelopeDigest = hasEnvelopeDigest ? parts[5] : null;
+                    int chunkStart = hasEnvelopeDigest ? 6 : 5;
+                    String chunk = String.join(" ", Arrays.copyOfRange(parts, chunkStart, parts.length));
+                    SqliteProtocolTransferStore.ChunkResult chunkResult = transferStore.acceptChunk(
+                            player.getUniqueId(), parts[2], Integer.parseInt(parts[3]), Integer.parseInt(parts[4]),
+                            envelopeDigest, chunk);
+                    if (!chunkResult.complete()) return;
+                    String[] envelopeParts = chunkResult.envelope().split(" ", 5);
                     if (envelopeParts.length != 5) throw new IllegalArgumentException("invalid_envelope");
                     ProtocolEnvelope envelope = new ProtocolEnvelope(Integer.parseInt(envelopeParts[0]), envelopeParts[1], Long.parseLong(envelopeParts[2]), envelopeParts[3], envelopeParts[4]);
                     byte[] verified = protocol.verify(player.getUniqueId(), envelope);
                     if (isGzipPayload(verified)) {
                         PasteTransfer.Payload paste = PasteTransfer.decode(PasteTransfer.gunzip(verified));
-                        handlePastePayload(player, paste);
+                        handlePastePayload(player, paste, verified);
                         return;
                     }
                     ClientRequest request = GSON.fromJson(new String(verified, StandardCharsets.UTF_8), ClientRequest.class);
@@ -388,6 +411,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         UUID playerId = event.getPlayer().getUniqueId();
         pendingBuilds.remove(playerId);
         commandQueues.remove(playerId);
+        protocolCommandLimits.remove(playerId);
         lastPasteNeeds.remove(playerId);
 
         Instant now = Instant.now();
@@ -438,6 +462,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             debugLog("resuming paste planning player=" + event.getPlayer().getName()
                     + " processed=" + pendingPaste.processed);
         }
+        resumeReadyPastes(event.getPlayer());
         for (BuildTask task : tasks.recoverable()) {
             if (!task.playerId().equals(event.getPlayer().getUniqueId())) continue;
             // Anything discovered during enable stays inert even when its owner later joins.
@@ -1567,20 +1592,66 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
      * client streams the next part; when the final part arrives the whole paste is planned and enqueued
      * as a single build task.
      */
-    private void handlePastePayload(Player player, PasteTransfer.Payload payload) {
+    private void handlePastePayload(Player player, PasteTransfer.Payload payload, byte[] compressedPayload) {
         if (!player.hasPermission("maxfastbuild.use")) {
             sendProtocol(player, "error", "maxfastbuild.error.no_permission", Map.of("permission", "maxfastbuild.use"));
             return;
         }
+        validatePastePart(payload);
         int entityLimit = payload.instant() ? limits().maxInstantEntities() : limits().maxNormalEntities();
         if (payload.entities().size() > entityLimit) {
             sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities", Map.of("limit", entityLimit));
             return;
         }
-        Optional<PasteAccumulator.Assembled> assembled = pastes.accept(player.getUniqueId(), payload);
+        SqliteProtocolTransferStore.PasteResult stored = transferStore.acceptPastePart(
+                player.getUniqueId(), payload, compressedPayload);
         sendMarked(player, GSON.toJson(Map.of("mfb", 1, "type", "paste_ack",
-                "pasteSessionId", payload.pasteSessionId(), "part", payload.part(), "parts", payload.parts())));
+                "pasteSessionId", payload.pasteSessionId(), "part", payload.part(), "parts", payload.parts(),
+                "received", stored.received(), "complete", stored.complete())));
+        if (!stored.completedParts().isEmpty()) submitStoredPaste(player, stored.completedParts());
+    }
+
+    /** Rebuild a durable upload outside the network handler, including after a reload/restart. */
+    private void submitStoredPaste(Player player, List<byte[]> partBytes) {
+        PasteAccumulator assembler = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(30),
+                limits().maxPasteParts(), limits().maxBlocksPerPart(), limits().maxPasteTotalBlocks());
+        Optional<PasteAccumulator.Assembled> assembled = Optional.empty();
+        for (byte[] partBytesItem : partBytes) {
+            PasteTransfer.Payload part = PasteTransfer.decode(PasteTransfer.gunzip(partBytesItem));
+            assembled = assembler.accept(player.getUniqueId(), part);
+        }
         assembled.ifPresent(complete -> submitPaste(player, complete));
+    }
+
+    /** Resume uploads that reached SQLite READY but did not yet enter the durable task queue. */
+    private void resumeReadyPastes(Player player) {
+        if (!active || transferStore == null || player == null || !player.isOnline()
+                || !player.hasPermission("maxfastbuild.use") || pendingPastes.containsKey(player.getUniqueId())) return;
+        try {
+            for (SqliteProtocolTransferStore.ReadyPaste ready : transferStore.readyPastes(player.getUniqueId())) {
+                if (pendingPastes.containsKey(player.getUniqueId())) break;
+                submitStoredPaste(player, ready.parts());
+            }
+        } catch (RuntimeException ex) {
+            getLogger().warning("Failed to resume durable paste for " + player.getName() + ": " + ex.getMessage());
+        }
+    }
+
+    /** Validate cheap, bounded fields before a payload is allowed to consume durable quota. */
+    private void validatePastePart(PasteTransfer.Payload payload) {
+        PasteTransfer.verifyChecksum(payload);
+        if (payload.parts() < 1 || payload.parts() > limits().maxPasteParts()
+                || payload.part() < 0 || payload.part() >= payload.parts()
+                || payload.blocks().isEmpty() || payload.blocks().size() > limits().maxBlocksPerPart()
+                || payload.origin().length != 3 || payload.palette().isEmpty() || payload.regions().isEmpty()) {
+            throw new IllegalArgumentException("invalid_paste_part");
+        }
+        for (String block : payload.blocks()) {
+            PasteTransfer.Entry entry = PasteTransfer.parseEntry(block);
+            if (entry.paletteIndex() >= payload.palette().size()) {
+                throw new IllegalArgumentException("palette_index_out_of_range");
+            }
+        }
     }
 
     /**
@@ -1621,7 +1692,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             String target = brace >= 0 ? raw.substring(0, brace) : raw;
             String targetNbt = brace >= 0 ? raw.substring(brace) : null;
             boolean preserveContents;
-            if (targetNbt != null && PaperNbtHelper.parseCompound(targetNbt) == null) {
+            if (targetNbt != null && (!PaperNbtHelper.withinSnbtLimit(targetNbt)
+                    || PaperNbtHelper.parseCompound(targetNbt) == null)) {
                 debugLog("paste rejected player=" + player.getName()
                         + " reason=unparseable_nbt raw=\"" + raw + "\"");
                 sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "unparseable_nbt"));
@@ -1724,7 +1796,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-        PendingPaste pending = new PendingPaste(player, worldName, instant, positions, entities,
+        PendingPaste pending = new PendingPaste(player, assembled.pasteSessionId(), worldName, instant, positions, entities,
                 regionMetrics.bounds(), regionMetrics.volume(), limits.maxAffectedBlocks());
         pending.issues.addAll(entityIssues);
         pendingPastes.put(player.getUniqueId(), pending);
@@ -2072,6 +2144,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
         if (pending.instant) {
             settleInstant(player, pending, plan, charge, transactionId, tookMoney);
+            completeStoredPaste(pending);
             return;
         }
 
@@ -2095,6 +2168,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (tookItems) {
             taskRemovals.put(taskId, removals);
         }
+        completeStoredPaste(pending);
         sendProtocol(player, "accepted", "maxfastbuild.task.accepted", Map.of(
                 "taskId", taskId.toString(),
                 "blocks", mutations.size(),
@@ -2160,6 +2234,18 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         debugLog("paste precheck failed player=" + player.getName() + " fatal=" + fatal + " total=" + total);
         sendProtocol(player, "error", "maxfastbuild.error.paste_precheck_failed",
                 Map.of("count", total, "fatal", fatal, "detail", text));
+    }
+
+    /** Release the durable upload only after instant execution or task admission is complete. */
+    private void completeStoredPaste(PendingPaste pending) {
+        if (transferStore == null || pending == null || pending.pasteSessionId == null) return;
+        try {
+            transferStore.markPasteCompleted(pending.player.getUniqueId(), pending.pasteSessionId);
+        } catch (RuntimeException ex) {
+            // The task is already admitted. Keep the READY tombstone if SQLite briefly fails so a
+            // later retry can diagnose/reconcile it instead of deleting the only durable payload.
+            getLogger().warning("Failed to finalize durable paste " + pending.pasteSessionId + ": " + ex.getMessage());
+        }
     }
 
     /** Short error description for an unexpected server error (class name + message). */
@@ -2489,9 +2575,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             mergeConfigDefaults();
             reloadConfig();
             serverLimits = loadServerLimits();
-            if (pastes != null) pastes.clear();
-            pastes = new PasteAccumulator(Clock.systemUTC(), Duration.ofSeconds(120),
-                    serverLimits.maxPasteParts(), serverLimits.maxBlocksPerPart(), serverLimits.maxPasteTotalBlocks());
+            transferStore = new SqliteProtocolTransferStore(database,
+                    getConfig().getInt("protocol.transport.max-inflight-transfers-per-player", 3),
+                    getConfig().getInt("protocol.transport.max-storage-bytes", 8 * 1024 * 1024),
+                    getConfig().getInt("protocol.paste.max-inflight-uploads-per-player", 2),
+                    getConfig().getInt("protocol.paste.max-storage-bytes", 16 * 1024 * 1024),
+                    serverLimits.maxPasteParts(), serverLimits.maxPayloadBytes(),
+                    Duration.ofSeconds(Math.max(30, getConfig().getLong("protocol.transport.retention-seconds", 300))));
+            transferStore.initialize();
             protocol = new SecureProtocol(Clock.systemUTC(),
                     Duration.ofMinutes(getConfig().getLong("protocol.session-minutes", 30)),
                     serverLimits.maxPayloadBytes());
@@ -2950,13 +3041,24 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                                         Map<org.bukkit.inventory.ItemStack, Long> contents,
                                         org.bukkit.inventory.ItemStack item, long count) {
         if (item == null || item.getType().isAir() || count <= 0) return;
+        if (count > 1_000_000L) {
+            throw new PasteRejectException("maxfastbuild.error.invalid_material",
+                    Map.of("material", item.getType().getKey().toString()));
+        }
         if (item.getItemMeta() instanceof org.bukkit.inventory.meta.BlockStateMeta bsm
                 && bsm.hasBlockState()
                 && bsm.getBlockState() instanceof org.bukkit.inventory.InventoryHolder holder) {
             blocks.merge(item.getType().getKey().toString(), count, Long::sum);
             for (org.bukkit.inventory.ItemStack inner : holder.getInventory().getContents()) {
                 if (inner == null || inner.getType().isAir()) continue;
-                billContentItem(blocks, contents, inner, count * inner.getAmount());
+                long nestedCount;
+                try {
+                    nestedCount = Math.multiplyExact(count, (long) inner.getAmount());
+                } catch (ArithmeticException ex) {
+                    throw new PasteRejectException("maxfastbuild.error.invalid_material",
+                            Map.of("material", item.getType().getKey().toString()));
+                }
+                billContentItem(blocks, contents, inner, nestedCount);
             }
             return;
         }
@@ -3038,8 +3140,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             PaperEntityHelper.SpawnResult result = null;
             try {
-                result = PaperEntityHelper.spawn(bukkitWorld, pe.data(), pe.x(), pe.y(), pe.z());
-                if (result.added() && fireEntitySpawnEvent(player, result.entity(), pe.data())) {
+                boolean placementEntity = pe.data().billableItem() != null;
+                result = PaperEntityHelper.spawn(bukkitWorld, pe.data(), pe.x(), pe.y(), pe.z(),
+                        placementEntity ? entity -> fireEntitySpawnEvent(player, entity, pe.data()) : null);
+                if (result.added()) {
+                    if (placementEntity) auditEntityPlacement(player, result.entity(), pe.data());
                     spawned++;
                 } else {
                     if (!result.added()) {
@@ -3047,12 +3152,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                                 + " type=" + pe.data().type() + " reason="
                                 + (result.reason() == null ? "unknown" : result.reason()));
                     }
-                    // A cancelled event (protection plugin) removes the entity so it does not linger
-                    // while its materials are refunded.
-                    if (result.added() && result.entity() != null) {
-                        result.entity().remove();
-                        cancelled++;
-                    }
+                    if ("spawn event cancelled".equals(result.reason())) cancelled++;
                     notSpawned.add(pe);
                 }
             } catch (RuntimeException | LinkageError ex) {
@@ -3080,7 +3180,14 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     /**
      * Fire the Bukkit event that audit plugins (CoreProtect/Prism) listen to so a pasted entity is
-     * recorded as the player's action, exactly like placing it by hand. Hanging entities (item     * frames, paintings, leash knots) fire {@code HangingPlaceEvent} — the only placement event     * CoreProtect handles; minecarts/boats/armor stands fire {@code EntityPlaceEvent} (Prism     * {@code entity-place}; CoreProtect does not track those even for vanilla players); everything     * else fires {@code EntitySpawnEvent}. A cancellation removes the entity. Returns false when an     * event was fired and cancelled; true when it should count as spawned.     */
+     * recorded as the player's action, exactly like placing it by hand. Hanging entities (item
+     * frames, paintings, leash knots) fire {@code HangingPlaceEvent} — the only placement event
+     * CoreProtect handles; minecarts/boats/armor stands fire {@code EntityPlaceEvent} (Prism
+     * {@code entity-place}; CoreProtect does not track those even for vanilla players); everything
+     * else fires {@code EntitySpawnEvent}. For billable entities this is called before insertion;
+     * for other entities it is the existing post-insertion spawn-event path. Returns false when an
+     * event was fired and cancelled; true when it should count as spawned.
+     */
     private static boolean fireEntitySpawnEvent(Player player, org.bukkit.entity.Entity entity,
                                                 PaperEntityHelper.EntityData data) {
         if (player == null || entity == null) return true;
@@ -3091,29 +3198,35 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             Bukkit.getPluginManager().callEvent(event);
             return !event.isCancelled();
         }
-if (data.billableItem() != null) {
+        if (data.billableItem() != null) {
             org.bukkit.event.entity.EntityPlaceEvent event = new org.bukkit.event.entity.EntityPlaceEvent(
                     entity, player, block, org.bukkit.block.BlockFace.UP);
             Bukkit.getPluginManager().callEvent(event);
-            if (event.isCancelled()) return false;
-            // CoreProtect's EntityPlaceListener only logs Boat/Minecart; HangingPlaceListener
-            // logs ItemFrame/Painting as block-place. Directly queue CO spawn logs for placed
-            // entities that CO's listeners skip (armor stands, leash knots, …).
-            if (!(entity instanceof org.bukkit.entity.Boat || entity instanceof org.bukkit.entity.Minecart)) {
-                reflectCoEntitySpawnLog(player.getName(), entity.getUniqueId(), entity.getType(), entity.getLocation());
-            }
-            return true;
+            return !event.isCancelled();
         }
         org.bukkit.event.entity.EntitySpawnEvent event = new org.bukkit.event.entity.EntitySpawnEvent(entity);
         Bukkit.getPluginManager().callEvent(event);
         return !event.isCancelled();
     }
 
+    /** Log placed entities after addFreshEntity accepted them, so failed spawns are not audited. */
+    private static void auditEntityPlacement(Player player, org.bukkit.entity.Entity entity,
+                                             PaperEntityHelper.EntityData data) {
+        if (player == null || entity == null || data.billableItem() == null) return;
+        // CoreProtect's EntityPlaceListener only logs Boat/Minecart; HangingPlaceListener logs
+        // ItemFrame/Painting as block-place. Directly queue CO spawn logs for placed entities that
+        // CO's listeners skip (armor stands, leash knots, …).
+        if (!(entity instanceof org.bukkit.entity.Boat || entity instanceof org.bukkit.entity.Minecart)) {
+            reflectCoEntitySpawnLog(player.getName(), entity.getUniqueId(), entity.getType(), entity.getLocation());
+        }
+    }
+
     /**
      * Directly enqueue an entity spawn log to CoreProtect via reflection, bypassing event-based
      * listeners that only cover a subset of entity types ({@code EntityPlaceListener} only handles
      * Boat/Minecart; {@code HangingPlaceListener} only handles ItemFrame/Painting). This ensures
-     * armor stands, leash knots, and other entities pasted via MaxFastBuild appear in CO lookups.     * No-op when CoreProtect is absent or the API method is missing.
+     * armor stands, leash knots, and other entities pasted via MaxFastBuild appear in CO lookups.
+     * No-op when CoreProtect is absent or the API method is missing.
      */
     private static void reflectCoEntitySpawnLog(String user, java.util.UUID uuid,
                                                 org.bukkit.entity.EntityType type, org.bukkit.Location location) {
@@ -3459,6 +3572,19 @@ if (data.billableItem() != null) {
         return limits.computeIfAbsent(player.getUniqueId(), ignored -> new TokenBucket(requests + burst, requests, interval, Clock.systemUTC())).tryAcquire();
     }
 
+    /**
+     * Bound the number of vanilla command packets accepted by the paste transport. A rejected
+     * chunk is deliberately silent: sending an error for every dropped packet would itself create
+     * a response storm, while the client timeout will retry the durable chunk.
+     */
+    private boolean allowProtocolChunk(Player player) {
+        if (player.hasPermission("maxfastbuild.bypass.rate-limit")) return true;
+        int perSecond = Math.max(1, getConfig().getInt("protocol.transport.commands-per-second", 16));
+        int burst = Math.max(1, getConfig().getInt("protocol.transport.command-burst", 4));
+        return protocolCommandLimits.computeIfAbsent(player.getUniqueId(), ignored ->
+                new TokenBucket(perSecond + burst, perSecond, 1000, Clock.systemUTC())).tryAcquire();
+    }
+
     private void issueSession(Player player) {
         // Legacy HMAC path only. Secret is sent once over the marked system channel (same trust as other protocol traffic).
         // Compact place/break do not use this session; prefer those for normal clients.
@@ -3670,6 +3796,7 @@ if (data.billableItem() != null) {
     /** In-progress validation of an assembled paste, ticked like a {@link PendingBuild}. */
     private static final class PendingPaste {
         Player player;
+        final String pasteSessionId;
         final String world;
         final boolean instant;
         final Iterator<PastePos> iterator;
@@ -3685,10 +3812,11 @@ if (data.billableItem() != null) {
         long processed = 0;
         long planningSkipped = 0;
 
-        PendingPaste(Player player, String world, boolean instant, List<PastePos> positions,
+        PendingPaste(Player player, String pasteSessionId, String world, boolean instant, List<PastePos> positions,
                      List<PendingEntity> entities, Bounds regionBounds, long regionBlocks,
                      long maxAffectedBlocks) {
             this.player = player;
+            this.pasteSessionId = pasteSessionId;
             this.world = world;
             this.instant = instant;
             this.iterator = positions.iterator();

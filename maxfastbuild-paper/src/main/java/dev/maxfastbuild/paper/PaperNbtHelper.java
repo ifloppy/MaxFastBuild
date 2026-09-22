@@ -58,9 +58,15 @@ final class PaperNbtHelper {
     private static final int MAX_LIST_SIZE = 54 * 27;
     /** Hard cap on NBT nesting depth during validation. */
     private static final int MAX_NBT_DEPTH = 12;
+    /** Bound item-count multiplication before it reaches inventory/economy arithmetic. */
+    private static final long MAX_BILLABLE_ITEM_COUNT = 1_000_000L;
 
     /** Dupe/behavioral vectors rejected at every nesting level. */
     private static final Set<String> GLOBAL_FORBIDDEN_KEYS = Set.of("LootTable", "LootTableSeed");
+    /** Entity NBT must never recursively spawn or execute another entity/command. */
+    private static final Set<String> ENTITY_FORBIDDEN_KEYS = Set.of(
+            "Passengers", "Command", "LastOutput", "SuccessCount", "TrackOutput",
+            "SpawnData", "SpawnPotentials", "Pool", "Template");
 
     /** Keys present in Litematica's schematic NBT that are safe to ignore and stripped before apply. */
     private static final Set<String> STRUCTURAL_KEYS = Set.of("id", "x", "y", "z");
@@ -177,12 +183,16 @@ final class PaperNbtHelper {
         if (!SUPPORTED_TILES.contains(material)) {
             return new NbtCheck.Rejected("nbt_not_supported_for_block");
         }
-        String reject = validateKeys(compound, 0);
+        String reject = validateKeys(compound, 0, false);
         if (reject != null) return new NbtCheck.Rejected(reject);
 
         List<ItemInstance> items = collectBillableItems(compound, material, registryAccess);
         if (items == null) return new NbtCheck.Rejected("forbidden_item_in_nbt");
         return new NbtCheck.Ok(compound, material, items, !items.isEmpty());
+    }
+
+    static boolean withinSnbtLimit(String snbt) {
+        return snbt != null && snbt.length() <= MAX_SNBT_LENGTH;
     }
 
     /**
@@ -193,6 +203,7 @@ final class PaperNbtHelper {
         List<ItemField> fields = ITEM_FIELDS.get(material);
         if (fields == null || fields.isEmpty()) return List.of();
         List<ItemInstance> out = new ArrayList<>();
+        long totalCount = 0;
         for (ItemField field : fields) {
             Object tag = getTag(compound, field.key());
             if (tag == null) continue;
@@ -205,6 +216,8 @@ final class PaperNbtHelper {
                         if (element == null || !element.getClass().getName().equals(COMPOUND_TAG)) return null;
                         Decoded decoded = decodeItem(element, registryAccess);
                         if (decoded == null) return null;
+                        totalCount = safeItemCount(totalCount, decoded.count());
+                        if (totalCount < 0) return null;
                         out.add(new ItemInstance(decoded.bukkit(), decoded.nms(), decoded.count()));
                     }
                 }
@@ -212,6 +225,8 @@ final class PaperNbtHelper {
                     if (!tag.getClass().getName().equals(COMPOUND_TAG)) return null;
                     Decoded decoded = decodeItem(tag, registryAccess);
                     if (decoded == null) return null;
+                    totalCount = safeItemCount(totalCount, decoded.count());
+                    if (totalCount < 0) return null;
                     out.add(new ItemInstance(decoded.bukkit(), decoded.nms(), decoded.count()));
                 }
                 case SHERDS -> {
@@ -236,17 +251,18 @@ final class PaperNbtHelper {
      *
      * @return null if valid, otherwise a short rejection reason code
      */
-    private static String validateKeys(Object compound, int depth) {
+    private static String validateKeys(Object compound, int depth, boolean entity) {
         if (depth > MAX_NBT_DEPTH) return "nbt_too_deep";
         Set<String> keys = compoundKeys(compound);
         if (keys == null) return "nbt_reflection_error";
         for (String key : keys) {
             if (GLOBAL_FORBIDDEN_KEYS.contains(key)) return "forbidden_nbt_key:" + key;
+            if (entity && ENTITY_FORBIDDEN_KEYS.contains(key)) return "forbidden_entity_key:" + key;
             if (STRUCTURAL_KEYS.contains(key)) continue;
             Object child = getTag(compound, key);
             String childClass = child == null ? null : child.getClass().getName();
             if (COMPOUND_TAG.equals(childClass)) {
-                String inner = validateKeys(child, depth + 1);
+                String inner = validateKeys(child, depth + 1, entity);
                 if (inner != null) return inner;
             } else if (LIST_TAG.equals(childClass)) {
                 int size = listSize(child);
@@ -254,7 +270,7 @@ final class PaperNbtHelper {
                 for (int i = 0; i < size; i++) {
                     Object element = listGet(child, i);
                     if (element != null && element.getClass().getName().equals(COMPOUND_TAG)) {
-                        String inner = validateKeys(element, depth + 1);
+                        String inner = validateKeys(element, depth + 1, entity);
                         if (inner != null) return inner;
                     }
                 }
@@ -265,7 +281,7 @@ final class PaperNbtHelper {
 
     /** Entity validation: same forbidden-key sweep as {@link #validateKeys}, package-visible. */
     static String validateEntityKeys(Object compound) {
-        return validateKeys(compound, 0);
+        return validateKeys(compound, 0, true);
     }
 
     /** The entity type id string (the compound's {@code id}), or null. */
@@ -286,14 +302,22 @@ final class PaperNbtHelper {
         if (!tag.getClass().getName().equals(LIST_TAG)) return null;
         int size = listSize(tag);
         List<ItemInstance> out = new ArrayList<>(size);
+        long totalCount = 0;
         for (int i = 0; i < size; i++) {
             Object element = listGet(tag, i);
             if (element == null || !element.getClass().getName().equals(COMPOUND_TAG)) return null;
             Decoded decoded = decodeItem(element, registryAccess);
             if (decoded == null) return null;
+            totalCount = safeItemCount(totalCount, decoded.count());
+            if (totalCount < 0) return null;
             out.add(new ItemInstance(decoded.bukkit(), decoded.nms(), decoded.count()));
         }
         return out;
+    }
+
+    private static long safeItemCount(long current, long added) {
+        if (added < 1 || current > MAX_BILLABLE_ITEM_COUNT - added) return -1;
+        return current + added;
     }
 
     /** Parse SNBT into an NMS {@code CompoundTag}, or {@code null} when unavailable or malformed. */
@@ -684,6 +708,7 @@ final class PaperNbtHelper {
             ItemStack bukkit = asBukkitCopy(nms);
             if (bukkit == null || bukkit.getType().isAir()) return null;
             int count = getCount(nms);
+            if (count < 1 || count > MAX_BILLABLE_ITEM_COUNT) return null;
             return new Decoded(bukkit, nms, Math.max(1, count));
         }
         // Manual fallback (codec unavailable): id + Count only. Exact-meta billing degrades to
@@ -695,6 +720,7 @@ final class PaperNbtHelper {
         int count = intFromTag(entry, "Count");
         if (count < 1) count = intFromTag(entry, "count");
         if (count < 1) count = 1;
+        if (count > MAX_BILLABLE_ITEM_COUNT) return null;
         return new Decoded(new ItemStack(material, count), null, count);
     }
 
