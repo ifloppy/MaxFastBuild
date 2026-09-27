@@ -5,6 +5,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.entity.EntityType;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Set;
@@ -96,6 +97,27 @@ final class PaperEntityHelper {
         };
     }
 
+    /** Unwrap reflection calls so diagnostics show the NMS failure instead of InvocationTargetException. */
+    static String failureReason(Throwable failure) {
+        Throwable cause = failure;
+        while (cause instanceof InvocationTargetException invocation && invocation.getTargetException() != null) {
+            cause = invocation.getTargetException();
+        }
+        String message = cause.getMessage();
+        return cause.getClass().getSimpleName() + (message == null || message.isBlank() ? "" : ": " + message);
+    }
+
+    /** Create and load an entity without adding it to the world, for paste preflight. */
+    static String preflight(World world, EntityData data, double x, double y, double z) {
+        try {
+            Object nmsWorld = world.getClass().getMethod("getHandle").invoke(world);
+            Object entity = createEntity(data, x, y, z, nmsWorld);
+            return entity == null ? "loadEntity returned null" : null;
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            return failureReason(e);
+        }
+    }
+
     private static Material boatItem(String id) {
         String wood = id.substring(0, id.length() - "_boat".length()).toUpperCase();
         try {
@@ -130,11 +152,7 @@ final class PaperEntityHelper {
                              Predicate<org.bukkit.entity.Entity> beforeAdd) {
         try {
             Object nmsWorld = world.getClass().getMethod("getHandle").invoke(world);
-            Object compound = PaperNbtHelper.cloneCompound(data.compound());
-            if (compound == null) compound = data.compound();
-            PaperNbtHelper.putString(compound, "id", data.type());
-            PaperNbtHelper.putDoubleList(compound, "Pos", x, y, z);
-            Object entity = loadEntity(compound, nmsWorld);
+            Object entity = createEntity(data, x, y, z, nmsWorld);
             if (entity == null) return new SpawnResult(false, null, "loadEntity returned null");
 
             org.bukkit.entity.Entity bukkit = null;
@@ -159,8 +177,18 @@ final class PaperEntityHelper {
             }
             return new SpawnResult(true, bukkit, null);
         } catch (ReflectiveOperationException | LinkageError e) {
-            return new SpawnResult(false, null, e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage()));
+            return new SpawnResult(false, null, failureReason(e));
         }
+    }
+
+    /** Build the same NMS entity instance used by preflight and the real spawn path. */
+    private static Object createEntity(EntityData data, double x, double y, double z, Object nmsWorld)
+            throws ReflectiveOperationException {
+        Object compound = PaperNbtHelper.cloneCompound(data.compound());
+        if (compound == null) compound = data.compound();
+        PaperNbtHelper.putString(compound, "id", data.type());
+        PaperNbtHelper.putDoubleList(compound, "Pos", x, y, z);
+        return loadEntity(compound, nmsWorld);
     }
 
     private static Object loadEntity(Object compound, Object level) throws ReflectiveOperationException {

@@ -19,18 +19,41 @@ public final class SqliteDatabase implements AutoCloseable {
     }
 
     public synchronized <T> T transaction(SqlWork<T> work) {
+        final boolean previous;
         try {
-            boolean previous = connection.getAutoCommit();
+            previous = connection.getAutoCommit();
             connection.setAutoCommit(false);
+        } catch (SQLException ex) {
+            throw new StorageException("SQLite transaction failed", ex);
+        }
+
+        T result = null;
+        Throwable failure = null;
+        try {
+            result = work.run(connection);
+            connection.commit();
+        } catch (Throwable ex) {
+            failure = ex;
             try {
-                T result = work.run(connection);
-                connection.commit();
-                return result;
-            } catch (Exception ex) {
                 connection.rollback();
-                throw ex;
-            } finally { connection.setAutoCommit(previous); }
-        } catch (Exception ex) { throw ex instanceof StorageException storage ? storage : new StorageException("SQLite transaction failed", ex); }
+            } catch (SQLException rollbackFailure) {
+                ex.addSuppressed(rollbackFailure);
+            }
+        }
+        try {
+            connection.setAutoCommit(previous);
+        } catch (SQLException restoreFailure) {
+            if (failure == null) failure = restoreFailure;
+            else failure.addSuppressed(restoreFailure);
+        }
+
+        if (failure instanceof RuntimeException runtime) throw runtime;
+        if (failure instanceof Error error) throw error;
+        if (failure instanceof Exception exception) {
+            throw exception instanceof StorageException storage
+                    ? storage : new StorageException("SQLite transaction failed", exception);
+        }
+        return result;
     }
 
     @Override public synchronized void close() {

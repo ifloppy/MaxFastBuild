@@ -28,9 +28,11 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 
 public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private static final Gson GSON = new Gson();
@@ -44,6 +46,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     /** Transport-level bucket; paste chunks are paced on the client and silently dropped when abusive. */
     private final Map<UUID, TokenBucket> protocolCommandLimits = new ConcurrentHashMap<>();
     private final Map<UUID, SecureProtocol.Session> sessions = new ConcurrentHashMap<>();
+    /** Players with a Fabric protocol listener hide the marked packet and render translated replies. */
+    private final Set<UUID> protocolClients = ConcurrentHashMap.newKeySet();
     private final Map<UUID, PendingBuild> pendingBuilds = new ConcurrentHashMap<>();
     private final Map<UUID, PendingPaste> pendingPastes = new ConcurrentHashMap<>();
     /** Last computed paste materials per player, kept even after the pending is removed (materials check may reject). */
@@ -341,6 +345,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                             return;
                         }
                     }
+                    protocolClients.add(player.getUniqueId());
                     issueSession(player);
                 }
                 case "place" -> {
@@ -400,15 +405,100 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 default -> sendProtocol(player, "error", "maxfastbuild.error.malformed", Map.of("reason", "unknown_subcmd"));
             }
         } catch (RuntimeException ex) {
-            getLogger().warning("Internal protocol from " + player.getName() + ": " + ex.getMessage());
-            sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", ex.getMessage() == null ? "invalid" : ex.getMessage()));
+            String diagnosticId = UUID.randomUUID().toString().replace("-", "")
+                    .substring(0, 12).toUpperCase(Locale.ROOT);
+            String command = safeDiagnosticToken(parts[1]);
+            String detail = protocolDiagnosticDetail(ex);
+            String logMessage = "Internal protocol id=MFB-" + diagnosticId + " player=" + player.getName()
+                    + " command=__mfb " + command + " cause=" + detail;
+            if (ex instanceof StorageException || ex.getCause() != null) {
+                getLogger().log(Level.WARNING, logMessage, ex);
+            } else {
+                getLogger().warning(logMessage);
+            }
+            String playerMessage = "MFB-" + diagnosticId + " command=__mfb " + command
+                    + " cause=" + detail + "; provide this code to an administrator";
+            sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of(
+                    "reason", playerMessage,
+                    "diagnosticId", diagnosticId,
+                    "command", command));
         }
+    }
+
+    /** Summarize the root cause without exposing server filesystem paths in player chat. */
+    private static String protocolDiagnosticDetail(Throwable error) {
+        SQLException sql = findSqlException(error);
+        if (sql != null) {
+            int code = sql.getErrorCode();
+            StringBuilder detail = new StringBuilder(sqliteResultCodeName(code)).append('(').append(code).append(')');
+            String state = sql.getSQLState();
+            if (state != null && !state.isBlank()) detail.append(" SQLState=").append(state);
+            String message = safeDiagnosticMessage(sql.getMessage());
+            if (!message.isBlank()) detail.append(' ').append(message);
+            return truncateDiagnostic(detail.toString());
+        }
+
+        Throwable cause = rootCause(error);
+        String name = cause.getClass().getSimpleName();
+        String message = safeDiagnosticMessage(cause.getMessage());
+        return truncateDiagnostic(message.isBlank() ? name : name + ": " + message);
+    }
+
+    private static SQLException findSqlException(Throwable error) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable current = error; current != null && seen.add(current); current = current.getCause()) {
+            if (current instanceof SQLException sql) return sql;
+        }
+        return null;
+    }
+
+    private static Throwable rootCause(Throwable error) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        Throwable current = error;
+        while (current.getCause() != null && seen.add(current.getCause())) current = current.getCause();
+        return current;
+    }
+
+    private static String sqliteResultCodeName(int code) {
+        return switch (code & 0xFF) {
+            case 5 -> "SQLITE_BUSY";
+            case 6 -> "SQLITE_LOCKED";
+            case 7 -> "SQLITE_NOMEM";
+            case 8 -> "SQLITE_READONLY";
+            case 10 -> "SQLITE_IOERR";
+            case 11 -> "SQLITE_CORRUPT";
+            case 13 -> "SQLITE_FULL";
+            case 14 -> "SQLITE_CANTOPEN";
+            case 19 -> "SQLITE_CONSTRAINT";
+            case 26 -> "SQLITE_NOTADB";
+            default -> code == 0 ? "SQLITE" : "SQLITE_ERROR";
+        };
+    }
+
+    private static String safeDiagnosticToken(String value) {
+        return value != null && value.matches("[A-Za-z0-9_-]{1,24}") ? value : "unknown";
+    }
+
+    private static String safeDiagnosticMessage(String message) {
+        if (message == null || message.isBlank()) return "";
+        StringBuilder result = new StringBuilder();
+        for (String token : message.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ').trim().split("\\s+")) {
+            if (token.startsWith("/") || token.matches("(?i)^[a-z]:\\\\.*")) token = "<path>";
+            if (!result.isEmpty()) result.append(' ');
+            result.append(token);
+        }
+        return result.toString();
+    }
+
+    private static String truncateDiagnostic(String detail) {
+        return detail.length() <= 140 ? detail : detail.substring(0, 137) + "...";
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent event) {
         clearSelectionPreview(event.getPlayer());
-        if (!active || tasks == null || executor == null) return;
         UUID playerId = event.getPlayer().getUniqueId();
+        protocolClients.remove(playerId);
+        if (!active || tasks == null || executor == null) return;
         pendingBuilds.remove(playerId);
         commandQueues.remove(playerId);
         protocolCommandLimits.remove(playerId);
@@ -1755,16 +1845,32 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             sendProtocol(player, "error", "maxfastbuild.error.protocol", Map.of("reason", "paste_in_progress"));
             return;
         }
-        // Validate pasted entities (minecarts/boats/armor stands/mobs). Invalid entities are skipped
-        // individually, never allowed to abort the whole paste.
+        // Validate and dry-load pasted entities before charging or changing blocks. Actual world
+        // insertion stays deferred until after the block phase so placement events and chunk state
+        // are authoritative; a rejected entity is skipped individually and never billed.
         List<PendingEntity> entities = new ArrayList<>();
         List<PastePrecheckIssue> entityIssues = new ArrayList<>();
+        int entityLimit = instant ? limits.maxInstantEntities() : limits.maxNormalEntities();
+        int submittedEntityCount = assembled.entities() == null ? 0 : assembled.entities().size();
+        if (submittedEntityCount > entityLimit) {
+            sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities", Map.of("limit", entityLimit));
+            return;
+        }
         if (assembled.entities() != null) {
             Object registry = PaperNbtHelper.registryAccess(player.getWorld());
             for (PasteTransfer.EntityEntry entity : assembled.entities()) {
                 try {
                     String entityNbt = skipContents ? PaperNbtHelper.stripEntityContents(entity.nbt()) : entity.nbt();
                     PaperEntityHelper.EntityData data = PaperEntityHelper.validate(entity.type(), entityNbt, registry);
+                    String spawnPrecheck = PaperEntityHelper.preflight(player.getWorld(), data,
+                            entity.x(), entity.y(), entity.z());
+                    if (spawnPrecheck != null) {
+                        getLogger().warning("Paste entity preflight rejected player=" + player.getName()
+                                + " type=" + entity.type() + " reason=" + spawnPrecheck);
+                        entityIssues.add(new PastePrecheckIssue("entity", entity.type(),
+                                "spawn precheck failed: " + spawnPrecheck, false));
+                        continue;
+                    }
                     entities.add(new PendingEntity(data, entity.x(), entity.y(), entity.z()));
                 } catch (PaperEntityHelper.EntityRejectException ex) {
                     debugLog("paste entity rejected player=" + player.getName()
@@ -1776,11 +1882,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     entityIssues.add(new PastePrecheckIssue("entity", entity.type(), shortError(ex), true));
                 }
             }
-        }
-        int entityLimit = instant ? limits.maxInstantEntities() : limits.maxNormalEntities();
-        if (entities.size() > entityLimit) {
-            sendProtocol(player, "error", "maxfastbuild.paste.too_many_entities", Map.of("limit", entityLimit));
-            return;
         }
         int entityChunkLimit = instant ? limits.maxInstantEntitiesPerChunk() : limits.maxNormalEntitiesPerChunk();
         if (entityChunkLimit > 0) {
@@ -1852,9 +1953,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     // Never let one paste-finalization bug cancel the global repeating scheduler.
                     // settleInstant has its own transactional-style failure settlement; this remains
                     // a last-resort guard for unexpected planner/finalizer integration failures.
-                    getLogger().severe("Paste finalization crashed for " + player.getName() + ": " + shortError(ex));
-                    sendProtocol(player, "error", "maxfastbuild.error.paste_precheck_failed",
-                            Map.of("count", 1, "fatal", 1, "detail", shortError(ex)));
+                    getLogger().log(java.util.logging.Level.SEVERE,
+                            "Paste finalization crashed for " + player.getName() + ": " + shortError(ex), ex);
+                    sendProtocol(player, "error", "maxfastbuild.error.paste_execution_failed",
+                            Map.of("reason", shortError(ex)));
                 } finally {
                     it.remove();
                 }
@@ -2132,13 +2234,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         // Notify the player when some blocks were skipped during planning (protected, unbreakable
         // occupant, unsupported NBT, etc.) or entities were rejected, so they know the paste is incomplete.
-        long entitySkips = pending.issues.stream().filter(i -> !i.fatal() && "entity".equals(i.kind())).count();
-        if (pending.planningSkipped > 0 || entitySkips > 0) {
+        List<PastePrecheckIssue> entitySkips = pending.issues.stream()
+                .filter(i -> !i.fatal() && "entity".equals(i.kind())).toList();
+        if (pending.planningSkipped > 0 || !entitySkips.isEmpty()) {
             debugLog("paste planning skipped total player=" + player.getName()
-                    + " blocks=" + pending.planningSkipped + " entities=" + entitySkips);
+                    + " blocks=" + pending.planningSkipped + " entities=" + entitySkips.size());
+        }
+        if (pending.planningSkipped > 0) {
             sendProtocol(player, "warning", "maxfastbuild.paste.blocks_skipped",
-                    Map.of("skipped", pending.planningSkipped, "planned", mutations.size(),
-                            "entitySkipped", entitySkips));
+                    Map.of("skipped", pending.planningSkipped, "planned", mutations.size(), "entitySkipped", 0));
+        }
+        if (!entitySkips.isEmpty()) {
+            sendProtocol(player, "warning", "maxfastbuild.paste.entities_skipped",
+                    Map.of("count", entitySkips.size(), "detail", entityIssueDetails(entitySkips)));
         }
 
         // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
@@ -3132,10 +3240,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         int spawned = 0, skippedMobs = 0, cancelled = 0, runtimeErrors = 0;
         String firstRuntimeError = null;
         List<PendingEntity> notSpawned = new ArrayList<>();
+        Map<String, Integer> failures = new LinkedHashMap<>();
         for (PendingEntity pe : entities) {
             if (pe.data().mob() && !allowMobs) {
                 skippedMobs++;
                 notSpawned.add(pe);
+                recordEntityFailure(failures, pe, "requires creative mode or maxfastbuild.bypass.entities");
                 continue;
             }
             PaperEntityHelper.SpawnResult result = null;
@@ -3147,11 +3257,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     if (placementEntity) auditEntityPlacement(player, result.entity(), pe.data());
                     spawned++;
                 } else {
-                    if (!result.added()) {
-                        debugLog("paste entity spawn failed player=" + (player == null ? "?" : player.getName())
-                                + " type=" + pe.data().type() + " reason="
-                                + (result.reason() == null ? "unknown" : result.reason()));
-                    }
+                    String reason = result.reason() == null ? "unknown spawn failure" : result.reason();
+                    debugLog("paste entity spawn failed player=" + (player == null ? "?" : player.getName())
+                            + " type=" + pe.data().type() + " reason=" + reason);
+                    recordEntityFailure(failures, pe, reason);
                     if ("spawn event cancelled".equals(result.reason())) cancelled++;
                     notSpawned.add(pe);
                 }
@@ -3164,11 +3273,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
                 runtimeErrors++;
                 if (firstRuntimeError == null) firstRuntimeError = shortError(ex);
+                recordEntityFailure(failures, pe, shortError(ex));
                 notSpawned.add(pe);
             }
         }
         if (!notSpawned.isEmpty()) {
             returnEntityMaterials(player, notSpawned, removals);
+            String detail = entityFailureDetails(failures);
+            if (player != null) {
+                sendProtocol(player, "warning", "maxfastbuild.paste.entities_skipped",
+                        Map.of("count", notSpawned.size(), "detail", detail));
+            }
+            debugLog("paste entities returned player=" + (player == null ? "?" : player.getName())
+                    + " count=" + notSpawned.size() + " reasons=" + detail);
         }
         if (runtimeErrors > 0) {
             getLogger().warning("Entity paste had " + runtimeErrors + " runtime error(s); first: " + firstRuntimeError);
@@ -3176,6 +3293,28 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         debugLog("entities spawned=" + spawned + " skippedMobs=" + skippedMobs
                 + " notSpawned=" + notSpawned.size() + " cancelled=" + cancelled
                 + " runtimeErrors=" + runtimeErrors);
+    }
+
+    private static void recordEntityFailure(Map<String, Integer> failures, PendingEntity entity, String reason) {
+        failures.merge(entity.data().type() + " — " + reason, 1, Integer::sum);
+    }
+
+    private static String entityFailureDetails(Map<String, Integer> failures) {
+        String detail = failures.entrySet().stream()
+                .map(entry -> entry.getKey() + (entry.getValue() > 1 ? " ×" + entry.getValue() : ""))
+                .collect(java.util.stream.Collectors.joining("; "));
+        return limitEntityDetails(detail);
+    }
+
+    private static String entityIssueDetails(List<PastePrecheckIssue> issues) {
+        String detail = issues.stream()
+                .map(issue -> issue.target() + " — " + issue.detail())
+                .collect(java.util.stream.Collectors.joining("; "));
+        return limitEntityDetails(detail);
+    }
+
+    private static String limitEntityDetails(String detail) {
+        return detail.length() <= 300 ? detail : detail.substring(0, 297) + "…";
     }
 
     /**
@@ -3612,8 +3751,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void notifyPlayer(Player player, String type, String key, Map<String, ?> data) {
         Map<String, ?> safe = data == null ? Map.of() : data;
         sendMarked(player, GSON.toJson(Map.of("mfb", 1, "type", type, "messageKey", key, "data", safe)));
-        // Always also send readable feedback for pure command users / chat logs without Fabric.
-        if (messages != null) {
+        // Fabric renders its own localized message after consuming the marked packet.
+        // Keep the plain line for command-only clients, which do not consume that packet.
+        if (messages != null && !protocolClients.contains(player.getUniqueId())) {
             player.sendMessage(messages.fromProtocol(key, safe));
         }
     }

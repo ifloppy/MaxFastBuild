@@ -137,16 +137,8 @@ val deployPaperToLeaf by tasks.registering {
 
 tasks.named("build") {
     dependsOn(copyReleaseJars)
-    finalizedBy(deployPaperToLeaf)
 }
 
 tasks.named("assemble") {
     finalizedBy(copyReleaseJars)
-}
-
-// Any Paper jar build also refreshes the Leaf test plugin when the server tree exists.
-gradle.projectsEvaluated {
-    project(":maxfastbuild-paper").tasks.named("jar").configure {
-        finalizedBy(deployPaperToLeaf)
-    }
 }

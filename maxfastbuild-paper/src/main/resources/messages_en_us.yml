@@ -108,7 +108,9 @@ admin-unknown: "<red>Unknown admin subcommand.</red> <gray>reload | recovery</gr
 
 task-accepted: "<green>Task accepted: {0} affected blocks, region {1} ({2}x{3}x{4}), cost {5}.</green>"
 blocks-skipped: "<yellow>⚠ {0} blocks, {1} entities skipped (protected/unbreakable/unsupported) — {2} placed.</yellow>"
+entities-skipped: "<yellow>⚠ {0} schematic entities could not spawn (their items were not consumed or were returned): {1}.</yellow>"
 paste-precheck-failed: "<red>⚠ Paste precheck failed: {0} items could not be pasted ({1} fatal). Details: {2}. Report to admin, or try with 'Skip NBT/Skip entities' enabled.</red>"
+paste-execution-failed: "<red>⚠ Paste execution or settlement failed unexpectedly; blocks may already be partially placed. Cause: {0}</red>"
 task-queued: "<yellow>Command queued (position {0}).</yellow>"
 queue-full: "<red>Queue is full (limit {0}); try again later.</red>"
 task-completed: "<green>Task complete: {0}/{1} applied, refund {2}.</green>"

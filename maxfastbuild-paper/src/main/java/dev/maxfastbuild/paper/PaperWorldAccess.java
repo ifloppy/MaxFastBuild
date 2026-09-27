@@ -5,6 +5,7 @@ import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockSupport;
+import org.bukkit.block.BlockState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.block.data.MultipleFacing;
 import org.bukkit.block.data.type.Fence;
@@ -18,7 +19,9 @@ import org.bukkit.inventory.ItemStack;
 import java.lang.reflect.Proxy;
 
 import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -40,8 +43,10 @@ final class PaperWorldAccess implements WorldAccess {
      * so redstone computes against the final layout (see {@link #beginDeferredPhysics()}).
      */
     private boolean deferPhysics;
+    private final Map<BlockPos, DeferredBlockUpdate> deferredBlockUpdates = new HashMap<>();
 
     @Override public void beginDeferredPhysics() {
+        this.deferredBlockUpdates.clear();
         this.deferPhysics = true;
     }
 
@@ -55,7 +60,12 @@ final class PaperWorldAccess implements WorldAccess {
         World resolved = Bukkit.getWorld(world);
         if (resolved == null) return;
         for (BlockPos position : positions) {
-            settlePlaced(resolved, position);
+            DeferredBlockUpdate update = deferredBlockUpdates.remove(position);
+            if (update != null && update.stateChanged()) {
+                PaperBlockPhysicsHelper.replayPlacement(resolved, position, update.previousData());
+            } else {
+                PaperBlockPhysicsHelper.refreshNeighbors(resolved, position);
+            }
         }
         fixConnections(resolved, positions);
     }
@@ -316,6 +326,9 @@ final class PaperWorldAccess implements WorldAccess {
             naturalBreakLogged = broken.breakAlreadyLogged();
         }
 
+        // If a solid occupant was broken above, its removal already ran vanilla physics. The state
+        // to use for replaying placement is therefore the current (normally air) state after break.
+        BlockData previousPlacementData = block.getBlockData();
         if (!stateAlreadyMatches) {
             block.setBlockData(targetData, !deferPhysics);
         }
@@ -324,6 +337,11 @@ final class PaperWorldAccess implements WorldAccess {
             // This may leave CoreProtect break logs for the replaced block, but it prevents dupes.
             block.setBlockData(currentData, false);
             return new MutationResult(false, "nbt_apply_failed");
+        }
+        if (deferPhysics) {
+            boolean stateChanged = !previousPlacementData.matches(block.getBlockData());
+            deferredBlockUpdates.putIfAbsent(mutation.position(), new DeferredBlockUpdate(
+                    stateChanged ? previousPlacementData.clone() : null, stateChanged));
         }
         String flags = replacedSolid ? "replaced" : "";
         if (naturalBreakLogged) {
@@ -459,15 +477,21 @@ final class PaperWorldAccess implements WorldAccess {
         return RestrictedMaterials.isForbiddenPlace(material);
     }
 
+    private record DeferredBlockUpdate(BlockData previousData, boolean stateChanged) {}
+
     /**
-     * Re-fire the physics update on a placed block so redstone components recompute their signals
-     * with every neighbour already in place. Bulk pasting sets all blocks in one tick, which makes
-     * redstone compute against a partially-built circuit; this settle pass is the same nudge
-     * WorldEdit's {@code fixAfterFastMode} applies.
+     * Apply a safe fallback if this Paper version does not expose the expected internal update
+     * callbacks. Replacing through air makes {@link BlockState#update(boolean, boolean)} perform a
+     * real state transition, preserving block-entity data from the captured snapshot.
      */
-    static void settlePlaced(World world, BlockPos position) {
+    static void fallbackReplayPlacement(World world, BlockPos position) {
         Block block = world.getBlockAt(position.x(), position.y(), position.z());
-        block.getState().update(true, true);
+        if (block.getType().isAir()) return;
+        BlockState snapshot = block.getState();
+        block.setType(Material.AIR, false);
+        if (!snapshot.update(true, true)) {
+            throw new IllegalStateException("Could not restore block after physics fallback at " + position);
+        }
     }
 
     private static boolean inWorldHeight(World world, int y) {

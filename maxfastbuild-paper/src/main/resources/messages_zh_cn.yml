@@ -108,7 +108,9 @@ admin-unknown: "<red>未知管理子命令。</red> <gray>可用：reload | reco
 
 task-accepted: "<green>任务已接受：影响 {0} 格，选区 {1} 格（{2}×{3}×{4}），费用 {5}。</green>"
 blocks-skipped: "<yellow>⚠ {0} 个方块、{1} 个实体被跳过（受保护/不可破坏/NBT不支持），共放置 {2} 个。</yellow>"
+entities-skipped: "<yellow>⚠ {0} 个投影实体未能生成（相关物品未扣除或已退还）：{1}。</yellow>"
 paste-precheck-failed: "<red>⚠ 粘贴预检失败：{0} 项无法粘贴（其中 {1} 项为意外错误）。详情：{2}。请反馈管理员，或勾选客户端「跳过NBT/跳过实体」后重试。</red>"
+paste-execution-failed: "<red>⚠ 粘贴执行或结算时发生意外错误，方块可能已部分放置。原因：{0}</red>"
 task-queued: "<yellow>指令已加入队列（位置 {0}）。</yellow>"
 queue-full: "<red>队列已满（上限 {0}），请稍后再试。</red>"
 task-completed: "<green>任务完成：已处理 {0}/{1}，退款 {2}。</green>"

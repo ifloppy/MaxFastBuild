@@ -215,24 +215,10 @@ final class PaperInventoryHelper {
         public long count(Material material) {
             long total = 0;
             ItemStack[] snap = snapshot();
-            boolean shulkerDiag = material.name().contains("SHULKER");
-            if (shulkerDiag) {
-                System.err.print("[MFB-DIAG] SlotSource.count mat=" + material
-                        + " nested=" + nestedShulkers + " len=" + snap.length + " types=[");
-                for (int si = 0; si < Math.min(snap.length, 10); si++) {
-                    if (snap[si] != null) {
-                        System.err.print(snap[si].getType().name() + "x" + snap[si].getAmount() + " ");
-                    }
-                }
-                System.err.println("]");
-            }
             for (ItemStack stack : snap) {
                 if (stack == null) continue;
                 if (stack.getType() == material) total += stack.getAmount();
                 else if (nestedShulkers) total += countInShulker(stack, material);
-            }
-            if (shulkerDiag) {
-                System.err.println("[MFB-DIAG] SlotSource.count mat=" + material + " total=" + total);
             }
             return total;
         }
@@ -252,20 +238,10 @@ final class PaperInventoryHelper {
         public long countExact(ItemStack template) {
             long total = 0;
             ItemStack[] snap = snapshot();
-            boolean shulkerDiag = template.getType().name().contains("SHULKER");
-            if (shulkerDiag) {
-                System.err.println("[MFB-DIAG] SlotSource.countExact tmpl=" + template.getType().name()
-                        + " hasMeta=" + template.hasItemMeta()
-                        + " nested=" + nestedShulkers + " len=" + snap.length);
-            }
             for (ItemStack stack : snap) {
                 if (stack == null) continue;
                 if (stack.isSimilar(template)) total += stack.getAmount();
                 else if (nestedShulkers) total += countInShulkerExact(stack, template);
-            }
-            if (shulkerDiag) {
-                System.err.println("[MFB-DIAG] SlotSource.countExact tmpl=" + template.getType().name()
-                        + " total=" + total);
             }
             return total;
         }
@@ -470,13 +446,13 @@ final class PaperInventoryHelper {
                 Removal removal = records.get(i);
                 long add = Math.min(removal.materialAmount(), left);
                 if (add <= 0) continue;
-                addBack(removal.host(), removal.slot(), removal.host().getItem(removal.slot()),
+                long restored = addBack(removal.host(), removal.slot(), removal.host().getItem(removal.slot()),
                         removal.original(), material, add);
-                long remaining = removal.materialAmount() - add;
+                long remaining = removal.materialAmount() - restored;
                 if (remaining <= 0) records.remove(i);
-                else records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
+                else if (restored > 0) records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
                         material, remaining, null, 0));
-                left -= add;
+                left -= restored;
             }
             return amount - left;
         }
@@ -492,13 +468,13 @@ final class PaperInventoryHelper {
                 Removal removal = records.get(i);
                 long add = Math.min(removal.templateAmount(), left);
                 if (add <= 0) continue;
-                addBackExact(removal.host(), removal.slot(), removal.host().getItem(removal.slot()),
+                long restored = addBackExact(removal.host(), removal.slot(), removal.host().getItem(removal.slot()),
                         removal.original(), template, add);
-                long remaining = removal.templateAmount() - add;
+                long remaining = removal.templateAmount() - restored;
                 if (remaining <= 0) records.remove(i);
-                else records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
+                else if (restored > 0) records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
                         null, 0, template, remaining));
-                left -= add;
+                left -= restored;
             }
             return amount - left;
         }
@@ -508,16 +484,88 @@ final class PaperInventoryHelper {
             if (isSeedSatisfied(materialKey)) return amount;
             long refunded = refundMaterial(materialKey, amount);
             long left = amount - refunded;
-            if (left > 0 && player != null) giveOrDrop(player, materialKey, left);
-            return amount;
+            if (left > 0 && player != null) {
+                Material material = resolveMaterial(materialKey);
+                if (material == Material.FLINT_AND_STEEL) {
+                    refunded += giveFlintRefund(player, left);
+                } else {
+                    giveOrDrop(player, materialKey, left);
+                    consumeMaterialRecords(material, left);
+                    refunded += left;
+                }
+            }
+            return refunded;
         }
 
         long refundOrGiveExact(Player player, ItemStack template, long amount) {
             if (template != null && isSeedSatisfied(template.getType().getKey().toString())) return amount;
             long refunded = refundExact(template, amount);
             long left = amount - refunded;
-            if (left > 0 && player != null) giveExact(player, template, left);
-            return amount;
+            if (left > 0 && player != null && template != null) {
+                giveExact(player, template, left);
+                consumeExactRecords(template, left);
+                refunded += left;
+            }
+            return refunded;
+        }
+
+        private void consumeMaterialRecords(Material material, long amount) {
+            if (material == null || amount <= 0) return;
+            List<Removal> records = byMaterial.get(material);
+            if (records == null) return;
+            long left = amount;
+            for (int i = records.size() - 1; i >= 0 && left > 0; i--) {
+                Removal removal = records.get(i);
+                long consumed = Math.min(removal.materialAmount(), left);
+                long remaining = removal.materialAmount() - consumed;
+                if (remaining <= 0) records.remove(i);
+                else records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
+                        material, remaining, null, 0));
+                left -= consumed;
+            }
+        }
+
+        private void consumeExactRecords(ItemStack template, long amount) {
+            if (amount <= 0) return;
+            List<Removal> records = byExact.get(template);
+            if (records == null) return;
+            long left = amount;
+            for (int i = records.size() - 1; i >= 0 && left > 0; i--) {
+                Removal removal = records.get(i);
+                long consumed = Math.min(removal.templateAmount(), left);
+                long remaining = removal.templateAmount() - consumed;
+                if (remaining <= 0) records.remove(i);
+                else records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
+                        null, 0, template, remaining));
+                left -= consumed;
+            }
+        }
+
+        /** Give any still-unrefunded durability back as the original tool state, not a fresh tool. */
+        private long giveFlintRefund(Player player, long amount) {
+            List<Removal> records = byMaterial.get(Material.FLINT_AND_STEEL);
+            if (records == null || records.isEmpty()) return 0;
+            long left = amount;
+            for (int i = records.size() - 1; i >= 0 && left > 0; i--) {
+                Removal removal = records.get(i);
+                long restored = Math.min(removal.materialAmount(), left);
+                if (restored <= 0 || removal.original() == null
+                        || removal.original().getType() != Material.FLINT_AND_STEEL) continue;
+                ItemStack tool = removal.original().clone();
+                if (!(tool.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable damageable)) continue;
+                long remainingUsesSpent = removal.materialAmount() - restored;
+                int damage = damageable.getDamage() + (int) remainingUsesSpent;
+                damageable.setDamage(Math.min(Material.FLINT_AND_STEEL.getMaxDurability() - 1, damage));
+                tool.setItemMeta((org.bukkit.inventory.meta.ItemMeta) damageable);
+                giveExact(player, tool, 1);
+
+                long remaining = removal.materialAmount() - restored;
+                if (remaining <= 0) records.remove(i);
+                else records.set(i, new Removal(removal.host(), removal.slot(), removal.original(),
+                        Material.FLINT_AND_STEEL, remaining, null, 0));
+                left -= restored;
+            }
+            return amount - left;
         }
     }
 
@@ -566,10 +614,7 @@ final class PaperInventoryHelper {
 
     static long count(List<ItemSource> sources, String materialKey, int requiredBuckets, boolean fireRequiresFlint) {
         Material material = resolveMaterial(materialKey);
-        if (material == null) {
-            System.err.println("[MFB-DIAG] count key=" + materialKey + " -> resolved=NULL -> 0");
-            return 0;
-        }
+        if (material == null) return 0;
         if (SeedCatalog.ownsSeeds(sources, material)) return Long.MAX_VALUE;
         if (isFluid(material)) {
             return countAcross(sources, fluidBucket(material)) >= requiredBuckets ? Long.MAX_VALUE : 0;
@@ -577,14 +622,8 @@ final class PaperInventoryHelper {
         if (fireRequiresFlint && isFire(material)) {
             return countFlintUses(sources);
         }
-        if (!material.isItem()) {
-            System.err.println("[MFB-DIAG] count key=" + materialKey + " mat=" + material + " isItem=false -> 0");
-            return 0;
-        }
-        long result = countAcross(sources, material);
-        System.err.println("[MFB-DIAG] count key=" + materialKey + " mat=" + material
-                + " sources=" + sources.size() + " result=" + result);
-        return result;
+        if (!material.isItem()) return 0;
+        return countAcross(sources, material);
     }
 
     /**
@@ -621,10 +660,6 @@ final class PaperInventoryHelper {
         if (SeedCatalog.ownsSeeds(sources, template.getType())) return Long.MAX_VALUE;
         long total = 0;
         for (ItemSource source : sources) total += source.countExact(template);
-        if (template.getType().name().contains("SHULKER")) {
-            System.err.println("[MFB-DIAG] countExact tmpl=" + template.getType().name()
-                    + " sources=" + sources.size() + " result=" + total);
-        }
         return total;
     }
 
@@ -1006,48 +1041,61 @@ final class PaperInventoryHelper {
     }
 
     /** Add up to {@code add} of {@code material} back into {@code slot}, never exceeding {@code original}. */
-    private static void addBack(Inventory host, int slot, ItemStack current, ItemStack original,
+    private static long addBack(Inventory host, int slot, ItemStack current, ItemStack original,
                                 Material material, long add) {
         long originalCount = countOfM(original, material);
         long currentCount = countOfM(current, material);
         long toAdd = Math.min(add, Math.max(0, originalCount - currentCount));
-        if (toAdd <= 0) return;
+        if (toAdd <= 0) return 0;
         // Flint and steel refunds restore durability, not stack count.
         if (material == Material.FLINT_AND_STEEL) {
+            if (current != null && current.getType() != material) return 0;
             int max = material.getMaxDurability();
             ItemStack stack = current != null ? current : original.clone();
+            if (stack.getType() != material) return 0;
             org.bukkit.inventory.meta.Damageable damageable = (org.bukkit.inventory.meta.Damageable) stack.getItemMeta();
-            if (damageable != null) {
-                damageable.setDamage(Math.max(0, max - (int) (currentCount + toAdd)));
-                stack.setItemMeta((org.bukkit.inventory.meta.ItemMeta) damageable);
-                host.setItem(slot, stack);
-            }
-            return;
+            if (damageable == null) return 0;
+            damageable.setDamage(Math.max(0, max - (int) (currentCount + toAdd)));
+            stack.setItemMeta((org.bukkit.inventory.meta.ItemMeta) damageable);
+            host.setItem(slot, stack);
+            return toAdd;
         }
         if (current != null && isShulkerBox(current.getType())) {
-            addIntoShulker(current, material, toAdd);
-            host.setItem(slot, current);
-            return;
+            long restored = addIntoShulker(current, material, toAdd);
+            if (restored > 0) host.setItem(slot, current);
+            return restored;
         }
-        ItemStack stack = current != null ? current : new ItemStack(material, 0);
+        // The original slot may have been reused while a queued task was running. Never change
+        // another item into the refunded material; let refundOrGive put it in a safe free slot.
+        if (current != null && current.getType() != material) return 0;
+        if (current == null && (original == null || original.getType() != material)) return 0;
+        // Bukkit/Paper rejects an ItemStack with amount 0. The slot is commonly empty here
+        // because this is a refund after the original stack was fully consumed; clone the
+        // recorded stack so its type and item meta survive, then set the restored amount.
+        ItemStack stack = current != null ? current : original.clone();
+        if (stack.getType() != material) return 0;
         stack.setAmount((int) (currentCount + toAdd));
         host.setItem(slot, stack);
+        return toAdd;
     }
 
-    private static void addBackExact(Inventory host, int slot, ItemStack current, ItemStack original,
+    private static long addBackExact(Inventory host, int slot, ItemStack current, ItemStack original,
                                      ItemStack template, long add) {
         long originalCount = countOfT(original, template);
         long currentCount = countOfT(current, template);
         long toAdd = Math.min(add, Math.max(0, originalCount - currentCount));
-        if (toAdd <= 0) return;
+        if (toAdd <= 0) return 0;
         if (current != null && isShulkerBox(current.getType())) {
-            addIntoShulkerExact(current, template, toAdd);
-            host.setItem(slot, current);
-            return;
+            long restored = addIntoShulkerExact(current, template, toAdd);
+            if (restored > 0) host.setItem(slot, current);
+            return restored;
         }
+        if (current != null && !current.isSimilar(template)) return 0;
+        if (current == null && (original == null || !original.isSimilar(template))) return 0;
         ItemStack stack = current != null ? current : template.clone();
         stack.setAmount((int) (currentCount + toAdd));
         host.setItem(slot, stack);
+        return toAdd;
     }
 
     /** Amount of {@code material} in a stack (a shulker box contributes its contents; a
@@ -1069,9 +1117,9 @@ final class PaperInventoryHelper {
     }
 
     /** Put {@code add} of {@code material} into the box's inner inventory. */
-    private static void addIntoShulker(ItemStack boxStack, Material material, long add) {
-        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return;
-        if (!(meta.getBlockState() instanceof ShulkerBox box)) return;
+    private static long addIntoShulker(ItemStack boxStack, Material material, long add) {
+        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;
+        if (!(meta.getBlockState() instanceof ShulkerBox box)) return 0;
         long left = add;
         Inventory inner = box.getInventory();
         for (ItemStack innerStack : inner.getContents()) {
@@ -1091,13 +1139,17 @@ final class PaperInventoryHelper {
                 left -= use;
             }
         }
-        meta.setBlockState(box);
-        boxStack.setItemMeta(meta);
+        long restored = add - left;
+        if (restored > 0) {
+            meta.setBlockState(box);
+            boxStack.setItemMeta(meta);
+        }
+        return restored;
     }
 
-    private static void addIntoShulkerExact(ItemStack boxStack, ItemStack template, long add) {
-        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return;
-        if (!(meta.getBlockState() instanceof ShulkerBox box)) return;
+    private static long addIntoShulkerExact(ItemStack boxStack, ItemStack template, long add) {
+        if (!(boxStack.getItemMeta() instanceof BlockStateMeta meta) || !meta.hasBlockState()) return 0;
+        if (!(meta.getBlockState() instanceof ShulkerBox box)) return 0;
         long left = add;
         Inventory inner = box.getInventory();
         for (ItemStack innerStack : inner.getContents()) {
@@ -1119,7 +1171,11 @@ final class PaperInventoryHelper {
                 left -= use;
             }
         }
-        meta.setBlockState(box);
-        boxStack.setItemMeta(meta);
+        long restored = add - left;
+        if (restored > 0) {
+            meta.setBlockState(box);
+            boxStack.setItemMeta(meta);
+        }
+        return restored;
     }
 }

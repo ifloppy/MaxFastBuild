@@ -86,8 +86,12 @@ final class PluginMessages {
                     component("task-accepted", acceptedArguments(raw("task-accepted"), data));
             case "maxfastbuild.paste.blocks_skipped" ->
                     component("blocks-skipped", data.get("skipped"), data.get("entitySkipped"), data.get("planned"));
+            case "maxfastbuild.paste.entities_skipped" ->
+                    component("entities-skipped", data.get("count"), data.get("detail"));
             case "maxfastbuild.error.paste_precheck_failed" ->
                     component("paste-precheck-failed", data.get("count"), data.get("fatal"), data.get("detail"));
+            case "maxfastbuild.error.paste_execution_failed" ->
+                    component("paste-execution-failed", data.get("reason"));
             case "maxfastbuild.task.completed" ->
                     component("task-completed", data.get("applied"), data.get("planned"), data.get("refund"));
             case "maxfastbuild.task.partial" ->

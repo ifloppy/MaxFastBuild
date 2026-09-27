@@ -207,8 +207,15 @@ public final class MaxFastBuildClient implements ClientModInitializer {
         if ("maxfastbuild.paste.blocks_skipped".equals(key) && args.length >= 3) {
             return "MaxFastBuild: " + args[0] + " blocks, " + args[1] + " entities skipped (protected/unbreakable/unsupported) — " + args[2] + " placed";
         }
+        if ("maxfastbuild.paste.entities_skipped".equals(key) && args.length >= 2) {
+            return "MaxFastBuild: " + args[0]
+                    + " schematic entities could not spawn (their items were not consumed or were returned): " + args[1];
+        }
         if ("maxfastbuild.error.paste_precheck_failed".equals(key) && args.length >= 3) {
             return "MaxFastBuild: paste precheck failed (" + args[0] + " items, " + args[1] + " fatal) — " + args[2];
+        }
+        if ("maxfastbuild.error.paste_execution_failed".equals(key) && args.length >= 1) {
+            return "MaxFastBuild: paste execution or settlement failed; blocks may already have been placed. Cause: " + args[0];
         }
         if (args.length == 0) return "MaxFastBuild: " + key;
         StringBuilder sb = new StringBuilder("MaxFastBuild: ").append(key).append(" [");
@@ -230,6 +237,8 @@ public final class MaxFastBuildClient implements ClientModInitializer {
                             jsonString(data, "charge")};
             case "maxfastbuild.paste.blocks_skipped" ->
                     new Object[]{jsonString(data, "skipped"), jsonString(data, "entitySkipped"), jsonString(data, "planned")};
+            case "maxfastbuild.paste.entities_skipped" ->
+                    new Object[]{jsonString(data, "count"), jsonString(data, "detail")};
             case "maxfastbuild.error.paste_precheck_failed" ->
                     new Object[]{jsonString(data, "count"), jsonString(data, "fatal"), jsonString(data, "detail")};
             case "maxfastbuild.task.completed", "maxfastbuild.task.partial" ->
@@ -262,6 +271,7 @@ public final class MaxFastBuildClient implements ClientModInitializer {
                             ? new Object[]{jsonString(data, "position") + " (" + jsonString(data, "reason") + ")"}
                             : new Object[]{jsonString(data, "reason")};
             case "maxfastbuild.error.payment_failed",
+                 "maxfastbuild.error.paste_execution_failed",
                  "maxfastbuild.error.protocol",
                  "maxfastbuild.error.malformed",
                  "maxfastbuild.error.persistence_failed" ->
