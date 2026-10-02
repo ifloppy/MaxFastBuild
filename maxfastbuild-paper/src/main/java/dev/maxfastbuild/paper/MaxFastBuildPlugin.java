@@ -15,6 +15,7 @@ import net.milkbowl.vault.economy.Economy;
 import net.kyori.adventure.text.Component;
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -23,6 +24,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.block.BlockIgniteEvent;
 import org.bukkit.event.player.*;
+import org.bukkit.event.world.PortalCreateEvent;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
 import java.io.InputStream;
@@ -2300,7 +2302,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 mutations.removeIf(mutation -> NetherPortalPaste.isPortalState(mutation.targetState()));
                 pending.plannedPortalShapes.clear();
                 pending.planningSkipped += skippedPortalBlocks;
-                portalFlintUses = 0;
                 sendProtocol(player, "warning", "maxfastbuild.paste.portal_requires_flint_and_steel",
                         Map.of("count", skippedPortalUses));
                 if (mutations.isEmpty()) {
@@ -2359,17 +2360,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     return;
                 }
             }
-            if (portalFlintUses > 0) {
-                long removed = PaperInventoryHelper.takeFlintUses(sources, portalFlintUses, removals);
-                if (removed < portalFlintUses) {
-                    auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, removals);
-                    removals.restoreAll();
-                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
-                    sendMaterialError(player, "minecraft:fire", portalFlintUses, removed,
-                            true, search.requiredBuckets);
-                    return;
-                }
-            }
             tookItems = true;
         }
 
@@ -2392,7 +2382,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
         // Instant pastes execute synchronously here; everything else enqueues as a rate-limited task.
         if (pending.instant) {
-            settleInstant(player, pending, plan, charge, transactionId, tookMoney);
+            settleInstant(player, pending, plan, charge, transactionId, tookMoney, requireMaterials);
             completeStoredPaste(pending);
             return;
         }
@@ -2581,12 +2571,12 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
 
     private PortalSettlement activatePastedPortals(Player player, String worldName,
                                                    List<NetherPortalPaste.Shape> portals,
-                                                   UUID playerId, String playerName) {
+                                                   UUID playerId, String playerName, boolean requireFlint) {
         if (portals == null || portals.isEmpty()) return PortalSettlement.EMPTY;
         World world = Bukkit.getWorld(worldName);
-        if (world == null) return PortalSettlement.EMPTY;
+        if (world == null || player == null) return PortalSettlement.EMPTY;
         Set<NetherPortalPaste.Shape> formed = new LinkedHashSet<>();
-        Set<NetherPortalPaste.Shape> ignited = new LinkedHashSet<>();
+        List<PaperInventoryHelper.ItemSource> flintSources = requireFlint ? portalFlintSources(player) : List.of();
         for (NetherPortalPaste.Shape shape : portals) {
             try {
             if (!NetherPortalPaste.liveFrameAndInteriorAreLegal(world, shape)) continue;
@@ -2600,6 +2590,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
             if (alreadyFormed) {
                 formed.add(shape);
+                continue;
+            }
+            if (requireFlint && PaperInventoryHelper.countFlintUses(flintSources) < 1) {
+                sendProtocol(player, "warning", "maxfastbuild.paste.portal_requires_flint_and_steel",
+                        Map.of("count", 1));
                 continue;
             }
             NetherPortalPaste.Cell ignitionCell = shape.cells().getFirst();
@@ -2619,13 +2614,61 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 continue;
             }
 
+            List<BlockState> proposedPortalBlocks = new ArrayList<>(shape.cells().size());
+            for (NetherPortalPaste.Cell cell : shape.cells()) {
+                Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
+                BlockState proposed = block.getState();
+                proposed.setBlockData(Bukkit.createBlockData(cell.targetState()));
+                proposedPortalBlocks.add(proposed);
+            }
+            PortalCreateEvent portalCreateEvent = new PortalCreateEvent(
+                    proposedPortalBlocks, world, player, PortalCreateEvent.CreateReason.FIRE);
+            try {
+                Bukkit.getPluginManager().callEvent(portalCreateEvent);
+            } catch (RuntimeException | LinkageError ex) {
+                getLogger().warning("Nether portal creation event failed for " + playerName + ": " + shortError(ex));
+                continue;
+            }
+            if (portalCreateEvent.isCancelled()) {
+                debugLog("paste portal creation cancelled player=" + playerName
+                        + " pos=" + ignitionCell.position());
+                continue;
+            }
+            Set<BlockPos> expectedPortalPositions = new HashSet<>();
+            for (NetherPortalPaste.Cell cell : shape.cells()) expectedPortalPositions.add(cell.position());
+            Map<BlockPos, BlockData> portalTargetData = new HashMap<>();
+            boolean validEventBlocks = portalCreateEvent.getBlocks().size() == shape.cells().size();
+            if (validEventBlocks) {
+                for (BlockState proposed : portalCreateEvent.getBlocks()) {
+                    Block block = proposed.getBlock();
+                    BlockPos pos = new BlockPos(block.getX(), block.getY(), block.getZ());
+                    BlockData data = proposed.getBlockData();
+                    if (!expectedPortalPositions.contains(pos) || data.getMaterial() != Material.NETHER_PORTAL
+                            || !(data instanceof org.bukkit.block.data.Orientable orientable)
+                            || orientable.getAxis() != shape.axis()
+                            || portalTargetData.putIfAbsent(pos, data.clone()) != null) {
+                        validEventBlocks = false;
+                        break;
+                    }
+                }
+            }
+            if (!validEventBlocks || portalTargetData.size() != shape.cells().size()) {
+                debugLog("paste portal creation event changed portal block layout player=" + playerName
+                        + " pos=" + ignitionCell.position());
+                continue;
+            }
+            // Event handlers can change the frame or portal opening while deciding whether creation
+            // is allowed, so recheck the live layout before consuming a tool or writing portal data.
+            if (!NetherPortalPaste.liveFrameAndInteriorAreLegal(world, shape)) continue;
+
+            PaperInventoryHelper.RemovalLedger flintRemoval = new PaperInventoryHelper.RemovalLedger();
             Map<BlockPos, BlockData> previous = new LinkedHashMap<>();
             List<NetherPortalPaste.Cell> changedCells = new ArrayList<>();
             boolean complete = true;
             try {
                 for (NetherPortalPaste.Cell cell : shape.cells()) {
                     Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
-                    BlockData target = Bukkit.createBlockData(cell.targetState());
+                    BlockData target = portalTargetData.get(cell.position());
                     BlockData old = block.getBlockData().clone();
                     previous.put(cell.position(), old);
                     if (!old.matches(target)) {
@@ -2638,7 +2681,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
                 for (NetherPortalPaste.Cell cell : shape.cells()) {
                     Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
-                    if (!block.getBlockData().matches(Bukkit.createBlockData(cell.targetState()))) {
+                    if (!block.getBlockData().matches(portalTargetData.get(cell.position()))) {
                         complete = false;
                         break;
                     }
@@ -2648,21 +2691,64 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Could not form pasted Nether portal for " + playerName + ": " + shortError(ex));
             }
 
+            if (complete && requireFlint) {
+                try {
+                    if (PaperInventoryHelper.countFlintUses(flintSources) < 1) {
+                        sendProtocol(player, "warning", "maxfastbuild.paste.portal_requires_flint_and_steel",
+                                Map.of("count", 1));
+                        complete = false;
+                    } else {
+                        auditContainerTakes(player, worldName, true, flintSources, null);
+                        if (PaperInventoryHelper.takeFlintUses(flintSources, 1, flintRemoval) < 1) {
+                            sendProtocol(player, "warning", "maxfastbuild.paste.portal_requires_flint_and_steel",
+                                    Map.of("count", 1));
+                            complete = false;
+                        }
+                    }
+                } catch (RuntimeException | LinkageError ex) {
+                    complete = false;
+                    getLogger().warning("Could not consume flint and steel for "
+                            + playerName + ": " + shortError(ex));
+                }
+            }
+
             if (!complete) {
-                for (Map.Entry<BlockPos, BlockData> entry : previous.entrySet()) {
-                    BlockPos pos = entry.getKey();
-                    world.getBlockAt(pos.x(), pos.y(), pos.z()).setBlockData(entry.getValue(), false);
+                try {
+                    for (Map.Entry<BlockPos, BlockData> entry : previous.entrySet()) {
+                        BlockPos pos = entry.getKey();
+                        world.getBlockAt(pos.x(), pos.y(), pos.z()).setBlockData(entry.getValue(), false);
+                    }
+                } catch (RuntimeException | LinkageError ex) {
+                    getLogger().warning("Could not roll back incomplete Nether portal for "
+                            + playerName + ": " + shortError(ex));
+                } finally {
+                    if (!flintRemoval.isEmpty()) {
+                        try {
+                            auditContainerRefunds(playerId, playerName, worldName, flintRemoval);
+                        } catch (RuntimeException | LinkageError ex) {
+                            getLogger().warning("Could not audit portal ignition refund for "
+                                    + playerName + ": " + shortError(ex));
+                        }
+                        flintRemoval.restoreAll();
+                    }
                 }
                 continue;
             }
 
             formed.add(shape);
-            ignited.add(shape);
+            if (!flintRemoval.isEmpty()) {
+                try {
+                    auditContainerTakes(playerId, playerName, worldName, false, null, flintRemoval);
+                } catch (RuntimeException | LinkageError ex) {
+                    getLogger().warning("Could not audit flint-and-steel use for " + playerName + ": " + shortError(ex));
+                }
+            }
             for (NetherPortalPaste.Cell cell : changedCells) {
                 BlockPos pos = cell.position();
                 try {
                     audit.record(playerId, playerName, worldName,
-                            new BlockMutation(pos, previous.get(pos).getAsString(), cell.targetState()), OperationKind.PLACE);
+                            new BlockMutation(pos, previous.get(pos).getAsString(),
+                                    portalTargetData.get(pos).getAsString()), OperationKind.PLACE);
                 } catch (RuntimeException | LinkageError ex) {
                     getLogger().warning("Could not audit pasted Nether portal at " + pos + ": " + shortError(ex));
                 }
@@ -2673,7 +2759,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getLogger().warning("Could not activate pasted Nether portal for " + playerName + ": " + shortError(ex));
             }
         }
-        return new PortalSettlement(formed, ignited);
+        return new PortalSettlement(formed);
     }
 
     private static Set<Integer> unformedPortalMutationIndices(List<BlockMutation> mutations,
@@ -2697,13 +2783,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         return unformed;
     }
 
-    private record PortalSettlement(Set<NetherPortalPaste.Shape> formed,
-                                    Set<NetherPortalPaste.Shape> ignited) {
-        static final PortalSettlement EMPTY = new PortalSettlement(Set.of(), Set.of());
+    private record PortalSettlement(Set<NetherPortalPaste.Shape> formed) {
+        static final PortalSettlement EMPTY = new PortalSettlement(Set.of());
 
         PortalSettlement {
             formed = Set.copyOf(formed);
-            ignited = Set.copyOf(ignited);
         }
     }
 
@@ -2723,8 +2807,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             portals = taskPortals.remove(task.id());
             if (portals == null) portals = portalShapesFromPlan(task.plan());
             if (task.status() == TaskStatus.COMPLETED) {
+                boolean requireFlint = player != null && player.getGameMode() != GameMode.CREATIVE
+                        && !player.hasPermission("maxfastbuild.bypass.materials");
                 portalSettlement = activatePastedPortals(player, task.plan().world(), portals,
-                        task.playerId(), task.playerName());
+                        task.playerId(), task.playerName(), requireFlint);
             }
             unappliedPortals = unformedPortalMutationIndices(task.plan().mutations(), portals,
                     portalSettlement.formed(), task.skipped(), task.cursor());
@@ -2784,13 +2870,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             unapplied.addAll(unappliedPortals);
             auditContainerRefunds(task.playerId(), task.playerName(), task.plan().world(), removals);
             returnUnusedMaterials(player, task.plan(), unapplied, removals);
-        }
-
-        if (!portals.isEmpty()) {
-            long unusedPortalUses = Math.max(0, portals.size() - portalSettlement.ignited().size());
-            if (unusedPortalUses > 0 && removals != null) {
-                removals.refundMaterial("minecraft:flint_and_steel", unusedPortalUses);
-            }
         }
 
         // Cross-tick redstone convergence for a completed place task: the last batch's settle
@@ -3287,6 +3366,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 getConfig().getInt("inventory.container-search-radius", 5),
                 fluidBucketRequirement(),
                 getConfig().getBoolean("inventory.fire-requires-flint-and-steel", true));
+    }
+
+    /** Flint used to ignite queued portal groups must be taken from the same configured sources as paste materials. */
+    private List<PaperInventoryHelper.ItemSource> portalFlintSources(Player player) {
+        boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
+        if (searchShulkers && getConfig().getBoolean("inventory.require-shulker-permission", false)
+                && !player.hasPermission("maxfastbuild.material.shulker")) {
+            searchShulkers = false;
+        }
+        return inventorySearch(player, searchShulkers).sources(player);
     }
 
     /**
@@ -3817,7 +3906,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
      * {@code mutate} call path exactly as for queued tasks.
      */
     private void settleInstant(Player player, PendingPaste pending, BuildPlan plan, BillingPolicy.Charge charge,
-                               String transactionId, boolean tookMoney) {
+                               String transactionId, boolean tookMoney, boolean requireMaterials) {
         PaperWorldAccess world = new PaperWorldAccess();
         List<BlockMutation> mutations = plan.mutations();
         long applied = 0;
@@ -3890,16 +3979,11 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         List<NetherPortalPaste.Shape> plannedPortals = List.copyOf(pending.plannedPortalShapes);
         PortalSettlement portalSettlement = failure == null
                 ? activatePastedPortals(player, pending.world, plannedPortals,
-                player.getUniqueId(), player.getName()) : PortalSettlement.EMPTY;
+                player.getUniqueId(), player.getName(), requireMaterials) : PortalSettlement.EMPTY;
         Set<Integer> unappliedPortals = unformedPortalMutationIndices(mutations, plannedPortals,
                 portalSettlement.formed(), unapplied, cursor);
         unapplied.addAll(unappliedPortals);
         applied = Math.max(0, applied - unappliedPortals.size());
-        long unusedPortalUses = Math.max(0, plannedPortals.size() - portalSettlement.ignited().size());
-        if (unusedPortalUses > 0 && pending.removals != null) {
-            pending.removals.refundMaterial("minecraft:flint_and_steel", unusedPortalUses);
-        }
-
         // Spawn entities only after a clean block phase. If block execution failed, no entity was
         // spawned yet, so all entity materials can be returned safely without duplication.
         if (!pending.entities.isEmpty()) {
