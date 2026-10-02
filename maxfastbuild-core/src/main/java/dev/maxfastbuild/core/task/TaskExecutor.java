@@ -176,8 +176,10 @@ public final class TaskExecutor {
                 applied++;
                 changedPositions.add(mutation.position());
                 cursor++;
-                audit.record(playerId, playerName, worldName, mutation, operation,
-                        result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
+                if (!result.placementDeferred()) {
+                    audit.record(playerId, playerName, worldName, mutation, operation,
+                            result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
+                }
             }
         } catch (RuntimeException | LinkageError ex) {
             failure = ex;

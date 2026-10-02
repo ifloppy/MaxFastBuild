@@ -208,6 +208,9 @@ final class PaperWorldAccess implements WorldAccess {
             return new ValidationResult(false, "invalid_block_state");
         }
         Material targetMaterial = targetData.getMaterial();
+        if (targetMaterial == Material.NETHER_PORTAL) {
+            return mayMutatePortalPaste(target, mutation, kind);
+        }
         if (RestrictedMaterials.isForbiddenPlace(targetMaterial) || !targetMaterial.isBlock()) {
             return new ValidationResult(false, "forbidden_material");
         }
@@ -255,6 +258,14 @@ final class PaperWorldAccess implements WorldAccess {
             return new MutationResult(false, "invalid_block_state");
         }
         Material targetMaterial = targetData.getMaterial();
+        if (targetMaterial == Material.NETHER_PORTAL) {
+            if (kind != OperationKind.PLACE || !portalInteriorAvailable(block.getType())) {
+                return new MutationResult(false, "portal_position_unavailable");
+            }
+            // Nether portal blocks have no placeable item. Keep the mutation in the durable build
+            // plan, then form the complete portal only after all frame blocks have settled.
+            return new MutationResult(true, "portal_deferred");
+        }
         if (RestrictedMaterials.isForbiddenPlace(targetMaterial)) {
             return new MutationResult(false, "forbidden_material");
         }
@@ -475,6 +486,21 @@ final class PaperWorldAccess implements WorldAccess {
 
     static boolean isForbiddenPlaceMaterial(Material material) {
         return RestrictedMaterials.isForbiddenPlace(material);
+    }
+
+    private static ValidationResult mayMutatePortalPaste(Block target, BlockMutation mutation, OperationKind kind) {
+        if (kind != OperationKind.PLACE || target.getType() != Material.AIR
+                && target.getType() != Material.FIRE && target.getType() != Material.NETHER_PORTAL) {
+            return new ValidationResult(false, "portal_position_unavailable");
+        }
+        if (!NetherPortalPaste.isPortalState(mutation.targetState())) {
+            return new ValidationResult(false, "invalid_portal_state");
+        }
+        return new ValidationResult(true, "");
+    }
+
+    private static boolean portalInteriorAvailable(Material material) {
+        return material == Material.AIR || material == Material.FIRE || material == Material.NETHER_PORTAL;
     }
 
     private record DeferredBlockUpdate(BlockData previousData, boolean stateChanged) {}

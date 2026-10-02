@@ -91,6 +91,7 @@ Notes:
 - Optional **instant paste**: bind the "**Toggle instant paste**" key (default unbound), press it to arm the mode (HUD indicator), then paste. Instant pastes are charged at the server's `instant-paste.multiplier` (default 2×) and execute immediately instead of waiting in the queue; they share `execution.max-affected-blocks` with queued pastes. Materials and tool durability are still required.
 - A single paste is bounded by `execution.max-region-blocks` (selected volume including air), `execution.max-affected-blocks` (unique coordinates planned to change), and the X/Y/Z size limits. The client shows server limits and current schematic metrics; split larger schematics.
 - As with normal placement, survival deducts **per block type** from the inventory and applies world-protection, tool-durability and economy checks.
+- A complete, valid Nether portal frame and its portal blocks are lit after the frame is pasted. Survival uses one durability point per portal from a flint and steel; without enough uses, the frame is pasted and left unlit.
 - Without Litematica the key does nothing; creative mode still goes through the same validation.
 
 ## Troubleshooting

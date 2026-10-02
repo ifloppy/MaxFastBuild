@@ -21,6 +21,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
+import org.bukkit.event.block.BlockIgniteEvent;
 import org.bukkit.event.player.*;
 import org.bukkit.plugin.RegisteredServiceProvider;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -54,6 +55,8 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private final Map<UUID, PasteMaterials> lastPasteNeeds = new ConcurrentHashMap<>();
     private final Map<UUID, List<PendingEntity>> taskEntities = new ConcurrentHashMap<>();
     private final Map<UUID, PaperInventoryHelper.RemovalLedger> taskRemovals = new ConcurrentHashMap<>();
+    /** Portal layouts stay attached to their task until its frame blocks have finished placing. */
+    private final Map<UUID, List<NetherPortalPaste.Shape>> taskPortals = new ConcurrentHashMap<>();
     private final Map<UUID, Queue<QueuedCommand>> commandQueues = new ConcurrentHashMap<>();
     /** Persisted executable tasks discovered during this plugin enable. They stay inert until explicitly resumed. */
     private final Set<UUID> startupQuarantinedTasks = ConcurrentHashMap.newKeySet();
@@ -756,7 +759,13 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         List<BlockMutation> ordered = new ArrayList<>(mutations);
         Comparator<BlockMutation> byY = Comparator.comparingInt(mutation -> mutation.position().y());
         if (operation == OperationKind.BREAK) byY = byY.reversed();
-        ordered.sort(byY);
+        if (operation == OperationKind.PLACE) {
+            ordered.sort(Comparator.comparingInt((BlockMutation mutation) ->
+                            NetherPortalPaste.isPortalState(mutation.targetState()) ? 1 : 0)
+                    .thenComparing(byY));
+        } else {
+            ordered.sort(byY);
+        }
         return List.copyOf(ordered);
     }
 
@@ -1804,7 +1813,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 String stripped = PaperNbtHelper.stripContentFields(targetNbt, material);
                 if (stripped != null) targetNbt = stripped;
             }
-            if (material.isAir() || !material.isBlock() || RestrictedMaterials.isForbiddenPlace(material)) {
+            if (material == Material.NETHER_PORTAL && targetNbt != null) continue;
+            if (material.isAir() || !material.isBlock()
+                    || (RestrictedMaterials.isForbiddenPlace(material) && material != Material.NETHER_PORTAL)) {
                 continue;
             }
             PastePos pastePos = new PastePos(new BlockPos(origin[0] + entry.dx(), origin[1] + entry.dy(), origin[2] + entry.dz()),
@@ -1820,6 +1831,33 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             }
         }
         List<PastePos> positions = new ArrayList<>(positionMap.values());
+        Map<BlockPos, String> submittedStates = new HashMap<>();
+        List<NetherPortalPaste.Cell> submittedPortalCells = new ArrayList<>();
+        for (PastePos pastePos : positions) {
+            submittedStates.put(pastePos.position(), pastePos.targetState());
+            if (NetherPortalPaste.isPortalState(pastePos.targetState())) {
+                submittedPortalCells.add(new NetherPortalPaste.Cell(pastePos.position(), pastePos.targetState()));
+            }
+        }
+        List<NetherPortalPaste.Shape> portalShapes = NetherPortalPaste.findValid(
+                player.getWorld(), submittedPortalCells, submittedStates);
+        Set<BlockPos> validPortalPositions = new HashSet<>();
+        for (NetherPortalPaste.Shape shape : portalShapes) {
+            for (NetherPortalPaste.Cell cell : shape.cells()) validPortalPositions.add(cell.position());
+        }
+        int rejectedPortalBlocks = 0;
+        for (Iterator<PastePos> iterator = positions.iterator(); iterator.hasNext();) {
+            PastePos pastePos = iterator.next();
+            if (NetherPortalPaste.isPortalState(pastePos.targetState())
+                    && !validPortalPositions.contains(pastePos.position())) {
+                iterator.remove();
+                rejectedPortalBlocks++;
+            }
+        }
+        if (rejectedPortalBlocks > 0) {
+            debugLog("paste skipped invalid portal blocks player=" + player.getName()
+                    + " blocks=" + rejectedPortalBlocks);
+        }
         if (positions.isEmpty()) {
             debugLog("paste rejected player=" + player.getName() + " reason=no_placeable_blocks");
             sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
@@ -1897,8 +1935,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-        PendingPaste pending = new PendingPaste(player, assembled.pasteSessionId(), worldName, instant, positions, entities,
+        PendingPaste pending = new PendingPaste(player, assembled.pasteSessionId(), worldName, instant, positions, portalShapes, entities,
                 regionMetrics.bounds(), regionMetrics.volume(), limits.maxAffectedBlocks());
+        pending.planningSkipped += rejectedPortalBlocks;
         pending.issues.addAll(entityIssues);
         pendingPastes.put(player.getUniqueId(), pending);
         debugLog("paste assembled player=" + player.getName()
@@ -1984,6 +2023,56 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 pending.planningSkipped++;
                 continue;
             }
+            if (NetherPortalPaste.isPortalState(pp.targetState())) {
+                NetherPortalPaste.Shape shape = pending.portalByPosition.get(pos);
+                if (shape == null) {
+                    pending.planningSkipped++;
+                    continue;
+                }
+                if (!pending.visitedPortalShapes.add(shape)) continue;
+
+                List<BlockMutation> portalMutations = new ArrayList<>();
+                boolean portalAllowed = true;
+                for (NetherPortalPaste.Cell cell : shape.cells()) {
+                    String portalBefore;
+                    try {
+                        portalBefore = world.stateAt(pending.world, cell.position());
+                    } catch (LinkageError | RuntimeException ex) {
+                        pending.issues.add(new PastePrecheckIssue("block", cell.targetState(), shortError(ex), true));
+                        portalAllowed = false;
+                        break;
+                    }
+                    if (portalBefore.equals(cell.targetState())) continue;
+                    BlockMutation portalMutation = new BlockMutation(cell.position(), portalBefore, cell.targetState());
+                    WorldAccess.ValidationResult portalValidation;
+                    try {
+                        portalValidation = world.mayMutate(player.getUniqueId(), pending.world,
+                                portalMutation, OperationKind.PLACE);
+                    } catch (LinkageError | RuntimeException ex) {
+                        pending.issues.add(new PastePrecheckIssue("block", cell.targetState(), shortError(ex), true));
+                        portalAllowed = false;
+                        break;
+                    }
+                    if (!portalValidation.allowed()) {
+                        debugLog("paste planning skipped portal player=" + player.getName()
+                                + " pos=" + cell.position() + " reason=" + portalValidation.reason());
+                        portalAllowed = false;
+                        break;
+                    }
+                    portalMutations.add(portalMutation);
+                }
+                if (!portalAllowed) {
+                    pending.planningSkipped += shape.cells().size();
+                    continue;
+                }
+                pending.mutations.addAll(portalMutations);
+                if (!portalMutations.isEmpty()) pending.plannedPortalShapes.add(shape);
+                if (pending.mutations.size() > pending.maxAffectedBlocks) {
+                    return new PlanningError("maxfastbuild.error.affected_too_large",
+                            Map.of("actual", pending.mutations.size(), "limit", pending.maxAffectedBlocks));
+                }
+                continue;
+            }
             String before;
             try {
                 before = world.stateAt(pending.world, pos);
@@ -2034,6 +2123,29 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         return null;
     }
 
+    private static BuildPlan pasteBuildPlan(PendingPaste pending, List<BlockMutation> mutations) {
+        BlockPos first = mutations.getFirst().position();
+        BlockPos min = first;
+        BlockPos max = first;
+        for (BlockMutation mutation : mutations) {
+            BlockPos pos = mutation.position();
+            min = new BlockPos(Math.min(min.x(), pos.x()), Math.min(min.y(), pos.y()), Math.min(min.z(), pos.z()));
+            max = new BlockPos(Math.max(max.x(), pos.x()), Math.max(max.y(), pos.y()), Math.max(max.z(), pos.z()));
+        }
+        return new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max),
+                orderMutationsForExecution(OperationKind.PLACE, mutations));
+    }
+
+    private BillingPolicy.Charge pasteCharge(BillingPolicy policy, BuildPlan plan, PendingPaste pending) {
+        BillingPolicy.Charge charge = policy.quote(plan, pending.replaceBreakCount);
+        if (!pending.instant) return charge;
+        BigDecimal multiplier = instantMultiplier();
+        java.util.function.Function<BigDecimal, BigDecimal> scaled = value -> value.multiply(multiplier)
+                .setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
+        return new BillingPolicy.Charge(scaled.apply(charge.operation()), scaled.apply(charge.area()),
+                scaled.apply(charge.blocks()), scaled.apply(charge.total()));
+    }
+
     private void finalizePastePlanning(PendingPaste pending) {
         Player player = pending.player;
         // Any unexpected precheck error (missing NMS class, etc.) cancels the whole paste before
@@ -2061,23 +2173,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             return;
         }
 
-        BlockPos first = mutations.getFirst().position();
-        BlockPos min = first;
-        BlockPos max = first;
-        for (BlockMutation mutation : mutations) {
-            BlockPos pos = mutation.position();
-            min = new BlockPos(Math.min(min.x(), pos.x()), Math.min(min.y(), pos.y()), Math.min(min.z(), pos.z()));
-            max = new BlockPos(Math.max(max.x(), pos.x()), Math.max(max.y(), pos.y()), Math.max(max.z(), pos.z()));
-        }
-        BuildPlan plan = new BuildPlan(pending.world, OperationKind.PLACE, new Bounds(min, max),
-                orderMutationsForExecution(OperationKind.PLACE, mutations));
         BillingPolicy policy = billing();
-        BillingPolicy.Charge charge = policy.quote(plan, pending.replaceBreakCount);
-        if (pending.instant) {
-            BigDecimal mult = instantMultiplier();
-            java.util.function.Function<BigDecimal, BigDecimal> scaled = v -> v.multiply(mult).setScale(policy.fractionalDigits(), java.math.RoundingMode.HALF_UP);
-            charge = new BillingPolicy.Charge(scaled.apply(charge.operation()), scaled.apply(charge.area()), scaled.apply(charge.blocks()), scaled.apply(charge.total()));
-        }
+        BuildPlan plan = pasteBuildPlan(pending, mutations);
+        BillingPolicy.Charge charge = pasteCharge(policy, plan, pending);
         boolean requireMaterials = player.getGameMode() != GameMode.CREATIVE
                 && !player.hasPermission("maxfastbuild.bypass.materials");
         boolean searchShulkers = getConfig().getBoolean("inventory.search-shulker-boxes", false);
@@ -2123,6 +2221,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         }
         pending.needs = needs;
         lastPasteNeeds.put(player.getUniqueId(), needs);
+        long portalFlintUses = pending.plannedPortalShapes.size();
         if (requireMaterials) {
             // Blocks and container contents draw from the same item pool. Verify the per-material
             // TOTAL once up front, so a combined shortage (e.g. 68 shulker-box blocks + 454 boxes
@@ -2180,6 +2279,37 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     return;
                 }
             }
+
+            long regularFlintUses = 0;
+            if (search.fireRequiresFlint) {
+                for (Map.Entry<String, Long> entry : needs.blocks.entrySet()) {
+                    Material material = PaperInventoryHelper.resolveMaterial(entry.getKey());
+                    if (PaperInventoryHelper.isFire(material)) regularFlintUses += entry.getValue();
+                }
+            }
+            long usableFlint = PaperInventoryHelper.countFlintUses(sources);
+            if (usableFlint < regularFlintUses) {
+                sendMaterialError(player, "minecraft:fire", regularFlintUses, usableFlint,
+                        true, search.requiredBuckets);
+                return;
+            }
+            if (portalFlintUses > 0 && usableFlint < regularFlintUses + portalFlintUses) {
+                long skippedPortalUses = portalFlintUses;
+                long skippedPortalBlocks = mutations.stream()
+                        .filter(mutation -> NetherPortalPaste.isPortalState(mutation.targetState())).count();
+                mutations.removeIf(mutation -> NetherPortalPaste.isPortalState(mutation.targetState()));
+                pending.plannedPortalShapes.clear();
+                pending.planningSkipped += skippedPortalBlocks;
+                portalFlintUses = 0;
+                sendProtocol(player, "warning", "maxfastbuild.paste.portal_requires_flint_and_steel",
+                        Map.of("count", skippedPortalUses));
+                if (mutations.isEmpty()) {
+                    sendProtocol(player, "error", "maxfastbuild.error.no_changes", Map.of());
+                    return;
+                }
+                plan = pasteBuildPlan(pending, mutations);
+                charge = pasteCharge(policy, plan, pending);
+            }
         }
 
         UUID taskId = UUID.randomUUID();
@@ -2229,6 +2359,17 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                     return;
                 }
             }
+            if (portalFlintUses > 0) {
+                long removed = PaperInventoryHelper.takeFlintUses(sources, portalFlintUses, removals);
+                if (removed < portalFlintUses) {
+                    auditContainerRefunds(player.getUniqueId(), player.getName(), pending.world, removals);
+                    removals.restoreAll();
+                    if (tookMoney) refundMoney(player, taskId, charge.total(), transactionId);
+                    sendMaterialError(player, "minecraft:fire", portalFlintUses, removed,
+                            true, search.requiredBuckets);
+                    return;
+                }
+            }
             tookItems = true;
         }
 
@@ -2272,6 +2413,9 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         // Queued paste entities spawn when the block task completes (spawn/refund handled in settlePartial).
         if (!pending.entities.isEmpty()) {
             taskEntities.put(taskId, pending.entities);
+        }
+        if (!pending.plannedPortalShapes.isEmpty()) {
+            taskPortals.put(taskId, List.copyOf(pending.plannedPortalShapes));
         }
         if (tookItems) {
             taskRemovals.put(taskId, removals);
@@ -2421,6 +2565,148 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         if (pausedOffline) tasks.flush();
     }
 
+    private List<NetherPortalPaste.Shape> portalShapesFromPlan(BuildPlan plan) {
+        World world = Bukkit.getWorld(plan.world());
+        if (world == null) return List.of();
+        List<NetherPortalPaste.Cell> portalCells = new ArrayList<>();
+        Map<BlockPos, String> targetStates = new HashMap<>();
+        for (BlockMutation mutation : plan.mutations()) {
+            targetStates.put(mutation.position(), mutation.targetState());
+            if (NetherPortalPaste.isPortalState(mutation.targetState())) {
+                portalCells.add(new NetherPortalPaste.Cell(mutation.position(), mutation.targetState()));
+            }
+        }
+        return NetherPortalPaste.findValid(world, portalCells, targetStates);
+    }
+
+    private PortalSettlement activatePastedPortals(Player player, String worldName,
+                                                   List<NetherPortalPaste.Shape> portals,
+                                                   UUID playerId, String playerName) {
+        if (portals == null || portals.isEmpty()) return PortalSettlement.EMPTY;
+        World world = Bukkit.getWorld(worldName);
+        if (world == null) return PortalSettlement.EMPTY;
+        Set<NetherPortalPaste.Shape> formed = new LinkedHashSet<>();
+        Set<NetherPortalPaste.Shape> ignited = new LinkedHashSet<>();
+        for (NetherPortalPaste.Shape shape : portals) {
+            try {
+            if (!NetherPortalPaste.liveFrameAndInteriorAreLegal(world, shape)) continue;
+            boolean alreadyFormed = true;
+            for (NetherPortalPaste.Cell cell : shape.cells()) {
+                Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
+                if (!block.getBlockData().matches(Bukkit.createBlockData(cell.targetState()))) {
+                    alreadyFormed = false;
+                    break;
+                }
+            }
+            if (alreadyFormed) {
+                formed.add(shape);
+                continue;
+            }
+            NetherPortalPaste.Cell ignitionCell = shape.cells().getFirst();
+            Block ignitionBlock = world.getBlockAt(ignitionCell.position().x(), ignitionCell.position().y(),
+                    ignitionCell.position().z());
+            BlockIgniteEvent igniteEvent = new BlockIgniteEvent(
+                    ignitionBlock, BlockIgniteEvent.IgniteCause.FLINT_AND_STEEL, player);
+            try {
+                Bukkit.getPluginManager().callEvent(igniteEvent);
+            } catch (RuntimeException | LinkageError ex) {
+                getLogger().warning("Nether portal ignition event failed for " + playerName + ": " + shortError(ex));
+                continue;
+            }
+            if (igniteEvent.isCancelled()) {
+                debugLog("paste portal ignition cancelled player=" + playerName
+                        + " pos=" + ignitionCell.position());
+                continue;
+            }
+
+            Map<BlockPos, BlockData> previous = new LinkedHashMap<>();
+            List<NetherPortalPaste.Cell> changedCells = new ArrayList<>();
+            boolean complete = true;
+            try {
+                for (NetherPortalPaste.Cell cell : shape.cells()) {
+                    Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
+                    BlockData target = Bukkit.createBlockData(cell.targetState());
+                    BlockData old = block.getBlockData().clone();
+                    previous.put(cell.position(), old);
+                    if (!old.matches(target)) {
+                        changedCells.add(cell);
+                        block.setBlockData(target, false);
+                    }
+                }
+                for (NetherPortalPaste.Cell cell : shape.cells()) {
+                    PaperBlockPhysicsHelper.refreshNeighbors(world, cell.position());
+                }
+                for (NetherPortalPaste.Cell cell : shape.cells()) {
+                    Block block = world.getBlockAt(cell.position().x(), cell.position().y(), cell.position().z());
+                    if (!block.getBlockData().matches(Bukkit.createBlockData(cell.targetState()))) {
+                        complete = false;
+                        break;
+                    }
+                }
+            } catch (RuntimeException | LinkageError ex) {
+                complete = false;
+                getLogger().warning("Could not form pasted Nether portal for " + playerName + ": " + shortError(ex));
+            }
+
+            if (!complete) {
+                for (Map.Entry<BlockPos, BlockData> entry : previous.entrySet()) {
+                    BlockPos pos = entry.getKey();
+                    world.getBlockAt(pos.x(), pos.y(), pos.z()).setBlockData(entry.getValue(), false);
+                }
+                continue;
+            }
+
+            formed.add(shape);
+            ignited.add(shape);
+            for (NetherPortalPaste.Cell cell : changedCells) {
+                BlockPos pos = cell.position();
+                try {
+                    audit.record(playerId, playerName, worldName,
+                            new BlockMutation(pos, previous.get(pos).getAsString(), cell.targetState()), OperationKind.PLACE);
+                } catch (RuntimeException | LinkageError ex) {
+                    getLogger().warning("Could not audit pasted Nether portal at " + pos + ": " + shortError(ex));
+                }
+            }
+            debugLog("paste portal activated player=" + playerName + " axis=" + shape.axis()
+                    + " width=" + shape.width() + " height=" + shape.height());
+            } catch (RuntimeException | LinkageError ex) {
+                getLogger().warning("Could not activate pasted Nether portal for " + playerName + ": " + shortError(ex));
+            }
+        }
+        return new PortalSettlement(formed, ignited);
+    }
+
+    private static Set<Integer> unformedPortalMutationIndices(List<BlockMutation> mutations,
+                                                               List<NetherPortalPaste.Shape> portals,
+                                                               Set<NetherPortalPaste.Shape> formed,
+                                                               Set<Integer> alreadyUnapplied,
+                                                               int executedUntil) {
+        Map<BlockPos, NetherPortalPaste.Shape> shapesByPosition = new HashMap<>();
+        for (NetherPortalPaste.Shape shape : portals) {
+            for (NetherPortalPaste.Cell cell : shape.cells()) shapesByPosition.put(cell.position(), shape);
+        }
+        Set<Integer> unformed = new HashSet<>();
+        int limit = Math.min(executedUntil, mutations.size());
+        for (int i = 0; i < limit; i++) {
+            if (alreadyUnapplied.contains(i)) continue;
+            BlockMutation mutation = mutations.get(i);
+            if (!NetherPortalPaste.isPortalState(mutation.targetState())) continue;
+            NetherPortalPaste.Shape shape = shapesByPosition.get(mutation.position());
+            if (shape != null && !formed.contains(shape)) unformed.add(i);
+        }
+        return unformed;
+    }
+
+    private record PortalSettlement(Set<NetherPortalPaste.Shape> formed,
+                                    Set<NetherPortalPaste.Shape> ignited) {
+        static final PortalSettlement EMPTY = new PortalSettlement(Set.of(), Set.of());
+
+        PortalSettlement {
+            formed = Set.copyOf(formed);
+            ignited = Set.copyOf(ignited);
+        }
+    }
+
     /**
      * After a task finishes or is cancelled: refund per-block/per-area for mutations that never applied,
      * and return unused place materials. Fixed per-operation fee is not refunded once execution started.
@@ -2429,8 +2715,23 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     private void settlePartial(TaskExecutor.TickResult result) {
         BuildTask task = result.task();
         PaperInventoryHelper.RemovalLedger removals = taskRemovals.remove(task.id());
+        Player player = Bukkit.getPlayer(task.playerId());
+        List<NetherPortalPaste.Shape> portals = List.of();
+        PortalSettlement portalSettlement = PortalSettlement.EMPTY;
+        Set<Integer> unappliedPortals = Set.of();
+        if (task.plan().operation() == OperationKind.PLACE) {
+            portals = taskPortals.remove(task.id());
+            if (portals == null) portals = portalShapesFromPlan(task.plan());
+            if (task.status() == TaskStatus.COMPLETED) {
+                portalSettlement = activatePastedPortals(player, task.plan().world(), portals,
+                        task.playerId(), task.playerName());
+            }
+            unappliedPortals = unformedPortalMutationIndices(task.plan().mutations(), portals,
+                    portalSettlement.formed(), task.skipped(), task.cursor());
+        }
         long planned = task.plan().mutations().size();
         long appliedCount = Math.max(task.appliedCount(), result.totalApplied());
+        appliedCount = Math.max(0, appliedCount - unappliedPortals.size());
         long missed = Math.max(0, planned - appliedCount);
 
         BillingPolicy policy = billing();
@@ -2462,7 +2763,6 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             refund = task.charged();
         }
 
-        Player player = Bukkit.getPlayer(task.playerId());
         if (refund.signum() > 0 && task.charged().signum() > 0) {
             String tx = task.id() + ":partial-refund";
             if (player != null) {
@@ -2481,8 +2781,16 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             // mutations may not be the ones that applied.
             Set<Integer> unapplied = new HashSet<>(task.skipped());
             for (int i = task.cursor(); i < task.plan().mutations().size(); i++) unapplied.add(i);
+            unapplied.addAll(unappliedPortals);
             auditContainerRefunds(task.playerId(), task.playerName(), task.plan().world(), removals);
             returnUnusedMaterials(player, task.plan(), unapplied, removals);
+        }
+
+        if (!portals.isEmpty()) {
+            long unusedPortalUses = Math.max(0, portals.size() - portalSettlement.ignited().size());
+            if (unusedPortalUses > 0 && removals != null) {
+                removals.refundMaterial("minecraft:flint_and_steel", unusedPortalUses);
+            }
         }
 
         // Cross-tick redstone convergence for a completed place task: the last batch's settle
@@ -3126,6 +3434,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
     /** A mutation consumes a block item only when it really places/replaces the target block. */
     private static boolean mutationConsumesBlockItem(BlockMutation mutation) {
         if (mutation.expectedState().equals(mutation.targetState())) return false;
+        if (NetherPortalPaste.isPortalState(mutation.targetState())) return false;
         return !PaperWorldAccess.canPreserveContentsInPlace(
                 mutation.expectedState(), mutation.targetState(), mutation.preserveContents());
     }
@@ -3547,8 +3856,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 applied++;
                 appliedPositions.add(mutation.position());
                 cursor = i + 1;
-                audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE,
-                        result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
+                if (!result.placementDeferred()) {
+                    audit.record(player.getUniqueId(), player.getName(), pending.world, mutation, OperationKind.PLACE,
+                            result.breakAlreadyLogged(), result.placeEventAlreadyLogged());
+                }
             }
         } catch (RuntimeException | LinkageError ex) {
             failure = ex;
@@ -3574,6 +3885,19 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
                 if (failure == null) failure = ex;
                 else failure.addSuppressed(ex);
             }
+        }
+
+        List<NetherPortalPaste.Shape> plannedPortals = List.copyOf(pending.plannedPortalShapes);
+        PortalSettlement portalSettlement = failure == null
+                ? activatePastedPortals(player, pending.world, plannedPortals,
+                player.getUniqueId(), player.getName()) : PortalSettlement.EMPTY;
+        Set<Integer> unappliedPortals = unformedPortalMutationIndices(mutations, plannedPortals,
+                portalSettlement.formed(), unapplied, cursor);
+        unapplied.addAll(unappliedPortals);
+        applied = Math.max(0, applied - unappliedPortals.size());
+        long unusedPortalUses = Math.max(0, plannedPortals.size() - portalSettlement.ignited().size());
+        if (unusedPortalUses > 0 && pending.removals != null) {
+            pending.removals.refundMaterial("minecraft:flint_and_steel", unusedPortalUses);
         }
 
         // Spawn entities only after a clean block phase. If block execution failed, no entity was
@@ -3940,6 +4264,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         final String world;
         final boolean instant;
         final Iterator<PastePos> iterator;
+        final List<NetherPortalPaste.Shape> portalShapes;
+        final Map<BlockPos, NetherPortalPaste.Shape> portalByPosition = new HashMap<>();
+        final Set<NetherPortalPaste.Shape> visitedPortalShapes = new HashSet<>();
+        final Set<NetherPortalPaste.Shape> plannedPortalShapes = new LinkedHashSet<>();
         final List<BlockMutation> mutations = new ArrayList<>();
         final List<PendingEntity> entities;
         final Bounds regionBounds;
@@ -3953,6 +4281,7 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
         long planningSkipped = 0;
 
         PendingPaste(Player player, String pasteSessionId, String world, boolean instant, List<PastePos> positions,
+                     List<NetherPortalPaste.Shape> portalShapes,
                      List<PendingEntity> entities, Bounds regionBounds, long regionBlocks,
                      long maxAffectedBlocks) {
             this.player = player;
@@ -3960,6 +4289,10 @@ public final class MaxFastBuildPlugin extends JavaPlugin implements Listener {
             this.world = world;
             this.instant = instant;
             this.iterator = positions.iterator();
+            this.portalShapes = portalShapes == null ? List.of() : List.copyOf(portalShapes);
+            for (NetherPortalPaste.Shape shape : this.portalShapes) {
+                for (NetherPortalPaste.Cell cell : shape.cells()) portalByPosition.put(cell.position(), shape);
+            }
             this.entities = entities == null ? List.of() : List.copyOf(entities);
             this.regionBounds = regionBounds;
             this.regionBlocks = regionBlocks;

@@ -685,14 +685,14 @@ final class PaperInventoryHelper {
     }
 
     /** Total flint-and-steel durability uses available across all sources (fire ignition). */
-    private static long countFlintUses(List<ItemSource> sources) {
+    static long countFlintUses(List<ItemSource> sources) {
         long total = 0;
         for (ItemSource source : sources) total += source.countFlintUses();
         return total;
     }
 
     /** Consume up to {@code amount} flint-and-steel durability across all sources; returns uses spent. */
-    private static long takeFlintUses(List<ItemSource> sources, long amount, RemovalLedger ledger) {
+    static long takeFlintUses(List<ItemSource> sources, long amount, RemovalLedger ledger) {
         if (amount <= 0) return 0;
         long remaining = amount;
         for (ItemSource source : sources) {

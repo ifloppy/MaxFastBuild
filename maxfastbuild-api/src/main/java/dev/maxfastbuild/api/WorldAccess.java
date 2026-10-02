@@ -36,5 +36,10 @@ public interface WorldAccess {
         public boolean placeEventAlreadyLogged() {
             return reason != null && reason.contains("place_event");
         }
+
+        /** True when the mutation is a durable intent that the platform will realize later as a group. */
+        public boolean placementDeferred() {
+            return reason != null && reason.contains("portal_deferred");
+        }
     }
 }
